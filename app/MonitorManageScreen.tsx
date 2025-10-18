@@ -234,8 +234,10 @@ const MonitorManageScreen = () => {
           alarms: containerSchedulesList.map((schedule: any) => {
             const dateStr = schedule.date;
             const timeStr = schedule.time;
-            const combinedDateTime = `${dateStr}T${timeStr}`;
-            return new Date(combinedDateTime);
+            // Create date in local timezone instead of UTC
+            const [year, month, day] = dateStr.split('-').map(Number);
+            const [hours, minutes] = timeStr.split(':').map(Number);
+            return new Date(year, month - 1, day, hours, minutes);
           })
         };
       }

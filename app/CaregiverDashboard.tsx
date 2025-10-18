@@ -1,25 +1,123 @@
-import React, { useState } from 'react';
-import { View, Text, TouchableOpacity, StyleSheet, Image, Modal } from 'react-native';
+import React, { useState, useEffect } from 'react';
+import { View, Text, TouchableOpacity, StyleSheet, Image, Alert, AppState, ScrollView } from 'react-native';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import MedicationNotification from './components/MedicationNotification';
+import NotificationManager from './components/NotificationManager';
+import { useNotifications } from './hooks/useNotifications';
 import { useTheme } from './context/ThemeContext';
 import { lightTheme, darkTheme } from './styles/theme';
+import BluetoothService from './services/BluetoothService';
 
 const CaregiverDashboard: React.FC = () => {
   const router = useRouter();
-  const [showNotification, setShowNotification] = useState(false);
   const { isDarkMode } = useTheme();
   const theme = isDarkMode ? darkTheme : lightTheme;
+  const { 
+    showTestAlarm, 
+    closeNotification, 
+    isModalVisible, 
+    currentNotification,
+    isLoading 
+  } = useNotifications();
+  
+  // Bluetooth and locate box state
+  const [isBluetoothConnected, setIsBluetoothConnected] = useState(false);
+  const [locateBoxActive, setLocateBoxActive] = useState(false);
+  
+  // Legacy design: no real-time notification center or monitoring dashboard
+
+  // Check Bluetooth connection status on component mount
+  useEffect(() => {
+    checkBluetoothConnection();
+    
+    // Check connection status every 3 seconds for faster response
+    const interval = setInterval(checkBluetoothConnection, 3000);
+    
+    return () => clearInterval(interval);
+  }, []);
+
+  // Also check when app becomes active (when navigating back)
+  useEffect(() => {
+    const handleAppStateChange = (nextAppState: string) => {
+      if (nextAppState === 'active') {
+        console.log('App became active - checking connection status');
+        checkBluetoothConnection();
+      }
+    };
+
+    const subscription = AppState.addEventListener('change', handleAppStateChange);
+    return () => subscription?.remove();
+  }, []);
+
+  const checkBluetoothConnection = async () => {
+    try {
+      // First check the cached status for immediate response
+      const cachedStatus = BluetoothService.getConnectionStatus();
+      setIsBluetoothConnected(cachedStatus);
+      
+      // Then verify with hardware for accuracy
+      const isConnected = await BluetoothService.isConnectionActive();
+      setIsBluetoothConnected(isConnected);
+      
+      console.log(`CaregiverDashboard connection check: ${isConnected ? 'Connected' : 'Disconnected'}`);
+    } catch (error) {
+      console.error('Error checking Bluetooth connection:', error);
+      setIsBluetoothConnected(false);
+    }
+  };
 
   const handleShowNotification = () => {
-    setShowNotification(true);
+    showTestAlarm({
+      medicationName: 'Losartan',
+      containerId: 1,
+      scheduledTime: '08:00 AM'
+    });
   };
 
   const handleDismissNotification = () => {
-    setShowNotification(false);
+    closeNotification();
   };
+
+  const handleLocateBox = async () => {
+    if (!isBluetoothConnected) {
+      Alert.alert(
+        'Bluetooth Not Connected',
+        'Please connect to your pill box first by going to Bluetooth settings.',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          { text: 'Go to Bluetooth', onPress: () => router.push('/BluetoothScreen') }
+        ]
+      );
+      return;
+    }
+
+    try {
+      if (locateBoxActive) {
+        // Stop locate box
+        const success = await BluetoothService.sendCommand('STOP_LOCATE');
+        if (success) {
+          setLocateBoxActive(false);
+          Alert.alert('Locate Box Stopped', 'Buzzer has been turned off.');
+        } else {
+          Alert.alert('Error', 'Failed to stop locate box. Please try again.');
+        }
+      } else {
+        // Start locate box
+        const success = await BluetoothService.sendCommand('LOCATE');
+        if (success) {
+          setLocateBoxActive(true);
+          Alert.alert('Locate Box Started', 'Buzzer is now buzzing to help you find the box!');
+        } else {
+          Alert.alert('Error', 'Failed to start locate box. Please try again.');
+        }
+      }
+    } catch (error) {
+      console.error('Locate box error:', error);
+      Alert.alert('Error', 'Failed to control locate box. Please check your connection.');
+    }
+  };
+
 
   const handleLogout = async () => {
     try {
@@ -31,24 +129,19 @@ const CaregiverDashboard: React.FC = () => {
   };
 
   return (
-    <View style={[styles.container, { backgroundColor: theme.background }]}>
-      <Modal
-        visible={showNotification}
-        transparent={true}
-        animationType="slide"
-        onRequestClose={handleDismissNotification}
-      >
-        <View style={[styles.modalOverlay, { backgroundColor: 'rgba(0, 0, 0, 0.5)' }]}>
-          <View style={[styles.modalContent, { backgroundColor: theme.card }]}>
-            <MedicationNotification
-              medicineName="Losartan"
-              containerId={1}
-              scheduledTime="08:00 AM"
-              onDismiss={handleDismissNotification}
-            />
-          </View>
-        </View>
-      </Modal>
+    <ScrollView 
+      style={[styles.container, { backgroundColor: theme.background }]}
+      contentContainerStyle={styles.scrollContent}
+      showsVerticalScrollIndicator={false}
+    >
+      <NotificationManager
+        visible={isModalVisible}
+        onClose={handleDismissNotification}
+        notificationData={currentNotification || undefined}
+        onNotificationDismissed={handleDismissNotification}
+      />
+      
+      
 
       {/* Header Section */}
       <View style={[styles.header, { backgroundColor: theme.card }]}>
@@ -65,9 +158,11 @@ const CaregiverDashboard: React.FC = () => {
           style={styles.logoutButton} 
           onPress={handleLogout}
         >
-          <Ionicons name="log-out-outline" size={30} color={theme.text} />
+          <Ionicons name="log-out-outline" size={24} color={theme.text} />
         </TouchableOpacity>
       </View>
+
+      
 
       {/* Logo */}
       <Image source={require('@/assets/images/pill.png')} style={styles.pillImage} />
@@ -76,18 +171,33 @@ const CaregiverDashboard: React.FC = () => {
       <View style={[styles.iconList, { backgroundColor: theme.card }]}>
         <View style={styles.iconRow}>
           <TouchableOpacity 
-            style={[styles.iconButton, { backgroundColor: theme.background }]} 
+            style={[
+              styles.iconButton, 
+              { 
+                backgroundColor: theme.background,
+                borderWidth: isBluetoothConnected ? 2 : 0,
+                borderColor: isBluetoothConnected ? theme.success : 'transparent'
+              }
+            ]} 
             onPress={() => router.push('/BluetoothScreen')}
           >
-            <Ionicons name="bluetooth" size={30} color={theme.text} />
-            <Text style={[styles.iconLabel, { color: theme.text }]}>Bluetooth</Text>
-          </TouchableOpacity>
-          <TouchableOpacity 
-            style={[styles.iconButton, { backgroundColor: theme.background }]} 
-            onPress={() => router.push('/NotificationScreen')}
-          >
-            <Ionicons name="notifications" size={30} color={theme.text} />
-            <Text style={[styles.iconLabel, { color: theme.text }]}>Notifications</Text>
+            <Ionicons 
+              name="bluetooth" 
+              size={30} 
+              color={isBluetoothConnected ? theme.success : theme.text} 
+            />
+            <Text style={[
+              styles.iconLabel, 
+              { 
+                color: isBluetoothConnected ? theme.success : theme.text,
+                fontWeight: isBluetoothConnected ? 'bold' : 'normal'
+              }
+            ]}>
+              Bluetooth
+            </Text>
+            {isBluetoothConnected && (
+              <View style={[styles.connectionIndicator, { backgroundColor: theme.success }]} />
+            )}
           </TouchableOpacity>
         </View>
         <View style={styles.iconRow}>
@@ -95,18 +205,41 @@ const CaregiverDashboard: React.FC = () => {
             style={[styles.iconButton, { backgroundColor: theme.background }]} 
             onPress={handleShowNotification}
           >
-            <Ionicons name="alarm" size={30} color={theme.text} />
+            <Ionicons name="alarm" size={24} color={theme.text} />
             <Text style={[styles.iconLabel, { color: theme.text }]}>Test Alarm</Text>
           </TouchableOpacity>
           <TouchableOpacity 
-            style={[styles.iconButton, { backgroundColor: theme.background }]} 
-            onPress={() => router.push('/LocationScreen')}
+            style={[
+              styles.iconButton, 
+              { 
+                backgroundColor: locateBoxActive ? theme.warning : theme.background,
+                borderWidth: isBluetoothConnected ? 2 : 0,
+                borderColor: isBluetoothConnected ? theme.success : 'transparent'
+              }
+            ]} 
+            onPress={handleLocateBox}
           >
-            <Ionicons name="location" size={30} color={theme.text} />
-            <Text style={[styles.iconLabel, { color: theme.text }]}>Locate Box</Text>
+            <Ionicons 
+              name="location" 
+              size={24} 
+              color={locateBoxActive ? theme.card : (isBluetoothConnected ? theme.success : theme.text)} 
+            />
+            <Text style={[
+              styles.iconLabel, 
+              { 
+                color: locateBoxActive ? theme.card : (isBluetoothConnected ? theme.success : theme.text),
+                fontWeight: locateBoxActive ? 'bold' : 'normal'
+              }
+            ]}>
+              {locateBoxActive ? 'Stop Locate' : 'Locate Box'}
+            </Text>
+            {isBluetoothConnected && (
+              <View style={[styles.connectionIndicator, { backgroundColor: theme.success }]} />
+            )}
           </TouchableOpacity>
         </View>
       </View>
+
 
       {/* Dashboard Title */}
       <Text style={[styles.subtitle, { color: theme.secondary }]}>CAREGIVER'S DASHBOARD</Text>
@@ -120,31 +253,35 @@ const CaregiverDashboard: React.FC = () => {
           <Ionicons name="information-circle" size={24} color={theme.card} />
           <Text style={[styles.buttonText, { color: theme.card }]}>INPUT ELDER'S PROFILE</Text>
         </TouchableOpacity>
-        <TouchableOpacity 
-          style={[styles.dashboardButton, { backgroundColor: theme.secondary }]}
-          onPress={() => router.push('/MonitorManageScreen')}
-        >
-          <Ionicons name="desktop" size={24} color={theme.card} />
-          <Text style={[styles.buttonText, { color: theme.card }]}>MONITOR & MANAGE</Text>
-        </TouchableOpacity>
+                    <TouchableOpacity 
+                      style={[styles.dashboardButton, { backgroundColor: theme.secondary }]}
+                      onPress={() => router.push('/MonitorManageScreen')}
+                    >
+                      <Ionicons name="desktop" size={24} color={theme.card} />
+                      <Text style={[styles.buttonText, { color: theme.card }]}>MONITOR & MANAGE</Text>
+                    </TouchableOpacity>
+                    
       </View>
-    </View>
+    </ScrollView>
   );
 };
 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
+  },
+  scrollContent: {
     alignItems: 'center',
-    padding: 20,
+    padding: 15,
+    paddingBottom: 30,
   },
   header: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
     width: '100%',
-    marginTop: 40,
-    padding: 15,
+    marginTop: 20,
+    padding: 12,
     borderRadius: 15,
     elevation: 8,
   },
@@ -160,14 +297,14 @@ const styles = StyleSheet.create({
     color: '#4A90E2',
   },
   pillImage: {
-    width: 90,
-    height: 90,
-    marginVertical: 20,
+    width: 70,
+    height: 70,
+    marginVertical: 10,
   },
   iconList: {
     width: '90%',
-    marginVertical: 20,
-    padding: 15,
+    marginVertical: 10,
+    padding: 12,
     borderRadius: 15,
     elevation: 5,
   },
@@ -177,22 +314,22 @@ const styles = StyleSheet.create({
     marginVertical: 5,
   },
   iconButton: {
-    padding: 15,
-    borderRadius: 12,
+    padding: 10,
+    borderRadius: 10,
     alignItems: 'center',
     width: '45%',
     elevation: 3,
   },
   iconLabel: {
-    marginTop: 8,
-    fontSize: 12,
+    marginTop: 5,
+    fontSize: 11,
     textAlign: 'center',
     fontWeight: '500',
   },
   subtitle: {
-    fontSize: 20,
+    fontSize: 18,
     fontWeight: 'bold',
-    marginVertical: 15,
+    marginVertical: 8,
     textAlign: 'center',
   },
   buttonColumn: {
@@ -203,32 +340,45 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    padding: 15,
-    borderRadius: 12,
-    marginVertical: 10,
+    padding: 12,
+    borderRadius: 10,
+    marginVertical: 6,
     elevation: 3,
   },
   buttonText: {
     textAlign: 'center',
-    marginLeft: 10,
+    marginLeft: 8,
     fontWeight: 'bold',
-    fontSize: 16,
-  },
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.5)',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  modalContent: {
-    width: '85%',
-    aspectRatio: 1,
-    borderRadius: 25,
-    padding: 30,
-    elevation: 5,
+    fontSize: 14,
   },
   logoutButton: {
     padding: 10,
+  },
+  connectionIndicator: {
+    position: 'absolute',
+    top: 5,
+    right: 5,
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+  },
+  statusContainer: {
+    width: '90%',
+    marginVertical: 8,
+  },
+  notificationBadge: {
+    position: 'absolute',
+    top: 5,
+    right: 5,
+    borderRadius: 10,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    minWidth: 20,
+    alignItems: 'center',
+  },
+  notificationBadgeText: {
+    fontSize: 10,
+    fontWeight: 'bold',
   },
 });
 

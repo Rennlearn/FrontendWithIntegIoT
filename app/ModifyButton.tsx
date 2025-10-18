@@ -294,8 +294,11 @@ const ModifyButton = () => {
                 user: currentUserId, // Use current user ID from token
                 medication: medication.medId, // Use medication ID (number) as required by backend
                 container: containerNum, // Add container number
-                date: alarmDate.toISOString().split('T')[0], // YYYY-MM-DD format
-                time: alarmDate.toTimeString().split(' ')[0].substring(0, 5), // HH:MM format
+                date: alarmDate.getFullYear() + '-' + 
+                      String(alarmDate.getMonth() + 1).padStart(2, '0') + '-' + 
+                      String(alarmDate.getDate()).padStart(2, '0'), // YYYY-MM-DD format (local time)
+                time: String(alarmDate.getHours()).padStart(2, '0') + ':' + 
+                      String(alarmDate.getMinutes()).padStart(2, '0'), // HH:MM format (local time)
                 status: 'Pending',
                 alertSent: false
               };
