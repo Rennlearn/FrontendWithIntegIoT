@@ -1,59 +1,95 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { 
   View, Text, StyleSheet, ScrollView, TouchableOpacity, 
-  Modal, FlatList
+  Modal, FlatList, ActivityIndicator, Alert
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import { useTheme } from './context/ThemeContext';
 import { lightTheme, darkTheme } from './styles/theme';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
-interface Medication {
+interface MedicationRow {
+  _id: string;
   containerId: number;
   medicineName: string;
   scheduledTime: string;
   date: string;
-  taken: boolean;
+  status: 'Taken' | 'Pending' | 'Missed';
 }
 
 const Adherence = () => {
   const router = useRouter();
   const { isDarkMode } = useTheme();
   const theme = isDarkMode ? darkTheme : lightTheme;
-  
-  // Example data
-  const exampleMedications: Medication[] = [
-    {
-      containerId: 1,
-      medicineName: "Paracetamol",
-      scheduledTime: "08:00 AM",
-      date: "2024-04-20",
-      taken: true
-    },
-    {
-      containerId: 2,
-      medicineName: "Vitamin C",
-      scheduledTime: "12:00 PM",
-      date: "2024-04-20",
-      taken: false
-    },
-    {
-      containerId: 3,
-      medicineName: "Multivitamin",
-      scheduledTime: "06:00 PM",
-      date: "2024-04-20",
-      taken: false
-    }
-  ];
-
-  const [medications] = useState<Medication[]>(exampleMedications);
-  const [selectedMedication, setSelectedMedication] = useState<Medication | null>(null);
+  const [loading, setLoading] = useState<boolean>(true);
+  const [medications, setMedications] = useState<MedicationRow[]>([]);
+  const [selectedMedication, setSelectedMedication] = useState<MedicationRow | null>(null);
   const [modalVisible, setModalVisible] = useState(false);
 
-  const handleMarkAsTaken = (medication: Medication) => {
-    // This is just for example, in real app this would update the API
-    console.log(`Marking medication ${medication.medicineName} as taken`);
-    setModalVisible(false);
+  const fetchAdherenceData = async () => {
+    try {
+      setLoading(true);
+      const schedulesResp = await fetch('https://pillnow-database.onrender.com/api/medication_schedules', {
+        headers: { 'Cache-Control': 'no-cache', 'Pragma': 'no-cache', 'If-Modified-Since': '0' }
+      });
+      const schedulesJson = await schedulesResp.json();
+      const schedules: any[] = schedulesJson?.data || [];
+
+      const medsResp = await fetch('https://pillnow-database.onrender.com/api/medications');
+      const medsJson = await medsResp.json();
+      const medsArray: any[] = Array.isArray(medsJson) ? medsJson : (medsJson?.data || []);
+
+      const now = new Date();
+      const rows: MedicationRow[] = schedules.map((s) => {
+        const med = medsArray.find(m => m.medId === s.medication);
+        const [y, m, d] = String(s.date).split('-').map(Number);
+        const [hh, mm] = String(s.time).split(':').map(Number);
+        const when = new Date(y, (m || 1) - 1, d, hh, mm);
+        let status: 'Taken' | 'Pending' | 'Missed' = s.status === 'Taken' ? 'Taken' : 'Pending';
+        if (status === 'Pending' && now.getTime() > when.getTime()) status = 'Missed';
+        return {
+          _id: s._id,
+          containerId: Number(s.container) || 1,
+          medicineName: med ? med.name : `ID: ${s.medication}`,
+          scheduledTime: s.time,
+          date: s.date,
+          status,
+        };
+      });
+      setMedications(rows);
+    } catch (e) {
+      Alert.alert('Error', 'Failed to load adherence data');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchAdherenceData();
+  }, []);
+
+  const handleMarkAsTaken = async (medication: MedicationRow) => {
+    try {
+      const resp = await fetch(`https://pillnow-database.onrender.com/api/medication_schedules/${medication._id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: 'Taken', alertSent: true })
+      });
+      if (!resp.ok) {
+        const putResp = await fetch(`https://pillnow-database.onrender.com/api/medication_schedules/${medication._id}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ status: 'Taken', alertSent: true })
+        });
+        if (!putResp.ok) throw new Error('Update failed');
+      }
+      setMedications(prev => prev.map(m => m._id === medication._id ? { ...m, status: 'Taken' } : m));
+      setModalVisible(false);
+      Alert.alert('Updated', 'Marked as Taken');
+    } catch (e) {
+      Alert.alert('Error', 'Failed to update status');
+    }
   };
 
   const handleGenerateReport = () => {
@@ -63,7 +99,7 @@ const Adherence = () => {
     });
   };
 
-  const renderMedicationCard = ({ item }: { item: Medication }) => (
+  const renderMedicationCard = ({ item }: { item: MedicationRow }) => (
     <TouchableOpacity 
       style={[styles.card, { backgroundColor: theme.card }]}
       onPress={() => {
@@ -74,9 +110,9 @@ const Adherence = () => {
       <View style={styles.cardHeader}>
         <Text style={[styles.containerText, { color: theme.primary }]}>Container {item.containerId}</Text>
         <Ionicons 
-          name={item.taken ? "checkmark-circle" : "time"} 
+          name={item.status === 'Taken' ? 'checkmark-circle' : item.status === 'Missed' ? 'close-circle' : 'time'} 
           size={24} 
-          color={item.taken ? theme.success : theme.warning} 
+          color={item.status === 'Taken' ? theme.success : item.status === 'Missed' ? theme.error : theme.warning} 
         />
       </View>
       <Text style={[styles.medicineName, { color: theme.text }]}>{item.medicineName}</Text>
@@ -88,6 +124,10 @@ const Adherence = () => {
         <View style={styles.detailRow}>
           <Ionicons name="calendar-outline" size={16} color={theme.textSecondary} />
           <Text style={[styles.detailText, { color: theme.textSecondary }]}>{item.date}</Text>
+        </View>
+        <View style={styles.detailRow}>
+          <Ionicons name="information-circle-outline" size={16} color={theme.textSecondary} />
+          <Text style={[styles.detailText, { color: theme.textSecondary }]}>Status: {item.status}</Text>
         </View>
       </View>
     </TouchableOpacity>
@@ -107,13 +147,20 @@ const Adherence = () => {
       </View>
 
       <View style={styles.contentContainer}>
-        <FlatList
-          data={medications}
-          renderItem={renderMedicationCard}
-          keyExtractor={(item) => item.containerId.toString()}
-          contentContainerStyle={styles.listContainer}
-          showsVerticalScrollIndicator={false}
-        />
+        {loading ? (
+          <View style={{ padding: 20 }}>
+            <ActivityIndicator size="large" color={theme.primary} />
+            <Text style={{ color: theme.text, marginTop: 8 }}>Loading adherence...</Text>
+          </View>
+        ) : (
+          <FlatList
+            data={medications}
+            renderItem={renderMedicationCard}
+            keyExtractor={(item) => item._id}
+            contentContainerStyle={styles.listContainer}
+            showsVerticalScrollIndicator={false}
+          />
+        )}
       </View>
 
       <View style={[styles.bottomContainer, { backgroundColor: theme.card, borderTopColor: theme.border }]}>
@@ -147,11 +194,9 @@ const Adherence = () => {
                   <Text style={[styles.modalText, { color: theme.text }]}>Medicine: {selectedMedication.medicineName}</Text>
                   <Text style={[styles.modalText, { color: theme.text }]}>Scheduled Time: {selectedMedication.scheduledTime}</Text>
                   <Text style={[styles.modalText, { color: theme.text }]}>Date: {selectedMedication.date}</Text>
-                  <Text style={[styles.modalText, { color: theme.text }]}>
-                    Status: {selectedMedication.taken ? 'Taken' : 'Pending'}
-                  </Text>
+                  <Text style={[styles.modalText, { color: theme.text }]}>Status: {selectedMedication.status}</Text>
                 </View>
-                {!selectedMedication.taken && (
+                {selectedMedication.status !== 'Taken' && (
                   <TouchableOpacity 
                     style={[styles.markButton, { backgroundColor: theme.success }]}
                     onPress={() => handleMarkAsTaken(selectedMedication)}

@@ -4,18 +4,21 @@ import { useRoute, useNavigation } from '@react-navigation/native';
 import * as Print from 'expo-print';
 import * as Sharing from 'expo-sharing';
 
-interface Medication {
+interface MedicationRow {
+  _id: string;
   containerId: number;
   medicineName: string;
   scheduledTime: string;
   date: string;
-  taken: boolean;
+  status: 'Taken' | 'Pending' | 'Missed';
 }
 
 const Generate = () => {
   const route = useRoute();
   const navigation = useNavigation();
-  const { adherenceData } = route.params as { adherenceData: Medication[] };
+  // Be defensive: params may be undefined depending on navigator
+  const params = (route?.params as any) || {};
+  const adherenceDataParam: string = typeof params.adherenceData === 'string' ? params.adherenceData : '[]';
 
   useEffect(() => {
     generatePDF();
@@ -23,6 +26,13 @@ const Generate = () => {
 
   const generatePDF = async () => {
     try {
+      const data: MedicationRow[] = JSON.parse(adherenceDataParam || '[]');
+      const total = data.length;
+      const taken = data.filter(d => d.status === 'Taken').length;
+      const missed = data.filter(d => d.status === 'Missed').length;
+      const pending = total - taken - missed;
+      const adherencePct = total > 0 ? Math.round((taken / total) * 100) : 0;
+
       const html = `
         <html>
           <head>
@@ -35,6 +45,7 @@ const Generate = () => {
                 color: #D14A99;
                 text-align: center;
               }
+              .summary { margin: 16px 0; padding: 12px; border: 1px solid #ddd; border-radius: 8px; }
               .container {
                 margin-bottom: 20px;
                 padding: 15px;
@@ -51,20 +62,29 @@ const Generate = () => {
               .pending {
                 color: #FFA500;
               }
+              .missed {
+                color: #E53935;
+              }
             </style>
           </head>
           <body>
             <h1>Medication Adherence Report</h1>
-            <p>Generated on: ${new Date().toLocaleDateString()}</p>
-            ${adherenceData.map(med => `
+            <p>Generated on: ${new Date().toLocaleString()}</p>
+            <div class="summary">
+              <p><strong>Total doses:</strong> ${total}</p>
+              <p><strong>Taken:</strong> ${taken} (${adherencePct}%)</p>
+              <p><strong>Missed:</strong> ${missed}</p>
+              <p><strong>Pending:</strong> ${pending}</p>
+            </div>
+            ${data.map(med => `
               <div class="container">
                 <h2 class="header">Container ${med.containerId}</h2>
                 <p><strong>Medicine:</strong> ${med.medicineName}</p>
                 <p><strong>Scheduled Time:</strong> ${med.scheduledTime}</p>
                 <p><strong>Date:</strong> ${med.date}</p>
                 <p><strong>Status:</strong> 
-                  <span class="${med.taken ? 'status' : 'pending'}">
-                    ${med.taken ? 'Taken' : 'Pending'}
+                  <span class="${med.status === 'Taken' ? 'status' : med.status === 'Missed' ? 'missed' : 'pending'}">
+                    ${med.status}
                   </span>
                 </p>
               </div>

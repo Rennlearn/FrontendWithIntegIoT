@@ -18,6 +18,7 @@ const BluetoothScreen = () => {
   const [buzzerStatus, setBuzzerStatus] = useState(false);
   const [phoneNumber, setPhoneNumber] = useState('+1234567890');
   const [locateBoxActive, setLocateBoxActive] = useState(false);
+  const [syncingRtc, setSyncingRtc] = useState(false);
 
   useEffect(() => {
     checkBluetoothPermissions();
@@ -226,6 +227,26 @@ const BluetoothScreen = () => {
     sendCommand('STOP_LOCATE'); // Stop locate box (buzzer will stop)
     setLocateBoxActive(false);
     Alert.alert('Locate Box Stopped', 'Buzzer has been turned off.');
+  };
+
+  const syncRtc = async () => {
+    setSyncingRtc(true);
+    try {
+      const now = new Date();
+      const Y = now.getFullYear();
+      const M = String(now.getMonth() + 1).padStart(2, '0');
+      const D = String(now.getDate()).padStart(2, '0');
+      const hh = String(now.getHours()).padStart(2, '0');
+      const mm = String(now.getMinutes()).padStart(2, '0');
+      const ss = String(now.getSeconds()).padStart(2, '0');
+      const msg = `SETTIME ${Y}-${M}-${D} ${hh}:${mm}:${ss}`;
+      await sendCommand(msg);
+      Alert.alert('RTC Sync', 'Phone time sent to Arduino!');
+    } catch (err) {
+      Alert.alert('Error', 'Failed to sync RTC');
+    } finally {
+      setSyncingRtc(false);
+    }
   };
 
   return (
@@ -437,6 +458,21 @@ const BluetoothScreen = () => {
             >
               <Text style={[styles.controlButtonText, { color: theme.card }]}>
                 {locateBoxActive ? 'DONE' : 'LOCATE'}
+              </Text>
+            </TouchableOpacity>
+          </View>
+
+          {/* Sync RTC Control */}
+          <View style={styles.controlRow}>
+            <Ionicons name="calendar" size={30} color={theme.primary} />
+            <Text style={[styles.controlLabel, { color: theme.text }]}>Sync RTC (SETTIME)</Text>
+            <TouchableOpacity
+              style={[styles.controlButton, { backgroundColor: theme.primary }]}
+              onPress={syncRtc}
+              disabled={syncingRtc}
+            >
+              <Text style={[styles.controlButtonText, { color: theme.card }]}>
+                {syncingRtc ? 'SYNCING...' : 'SYNC RTC'}
               </Text>
             </TouchableOpacity>
           </View>

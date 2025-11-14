@@ -530,10 +530,18 @@ const ModifyButton = () => {
           style: 'destructive',
           onPress: async () => {
             try {
-              // Since backend doesn't support DELETE, we'll filter out this schedule from display
-              // In a real implementation, you'd want to add a DELETE endpoint
-              setSchedules(prevSchedules => prevSchedules.filter(schedule => schedule._id !== scheduleId));
-              Alert.alert('Success', 'Schedule removed from display! Note: Backend DELETE endpoint needed for permanent removal.');
+              const resp = await fetch(`https://pillnow-database.onrender.com/api/medication_schedules/${scheduleId}`, {
+                method: 'DELETE',
+                headers: { 'Content-Type': 'application/json' },
+              });
+              if (!resp.ok) {
+                const txt = await resp.text();
+                throw new Error(`HTTP ${resp.status} ${txt}`);
+              }
+              // Remove locally and refresh from backend to be sure
+              setSchedules(prev => prev.filter(s => s._id !== scheduleId));
+              await loadScheduleData();
+              Alert.alert('Deleted', 'Schedule deleted successfully.');
             } catch (err) {
               console.error('Error deleting schedule:', err);
               Alert.alert('Error', `Failed to delete schedule: ${err instanceof Error ? err.message : 'Unknown error'}`);

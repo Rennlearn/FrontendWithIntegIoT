@@ -3,10 +3,12 @@ import { View, Text, Image, TouchableOpacity, Modal, FlatList, ScrollView, Style
 import DateTimePicker from "@react-native-community/datetimepicker";
 import { useNavigation } from "@react-navigation/native";
 import { Ionicons } from "@expo/vector-icons";
+import BluetoothService from './services/BluetoothService';
 import { useTheme } from './context/ThemeContext';
 import { lightTheme, darkTheme } from './styles/theme';
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { jwtDecode } from "jwt-decode";
+import verificationService from './services/verificationService';
 
 // Interface for decoded JWT token
 interface DecodedToken {
@@ -55,21 +57,25 @@ const SetScreen = () => {
   const [medications, setMedications] = useState<Medication[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [verifying, setVerifying] = useState(false);
+  const [verificationStatus, setVerificationStatus] = useState<Record<number, { status: 'pending' | 'success' | 'failed' | null; message?: string }>>({
+    1: { status: null },
+    2: { status: null },
+    3: { status: null },
+  });
+  const [pillCounts, setPillCounts] = useState<Record<number, number>>({ 1: 0, 2: 0, 3: 0 });
 
-  // Fetch medications from API and clear any existing data
+  // Remove useEffect that resets pill modal/alarm modal etc on mount
+  // Only keep fetchMedications and initial setup that doesn't cause a jump or open modals
   useEffect(() => {
     fetchMedications();
-    // Clear any existing data to start fresh
     setSelectedPills({ 1: null, 2: null, 3: null });
     setAlarms({ 1: [], 2: [], 3: [] });
     setCurrentPillSlot(null);
     setSelectedDate(new Date());
     setShowDatePicker(false);
     setShowTimePicker(false);
-    setPillModalVisible(false);
-    setAlarmModalVisible(false);
-    setConfirmModalVisible(false);
-    setWarningModalVisible(false);
+    // do NOT open any modals
   }, []);
 
   // Clear data when screen comes into focus
@@ -283,9 +289,131 @@ const SetScreen = () => {
       }
       
       const results = await Promise.all(responses.map(response => response.json()));
-      Alert.alert('Success', 'Schedule saved successfully!', [
-        { text: 'OK', onPress: () => navigation.navigate("ElderDashboard" as never) }
-      ]);
+
+      // After saving to backend, also program the Arduino over Bluetooth (optional - doesn't block verification)
+      try {
+        const isBluetoothActive = await BluetoothService.isConnectionActive();
+        if (isBluetoothActive) {
+          // Build unique list of HH:MM times from state
+          const times: string[] = [];
+          for (let containerNum = 1; containerNum <= 3; containerNum++) {
+            const containerAlarms = alarms[containerNum as PillSlot];
+            containerAlarms.forEach(alarmDate => {
+              const hhmm = String(alarmDate.getHours()).padStart(2, '0') + ':' + String(alarmDate.getMinutes()).padStart(2, '0');
+              if (!times.includes(hhmm)) times.push(hhmm);
+            });
+          }
+
+          if (times.length > 0) {
+            // Clear existing schedules on device, then add each time
+            await BluetoothService.sendCommand('SCHED CLEAR\n');
+            for (const t of times) {
+              await BluetoothService.sendCommand(`SCHED ADD ${t}\n`);
+            }
+          }
+        } else {
+          console.log('Bluetooth not connected - skipping Arduino sync (ESP32-CAM verification will still work)');
+        }
+      } catch (btErr) {
+        // Bluetooth errors are non-critical - ESP32-CAM verification works independently
+        console.warn('Bluetooth schedule sync failed (non-critical):', btErr);
+      }
+
+      // Trigger ESP32-CAM verification for containers with pills
+      // This works independently of Bluetooth - ESP32-CAMs connect via WiFi/MQTT
+      const containersToVerify: number[] = [];
+      for (let containerNum = 1; containerNum <= 3; containerNum++) {
+        if (selectedPills[containerNum as PillSlot]) {
+          containersToVerify.push(containerNum);
+        }
+      }
+
+      if (containersToVerify.length > 0) {
+        setVerifying(true);
+        try {
+          // Trigger captures for each container
+          containersToVerify.forEach(async (containerNum) => {
+            const containerId = verificationService.getContainerId(containerNum);
+            
+            // Use exact expected count from user input
+            const pillCount = pillCounts[containerNum] || 0;
+            
+            setVerificationStatus(prev => ({
+              ...prev,
+              [containerNum]: { status: 'pending', message: 'Capturing image...' }
+            }));
+
+            try {
+              await verificationService.triggerCapture(containerId, { count: pillCount });
+              
+              // Wait a bit for the capture to complete, then check result
+              setTimeout(async () => {
+                try {
+                  const result = await verificationService.getVerificationResult(containerId);
+                  setVerificationStatus(prev => ({
+                    ...prev,
+                    [containerNum]: {
+                      status: result.success && result.result?.pass_ ? 'success' : 'failed',
+                      message: result.result?.pass_ 
+                        ? `Verified: ${result.result.count} pills detected (${Math.round((result.result.confidence || 0) * 100)}% confidence)`
+                        : result.message || 'Verification failed'
+                    }
+                  }));
+
+                  // Show alert if verification failed
+                  if (!result.success || !result.result?.pass_) {
+                    Alert.alert(
+                      `Container ${containerNum} Verification Failed`,
+                      result.message || 'The pills in this container do not match the expected configuration. Please check and retry.',
+                      [{ text: 'OK' }]
+                    );
+                  }
+                } catch (checkErr) {
+                  console.error(`Error checking verification result for container ${containerNum}:`, checkErr);
+                  setVerificationStatus(prev => ({
+                    ...prev,
+                    [containerNum]: { status: 'failed', message: 'Could not check verification result' }
+                  }));
+                }
+              }, 5000); // Wait 5 seconds for capture and verification
+            } catch (verifyErr) {
+              console.error(`Error triggering verification for container ${containerNum}:`, verifyErr);
+              setVerificationStatus(prev => ({
+                ...prev,
+                [containerNum]: { 
+                  status: 'failed', 
+                  message: verifyErr instanceof Error ? verifyErr.message : 'Verification error occurred' 
+                }
+              }));
+            }
+          });
+
+          // Don't wait for all verifications, show success message immediately
+          setVerifying(false);
+          
+          Alert.alert(
+            'Success',
+            'Schedule saved successfully! Pill verification is in progress.',
+            [
+              { text: 'OK', onPress: () => navigation.navigate("ElderDashboard" as never) }
+            ]
+          );
+        } catch (verifyErr) {
+          console.error('Error triggering verification:', verifyErr);
+          setVerifying(false);
+          Alert.alert(
+            'Schedule Saved',
+            `Schedule saved successfully! ${verifyErr instanceof Error ? verifyErr.message : 'Verification may have failed.'}`,
+            [
+              { text: 'OK', onPress: () => navigation.navigate("ElderDashboard" as never) }
+            ]
+          );
+        }
+      } else {
+        Alert.alert('Success', 'Schedule saved successfully!', [
+          { text: 'OK', onPress: () => navigation.navigate("ElderDashboard" as never) }
+        ]);
+      }
     } catch (err) {
       console.error('Error saving schedule:', err);
       Alert.alert('Error', `Failed to save schedule: ${err instanceof Error ? err.message : 'Unknown error'}`);
@@ -298,7 +426,7 @@ const SetScreen = () => {
       <View style={[styles.header, { backgroundColor: theme.card }]}>
         <TouchableOpacity 
           style={styles.backButton} 
-          onPress={() => navigation.goBack()}
+          onPress={() => navigation.navigate('ElderDashboard' as never)}
         >
           <Ionicons name="arrow-back" size={30} color={theme.text} />
         </TouchableOpacity>
@@ -326,25 +454,80 @@ const SetScreen = () => {
           </TouchableOpacity>
         </View>
       ) : (
-        ([1, 2, 3] as const).map((num) => (
-          <View key={num} style={[styles.pillContainer, { backgroundColor: theme.card }]}>
-            <View>
-              <Text style={[styles.pillText, { color: theme.primary }]}>Container {num}: {selectedPills[num] || "ADD PILL"}</Text>
-              {alarms[num].map((alarm: Date, index: number) => (
-                <Text key={index} style={[styles.alarmText, { color: theme.text }]}>{alarm.toLocaleString()}</Text>
-              ))}
+        ([1, 2, 3] as const).map((num) => {
+          const verifyStatus = verificationStatus[num];
+          return (
+            <View key={num} style={[styles.pillContainer, { backgroundColor: theme.card }]}>
+              <View style={{ flex: 1 }}>
+                <Text style={[styles.pillText, { color: theme.primary }]}>Container {num}: {selectedPills[num] || "ADD PILL"}</Text>
+                {alarms[num].map((alarm: Date, index: number) => (
+                  <Text key={index} style={[styles.alarmText, { color: theme.text }]}>{alarm.toLocaleString()}</Text>
+                ))}
+                <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 8 }}>
+                  <Text style={[styles.alarmText, { color: theme.text, marginRight: 10 }]}>Expected pills:</Text>
+                  <TouchableOpacity
+                    onPress={() => setPillCounts(prev => ({ ...prev, [num]: Math.max(0, (prev[num] || 0) - 1) }))}
+                    style={{ paddingHorizontal: 10, paddingVertical: 4, backgroundColor: theme.background, borderRadius: 6, marginRight: 8 }}
+                  >
+                    <Text style={{ color: theme.text, fontSize: 16 }}>-</Text>
+                  </TouchableOpacity>
+                  <Text style={{ width: 28, textAlign: 'center', color: theme.text, fontWeight: 'bold' }}>{pillCounts[num] || 0}</Text>
+                  <TouchableOpacity
+                    onPress={() => setPillCounts(prev => ({ ...prev, [num]: (prev[num] || 0) + 1 }))}
+                    style={{ paddingHorizontal: 10, paddingVertical: 4, backgroundColor: theme.background, borderRadius: 6, marginLeft: 8 }}
+                  >
+                    <Text style={{ color: theme.text, fontSize: 16 }}>+</Text>
+                  </TouchableOpacity>
+                </View>
+                {verifyStatus?.status && (
+                  <View style={styles.verificationStatus}>
+                    {verifyStatus.status === 'pending' && (
+                      <>
+                        <ActivityIndicator size="small" color={theme.primary} />
+                        <Text style={[styles.verificationText, { color: theme.primary }]}>
+                          {verifyStatus.message || 'Verifying...'}
+                        </Text>
+                      </>
+                    )}
+                    {verifyStatus.status === 'success' && (
+                      <>
+                        <Ionicons name="checkmark-circle" size={16} color="#4CAF50" />
+                        <Text style={[styles.verificationText, { color: '#4CAF50' }]}>
+                          {verifyStatus.message || 'Verified'}
+                        </Text>
+                      </>
+                    )}
+                    {verifyStatus.status === 'failed' && (
+                      <>
+                        <Ionicons name="close-circle" size={16} color="#F44336" />
+                        <Text style={[styles.verificationText, { color: '#F44336' }]}>
+                          {verifyStatus.message || 'Verification failed'}
+                        </Text>
+                      </>
+                    )}
+                  </View>
+                )}
+              </View>
+              <TouchableOpacity onPress={() => handleAddPill(num)}>
+                <Ionicons name="add-circle-outline" size={24} color={theme.primary} />
+              </TouchableOpacity>
             </View>
-            <TouchableOpacity onPress={() => handleAddPill(num)}>
-              <Ionicons name="add-circle-outline" size={24} color={theme.primary} />
-            </TouchableOpacity>
-          </View>
-        ))
+          );
+        })
       )}
       <TouchableOpacity 
-        style={[styles.confirmButton, { backgroundColor: theme.primary }]} 
+        style={[styles.confirmButton, { backgroundColor: theme.primary, opacity: verifying ? 0.6 : 1 }]} 
         onPress={saveScheduleData}
+        disabled={verifying}
       > 
-        <Text style={[styles.confirmButtonText, { color: theme.card }]}>CONFIRM</Text>
+        {verifying ? (
+          <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+            <ActivityIndicator size="small" color={theme.card} style={{ marginRight: 10 }} />
+            <Text style={[styles.confirmButtonText, { color: theme.card }]}>VERIFYING...</Text>
+          </View>
+        ) : (
+          <Text style={[styles.confirmButtonText, { color: theme.card }]}>CONFIRM</Text>
+        )}
       </TouchableOpacity>
 
       {/* Warning Modal */}
@@ -650,6 +833,16 @@ const styles = StyleSheet.create({
   debugButtonText: {
     fontSize: 14,
     fontWeight: 'bold',
+  },
+  verificationStatus: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 8,
+    gap: 6,
+  },
+  verificationText: {
+    fontSize: 12,
+    marginLeft: 4,
   },
 });
 

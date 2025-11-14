@@ -8,6 +8,8 @@ import { useTheme } from './context/ThemeContext';
 import { lightTheme, darkTheme } from './styles/theme';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { jwtDecode } from 'jwt-decode';
+import BluetoothService from './services/BluetoothService';
+import verificationService, { VerificationResult } from './services/verificationService';
 
 // Interface for decoded JWT token
 interface DecodedToken {
@@ -26,20 +28,59 @@ const MonitorManageScreen = () => {
   const [error, setError] = useState<string | null>(null);
   const [medications, setMedications] = useState<any[]>([]);
   const [schedules, setSchedules] = useState<any[]>([]);
+  const [clockTick, setClockTick] = useState<number>(0); // force refresh for status derivation
+  const [verifications, setVerifications] = useState<Record<number, VerificationResult>>({});
+  const [loadingVerifications, setLoadingVerifications] = useState(false);
 
   // Load schedule data on component mount and when screen comes into focus
   useEffect(() => {
-    loadScheduleData();
+    const loadData = async () => {
+      await loadScheduleData();
+      await loadVerifications();
+    };
+    loadData();
   }, []);
+
+  // Load verification results
+  const loadVerifications = async () => {
+    try {
+      setLoadingVerifications(true);
+      const verificationPromises = [1, 2, 3].map(async (containerNum) => {
+        const containerId = verificationService.getContainerId(containerNum);
+        const result = await verificationService.getVerificationResult(containerId);
+        return { containerNum, result };
+      });
+
+      const results = await Promise.all(verificationPromises);
+      const verificationMap: Record<number, VerificationResult> = {};
+      results.forEach(({ containerNum, result }) => {
+        if (result.success) {
+          verificationMap[containerNum] = result;
+        }
+      });
+      setVerifications(verificationMap);
+    } catch (error) {
+      console.error('Error loading verifications:', error);
+    } finally {
+      setLoadingVerifications(false);
+    }
+  };
 
   // Refresh data when screen comes into focus
   useEffect(() => {
     const unsubscribe = navigation.addListener('focus', () => {
       loadScheduleData();
+      loadVerifications();
     });
 
     return unsubscribe;
   }, [navigation]);
+
+  // Periodically refresh derived statuses (Pending -> Missed once time passes)
+  useEffect(() => {
+    const id = setInterval(() => setClockTick((t) => t + 1), 30000);
+    return () => clearInterval(id);
+  }, []);
 
   // Get current user ID and role from JWT token
   const getCurrentUserId = async (): Promise<number> => {
@@ -180,6 +221,21 @@ const MonitorManageScreen = () => {
       
       setMedications(medsArray);
       setSchedules(sortedSchedules);
+
+      // Also sync current schedules to Arduino over Bluetooth if connected
+      try {
+        const isActive = await BluetoothService.isConnectionActive();
+        if (isActive && sortedSchedules.length > 0) {
+          // Build unique list of HH:MM times for today
+          const uniqueTimes = Array.from(new Set(sortedSchedules.map((s: any) => s.time)));
+          await BluetoothService.sendCommand('SCHED CLEAR\n');
+          for (const t of uniqueTimes) {
+            await BluetoothService.sendCommand(`SCHED ADD ${t}\n`);
+          }
+        }
+      } catch (e) {
+        console.warn('Bluetooth sync skipped:', e);
+      }
       
     } catch (err) {
       console.error('Error loading schedule data:', err);
@@ -193,6 +249,7 @@ const MonitorManageScreen = () => {
   // Manual refresh function
   const handleRefresh = async () => {
     await loadScheduleData();
+    await loadVerifications();
   };
 
   // Get container schedules
@@ -275,6 +332,21 @@ const MonitorManageScreen = () => {
 
   const containerSchedules = getContainerSchedules();
 
+  // Helper to derive status locally without mutating backend
+  const deriveStatus = (schedule: any): 'Pending' | 'Missed' | string => {
+    if (!schedule?.date || !schedule?.time) return schedule?.status || 'Pending';
+    try {
+      const [y, m, d] = String(schedule.date).split('-').map(Number);
+      const [hh, mm] = String(schedule.time).split(':').map(Number);
+      const when = new Date(y, (m || 1) - 1, d, hh, mm);
+      const now = new Date();
+      if (schedule.status === 'Pending' && now.getTime() > when.getTime()) return 'Missed';
+      return schedule.status;
+    } catch {
+      return schedule.status || 'Pending';
+    }
+  };
+
   return (
     <ScrollView style={[styles.container, { backgroundColor: theme.background }]}>
       {/* Header */}
@@ -323,10 +395,10 @@ const MonitorManageScreen = () => {
                     </Text>
                     <View style={[
                       styles.statusBadge, 
-                      { backgroundColor: schedule.status === 'Pending' ? theme.warning : theme.success }
+                      { backgroundColor: deriveStatus(schedule) === 'Pending' ? theme.warning : deriveStatus(schedule) === 'Missed' ? theme.error : theme.success }
                     ]}>
                       <Text style={[styles.statusText, { color: theme.card }]}>
-                        {schedule.status}
+                        {deriveStatus(schedule)}
                       </Text>
                     </View>
                   </View>
@@ -341,6 +413,23 @@ const MonitorManageScreen = () => {
                     <Text style={[styles.detailText, { color: theme.text }]}>
                       <Text style={styles.label}>Time:</Text> {schedule.time}
                     </Text>
+                    {verifications[parseInt(schedule.container)] && (
+                      <View style={styles.verificationBadge}>
+                        <Ionicons 
+                          name={verifications[parseInt(schedule.container)].result?.pass_ ? "checkmark-circle" : "alert-circle"} 
+                          size={16} 
+                          color={verifications[parseInt(schedule.container)].result?.pass_ ? "#4CAF50" : "#F44336"} 
+                        />
+                        <Text style={[
+                          styles.verificationDetailText, 
+                          { color: verifications[parseInt(schedule.container)].result?.pass_ ? "#4CAF50" : "#F44336" }
+                        ]}>
+                          {verifications[parseInt(schedule.container)].result?.pass_ 
+                            ? `Verified: ${verifications[parseInt(schedule.container)].result?.count || 0} pills (${Math.round((verifications[parseInt(schedule.container)].result?.confidence || 0) * 100)}%)`
+                            : 'Verification failed'}
+                        </Text>
+                      </View>
+                    )}
                   </View>
                 </View>
               );
@@ -514,6 +603,19 @@ const styles = StyleSheet.create({
   emptyText: {
     fontSize: 16,
     textAlign: 'center',
+  },
+  verificationBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 8,
+    padding: 6,
+    borderRadius: 6,
+    backgroundColor: 'rgba(76, 175, 80, 0.1)',
+    gap: 6,
+  },
+  verificationDetailText: {
+    fontSize: 12,
+    fontWeight: '500',
   },
 });
 

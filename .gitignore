@@ -2,6 +2,7 @@
 
 # dependencies
 node_modules/
+.npm-cache/
 
 # Expo
 .expo/
@@ -36,3 +37,22 @@ yarn-error.*
 *.tsbuildinfo
 
 app-example
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+env/
+
+# Large model files
+*.pkl
+*.pt
+*.h5
+*.pth
+*.onnx
+*.pb
