@@ -324,8 +324,11 @@ const SetScreen = () => {
         console.warn('Bluetooth schedule sync failed (non-critical):', btErr);
       }
 
+      // Camera verification disabled - skipping ESP32-CAM verification
+      // TODO: Re-enable when camera hardware is available
       // Trigger ESP32-CAM verification for containers with pills
       // This works independently of Bluetooth - ESP32-CAMs connect via WiFi/MQTT
+      /*
       const containersToVerify: number[] = [];
       for (let containerNum = 1; containerNum <= 3; containerNum++) {
         if (selectedPills[containerNum as PillSlot]) {
@@ -419,6 +422,12 @@ const SetScreen = () => {
           { text: 'OK', onPress: () => navigation.navigate("ElderDashboard" as never) }
         ]);
       }
+      */
+      
+      // Show success message without verification
+      Alert.alert('Success', 'Schedule saved successfully!', [
+        { text: 'OK', onPress: () => navigation.navigate("ElderDashboard" as never) }
+      ]);
     } catch (err) {
       console.error('Error saving schedule:', err);
       Alert.alert('Error', `Failed to save schedule: ${err instanceof Error ? err.message : 'Unknown error'}`);

@@ -226,16 +226,34 @@ const MonitorManageScreen = () => {
         });
       }
       
-      // Sort by schedule ID (highest first) and take top 3, then arrange by container number
-      const sortedSchedules = userSchedules
-        .sort((a: any, b: any) => b.scheduleId - a.scheduleId) // Sort by highest schedule ID first
-        .slice(0, 3) // Take top 3 highest schedule IDs
-        .sort((a: any, b: any) => {
-          // Then arrange by container number (1, 2, 3)
-          const containerA = parseInt(a.container);
-          const containerB = parseInt(b.container);
-          return containerA - containerB;
-        });
+      // Group schedules by container and get the latest schedule for each container
+      const schedulesByContainer: Record<number, any[]> = {};
+      userSchedules.forEach((schedule: any) => {
+        const containerNum = parseInt(schedule.container) || 1;
+        if (!schedulesByContainer[containerNum]) {
+          schedulesByContainer[containerNum] = [];
+        }
+        schedulesByContainer[containerNum].push(schedule);
+      });
+      
+      // Get the latest schedule (highest scheduleId) for each container
+      const latestSchedules: any[] = [];
+      for (let containerNum = 1; containerNum <= 3; containerNum++) {
+        const containerSchedules = schedulesByContainer[containerNum] || [];
+        if (containerSchedules.length > 0) {
+          // Sort by scheduleId (highest first) and take the first one (latest)
+          const latestSchedule = containerSchedules
+            .sort((a: any, b: any) => b.scheduleId - a.scheduleId)[0];
+          latestSchedules.push(latestSchedule);
+        }
+      }
+      
+      // Sort by container number (1, 2, 3)
+      const sortedSchedules = latestSchedules.sort((a: any, b: any) => {
+        const containerA = parseInt(a.container);
+        const containerB = parseInt(b.container);
+        return containerA - containerB;
+      });
       
       setMedications(medsArray);
       setSchedules(sortedSchedules);
