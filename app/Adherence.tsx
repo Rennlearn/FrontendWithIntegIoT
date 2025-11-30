@@ -30,8 +30,18 @@ const Adherence = () => {
   const fetchAdherenceData = async () => {
     try {
       setLoading(true);
+      const token = await AsyncStorage.getItem('token');
+      const headers: HeadersInit = {
+        'Content-Type': 'application/json',
+        'Cache-Control': 'no-cache',
+        'Pragma': 'no-cache',
+        'If-Modified-Since': '0'
+      };
+      if (token) {
+        headers['Authorization'] = `Bearer ${token.trim()}`;
+      }
       const schedulesResp = await fetch('https://pillnow-database.onrender.com/api/medication_schedules', {
-        headers: { 'Cache-Control': 'no-cache', 'Pragma': 'no-cache', 'If-Modified-Since': '0' }
+        headers
       });
       const schedulesJson = await schedulesResp.json();
       const schedules: any[] = schedulesJson?.data || [];
@@ -71,15 +81,22 @@ const Adherence = () => {
 
   const handleMarkAsTaken = async (medication: MedicationRow) => {
     try {
+      const token = await AsyncStorage.getItem('token');
+      const headers: HeadersInit = {
+        'Content-Type': 'application/json'
+      };
+      if (token) {
+        headers['Authorization'] = `Bearer ${token.trim()}`;
+      }
       const resp = await fetch(`https://pillnow-database.onrender.com/api/medication_schedules/${medication._id}`, {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({ status: 'Taken', alertSent: true })
       });
       if (!resp.ok) {
         const putResp = await fetch(`https://pillnow-database.onrender.com/api/medication_schedules/${medication._id}`, {
           method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
+          headers,
           body: JSON.stringify({ status: 'Taken', alertSent: true })
         });
         if (!putResp.ok) throw new Error('Update failed');

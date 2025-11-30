@@ -128,12 +128,18 @@ const ModifyButton = () => {
   // Load schedule data from database (same as Monitor & Manage)
   const loadScheduleData = async () => {
     try {
+      const token = await AsyncStorage.getItem('token');
+      const headers: HeadersInit = {
+        'Content-Type': 'application/json',
+        'Cache-Control': 'no-cache',
+        'Pragma': 'no-cache',
+        'If-Modified-Since': '0'
+      };
+      if (token) {
+        headers['Authorization'] = `Bearer ${token.trim()}`;
+      }
       const schedulesResponse = await fetch('https://pillnow-database.onrender.com/api/medication_schedules', {
-        headers: {
-          'Cache-Control': 'no-cache',
-          'Pragma': 'no-cache',
-          'If-Modified-Since': '0'
-        }
+        headers
       });
       const schedulesData = await schedulesResponse.json();
       
@@ -160,7 +166,16 @@ const ModifyButton = () => {
   // Load saved schedule data from database
   const loadSavedData = async () => {
     try {
-      const response = await fetch('https://pillnow-database.onrender.com/api/medication_schedules');
+      const token = await AsyncStorage.getItem('token');
+      const headers: HeadersInit = {
+        'Content-Type': 'application/json'
+      };
+      if (token) {
+        headers['Authorization'] = `Bearer ${token.trim()}`;
+      }
+      const response = await fetch('https://pillnow-database.onrender.com/api/medication_schedules', {
+        headers
+      });
       
       if (!response.ok) {
         throw new Error(`HTTP error! status: ${response.status}`);
@@ -261,7 +276,16 @@ const ModifyButton = () => {
       const currentUserId = await getCurrentUserId();
       
       // First, get existing schedules to determine which ones to update vs create
-      const existingSchedulesResponse = await fetch('https://pillnow-database.onrender.com/api/medication_schedules');
+      const token = await AsyncStorage.getItem('token');
+      const headers: HeadersInit = {
+        'Content-Type': 'application/json'
+      };
+      if (token) {
+        headers['Authorization'] = `Bearer ${token.trim()}`;
+      }
+      const existingSchedulesResponse = await fetch('https://pillnow-database.onrender.com/api/medication_schedules', {
+        headers
+      });
       const existingSchedulesData = await existingSchedulesResponse.json();
       const existingSchedules = existingSchedulesData.data || [];
       
@@ -319,11 +343,15 @@ const ModifyButton = () => {
         
         if (existingSchedule) {
           // Update existing schedule using PUT
+          const putHeaders: HeadersInit = {
+            'Content-Type': 'application/json',
+          };
+          if (token) {
+            putHeaders['Authorization'] = `Bearer ${token.trim()}`;
+          }
           return fetch(`https://pillnow-database.onrender.com/api/medication_schedules/${existingSchedule._id}`, {
             method: 'PUT',
-            headers: {
-              'Content-Type': 'application/json',
-            },
+            headers: putHeaders,
             body: JSON.stringify({
               ...record,
               scheduleId: existingSchedule.scheduleId // Keep the existing scheduleId
@@ -331,11 +359,15 @@ const ModifyButton = () => {
           });
         } else {
           // Create new schedule using POST
+          const postHeaders: HeadersInit = {
+            'Content-Type': 'application/json',
+          };
+          if (token) {
+            postHeaders['Authorization'] = `Bearer ${token.trim()}`;
+          }
           return fetch('https://pillnow-database.onrender.com/api/medication_schedules', {
             method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-            },
+            headers: postHeaders,
             body: JSON.stringify(record),
           });
         }
@@ -487,11 +519,16 @@ const ModifyButton = () => {
       };
 
       // Send PUT request to update the existing schedule using MongoDB _id
+      const token = await AsyncStorage.getItem('token');
+      const headers: HeadersInit = {
+        'Content-Type': 'application/json',
+      };
+      if (token) {
+        headers['Authorization'] = `Bearer ${token.trim()}`;
+      }
       const response = await fetch(`https://pillnow-database.onrender.com/api/medication_schedules/${editingSchedule._id}`, {
         method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers,
         body: JSON.stringify(updatedSchedule),
       });
 
@@ -530,9 +567,16 @@ const ModifyButton = () => {
           style: 'destructive',
           onPress: async () => {
             try {
+              const token = await AsyncStorage.getItem('token');
+              const headers: HeadersInit = {
+                'Content-Type': 'application/json'
+              };
+              if (token) {
+                headers['Authorization'] = `Bearer ${token.trim()}`;
+              }
               const resp = await fetch(`https://pillnow-database.onrender.com/api/medication_schedules/${scheduleId}`, {
                 method: 'DELETE',
-                headers: { 'Content-Type': 'application/json' },
+                headers,
               });
               if (!resp.ok) {
                 const txt = await resp.text();

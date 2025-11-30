@@ -1,5 +1,7 @@
 import { Platform, PermissionsAndroid, NativeModules, NativeEventEmitter, Linking, Alert } from 'react-native';
 
+const isDevEnv = typeof globalThis !== 'undefined' && Boolean((globalThis as any).__DEV__);
+
 export interface BluetoothDevice {
   name: string;
   address: string;
@@ -312,7 +314,9 @@ class BluetoothService {
           return isActive;
         }
       }
-      console.log(`Connection status (fallback): ${this.isConnected ? 'Connected' : 'Disconnected'}`);
+      if (isDevEnv) {
+        console.log(`Connection status (fallback): ${this.isConnected ? 'Connected' : 'Disconnected'}`);
+      }
       return this.isConnected;
     } catch (error) {
       console.error('Failed to check connection status:', error);

@@ -9,16 +9,16 @@ import { useTheme } from './context/ThemeContext';
 import { lightTheme, darkTheme } from './styles/theme';
 import BluetoothService from './services/BluetoothService';
 
+const isDevEnv = typeof globalThis !== 'undefined' && Boolean((globalThis as any).__DEV__);
+
 const CaregiverDashboard: React.FC = () => {
   const router = useRouter();
   const { isDarkMode } = useTheme();
   const theme = isDarkMode ? darkTheme : lightTheme;
   const { 
-    showTestAlarm, 
     closeNotification, 
     isModalVisible, 
-    currentNotification,
-    isLoading 
+    currentNotification
   } = useNotifications();
   
   // Bluetooth and locate box state
@@ -41,7 +41,9 @@ const CaregiverDashboard: React.FC = () => {
   useEffect(() => {
     const handleAppStateChange = (nextAppState: string) => {
       if (nextAppState === 'active') {
-        console.log('App became active - checking connection status');
+        if (isDevEnv) {
+          console.log('App became active - checking connection status');
+        }
         checkBluetoothConnection();
       }
     };
@@ -60,19 +62,13 @@ const CaregiverDashboard: React.FC = () => {
       const isConnected = await BluetoothService.isConnectionActive();
       setIsBluetoothConnected(isConnected);
       
-      console.log(`CaregiverDashboard connection check: ${isConnected ? 'Connected' : 'Disconnected'}`);
+      if (isDevEnv) {
+        console.log(`CaregiverDashboard connection check: ${isConnected ? 'Connected' : 'Disconnected'}`);
+      }
     } catch (error) {
       console.error('Error checking Bluetooth connection:', error);
       setIsBluetoothConnected(false);
     }
-  };
-
-  const handleShowNotification = () => {
-    showTestAlarm({
-      medicationName: 'Losartan',
-      containerId: 1,
-      scheduledTime: '08:00 AM'
-    });
   };
 
   const handleDismissNotification = () => {
@@ -167,12 +163,12 @@ const CaregiverDashboard: React.FC = () => {
       {/* Logo */}
       <Image source={require('@/assets/images/pill.png')} style={styles.pillImage} />
 
-      {/* Icons Row */}
-      <View style={[styles.iconList, { backgroundColor: theme.card }]}>
-        <View style={styles.iconRow}>
+      {/* Action Grid */}
+      <View style={[styles.actionSection, { backgroundColor: theme.card }]}>
+        <View style={styles.actionRow}>
           <TouchableOpacity 
             style={[
-              styles.iconButton, 
+              styles.actionButton, 
               { 
                 backgroundColor: theme.background,
                 borderWidth: isBluetoothConnected ? 2 : 0,
@@ -183,14 +179,14 @@ const CaregiverDashboard: React.FC = () => {
           >
             <Ionicons 
               name="bluetooth" 
-              size={30} 
+              size={36} 
               color={isBluetoothConnected ? theme.success : theme.text} 
             />
             <Text style={[
               styles.iconLabel, 
               { 
                 color: isBluetoothConnected ? theme.success : theme.text,
-                fontWeight: isBluetoothConnected ? 'bold' : 'normal'
+                fontWeight: isBluetoothConnected ? 'bold' : '600'
               }
             ]}>
               Bluetooth
@@ -199,18 +195,9 @@ const CaregiverDashboard: React.FC = () => {
               <View style={[styles.connectionIndicator, { backgroundColor: theme.success }]} />
             )}
           </TouchableOpacity>
-        </View>
-        <View style={styles.iconRow}>
-          <TouchableOpacity 
-            style={[styles.iconButton, { backgroundColor: theme.background }]} 
-            onPress={handleShowNotification}
-          >
-            <Ionicons name="alarm" size={24} color={theme.text} />
-            <Text style={[styles.iconLabel, { color: theme.text }]}>Test Alarm</Text>
-          </TouchableOpacity>
           <TouchableOpacity 
             style={[
-              styles.iconButton, 
+              styles.actionButton, 
               { 
                 backgroundColor: locateBoxActive ? theme.warning : theme.background,
                 borderWidth: isBluetoothConnected ? 2 : 0,
@@ -221,14 +208,14 @@ const CaregiverDashboard: React.FC = () => {
           >
             <Ionicons 
               name="location" 
-              size={24} 
+              size={36} 
               color={locateBoxActive ? theme.card : (isBluetoothConnected ? theme.success : theme.text)} 
             />
             <Text style={[
               styles.iconLabel, 
               { 
                 color: locateBoxActive ? theme.card : (isBluetoothConnected ? theme.success : theme.text),
-                fontWeight: locateBoxActive ? 'bold' : 'normal'
+                fontWeight: locateBoxActive ? 'bold' : '600'
               }
             ]}>
               {locateBoxActive ? 'Stop Locate' : 'Locate Box'}
@@ -238,8 +225,14 @@ const CaregiverDashboard: React.FC = () => {
             )}
           </TouchableOpacity>
         </View>
+        <TouchableOpacity 
+          style={[styles.monitorButton, { backgroundColor: theme.secondary }]}
+          onPress={() => router.push('/MonitorManageScreen')}
+        >
+          <Ionicons name="desktop" size={32} color={theme.card} />
+          <Text style={[styles.buttonText, { color: theme.card }]}>MONITOR & MANAGE</Text>
+        </TouchableOpacity>
       </View>
-
 
       {/* Dashboard Title */}
       <Text style={[styles.subtitle, { color: theme.secondary }]}>CAREGIVER'S DASHBOARD</Text>
@@ -253,14 +246,6 @@ const CaregiverDashboard: React.FC = () => {
           <Ionicons name="information-circle" size={24} color={theme.card} />
           <Text style={[styles.buttonText, { color: theme.card }]}>INPUT ELDER'S PROFILE</Text>
         </TouchableOpacity>
-                    <TouchableOpacity 
-                      style={[styles.dashboardButton, { backgroundColor: theme.secondary }]}
-                      onPress={() => router.push('/MonitorManageScreen')}
-                    >
-                      <Ionicons name="desktop" size={24} color={theme.card} />
-                      <Text style={[styles.buttonText, { color: theme.card }]}>MONITOR & MANAGE</Text>
-                    </TouchableOpacity>
-                    
       </View>
     </ScrollView>
   );
@@ -301,28 +286,28 @@ const styles = StyleSheet.create({
     height: 70,
     marginVertical: 10,
   },
-  iconList: {
+  actionSection: {
     width: '90%',
     marginVertical: 10,
-    padding: 12,
-    borderRadius: 15,
+    padding: 16,
+    borderRadius: 20,
     elevation: 5,
   },
-  iconRow: {
+  actionRow: {
     flexDirection: 'row',
-    justifyContent: 'space-around',
-    marginVertical: 5,
+    justifyContent: 'space-between',
+    gap: 12,
   },
-  iconButton: {
-    padding: 10,
-    borderRadius: 10,
+  actionButton: {
+    flex: 1,
+    paddingVertical: 30,
+    borderRadius: 16,
     alignItems: 'center',
-    width: '45%',
     elevation: 3,
   },
   iconLabel: {
     marginTop: 5,
-    fontSize: 11,
+    fontSize: 16,
     textAlign: 'center',
     fontWeight: '500',
   },
@@ -350,6 +335,15 @@ const styles = StyleSheet.create({
     marginLeft: 8,
     fontWeight: 'bold',
     fontSize: 14,
+  },
+  monitorButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 16,
+    paddingVertical: 22,
+    borderRadius: 16,
+    gap: 12,
   },
   logoutButton: {
     padding: 10,

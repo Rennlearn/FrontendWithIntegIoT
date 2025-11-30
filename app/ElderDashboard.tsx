@@ -1,16 +1,16 @@
 import React, { useState, useEffect } from "react";
-import { View, Text, TouchableOpacity, Image, StyleSheet, Modal, Alert, AppState, ScrollView } from "react-native";
+import { View, Text, TouchableOpacity, Image, StyleSheet, Alert, AppState, ScrollView } from "react-native";
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import MedicationNotification from './components/MedicationNotification';
 import { useTheme } from './context/ThemeContext';
 import { lightTheme, darkTheme } from './styles/theme';
 import BluetoothService from './services/BluetoothService';
 
+const isDevEnv = typeof globalThis !== 'undefined' && Boolean((globalThis as any).__DEV__);
+
 const ElderDashboard = () => {
   const router = useRouter();
-  const [showNotification, setShowNotification] = useState(false);
   const [isBluetoothConnected, setIsBluetoothConnected] = useState(false);
   const [locateBoxActive, setLocateBoxActive] = useState(false);
   const { isDarkMode } = useTheme();
@@ -32,7 +32,9 @@ const ElderDashboard = () => {
   useEffect(() => {
     const handleAppStateChange = (nextAppState: string) => {
       if (nextAppState === 'active') {
-        console.log('App became active - checking connection status');
+        if (isDevEnv) {
+          console.log('App became active - checking connection status');
+        }
         checkBluetoothConnection();
       }
     };
@@ -51,19 +53,13 @@ const ElderDashboard = () => {
       const isConnected = await BluetoothService.isConnectionActive();
       setIsBluetoothConnected(isConnected);
       
-      console.log(`ElderDashboard connection check: ${isConnected ? 'Connected' : 'Disconnected'}`);
+      if (isDevEnv) {
+        console.log(`ElderDashboard connection check: ${isConnected ? 'Connected' : 'Disconnected'}`);
+      }
     } catch (error) {
       console.error('Error checking Bluetooth connection:', error);
       setIsBluetoothConnected(false);
     }
-  };
-
-  const handleShowNotification = async () => {
-    setShowNotification(true);
-  };
-
-  const handleDismissNotification = () => {
-    setShowNotification(false);
   };
 
   const handleLocateBox = async () => {
@@ -121,26 +117,6 @@ const ElderDashboard = () => {
       contentContainerStyle={styles.scrollContent}
       showsVerticalScrollIndicator={false}
     >
-      <Modal
-        visible={showNotification}
-        transparent={true}
-        animationType="slide"
-        onRequestClose={handleDismissNotification}
-      >
-        <View style={[styles.modalOverlay, { backgroundColor: 'rgba(0, 0, 0, 0.5)' }]}>
-          <View style={[styles.modalContent, { backgroundColor: theme.card }]}>
-            <MedicationNotification
-              medicineName="Metformin"
-              containerId={2}
-              scheduledTime="08:00 AM"
-              onDismiss={handleDismissNotification}
-            />
-          </View>
-        </View>
-      </Modal>
-      
-      
-
       {/* Header */}
       <View style={[styles.header, { backgroundColor: theme.card }]}>
         <TouchableOpacity 
@@ -171,28 +147,18 @@ const ElderDashboard = () => {
       {/* Elder's Dashboard */}
       <Text style={[styles.dashboardTitle, { color: theme.secondary }]}>ELDER'S DASHBOARD</Text>
 
-      <View style={[styles.iconRow, { backgroundColor: theme.card }]}>
-        <View style={styles.iconGrid}>
+      <View style={[styles.actionSection, { backgroundColor: theme.card }]}>
+        <View style={styles.actionRow}>
           <TouchableOpacity 
-            style={[styles.iconButton, { backgroundColor: theme.background }]} 
+            style={[styles.actionButton, { backgroundColor: theme.background }]} 
             onPress={() => router.push('/BluetoothScreen')}
           >
-            <Ionicons name="bluetooth" size={24} color={theme.text} />
+            <Ionicons name="bluetooth" size={36} color={theme.text} />
             <Text style={[styles.iconLabel, { color: theme.text }]}>Bluetooth</Text>
-          </TouchableOpacity>
-          
-        </View>
-        <View style={styles.iconGrid}>
-          <TouchableOpacity 
-            style={[styles.iconButton, { backgroundColor: theme.background }]} 
-            onPress={handleShowNotification}
-          >
-            <Ionicons name="alarm" size={24} color={theme.text} />
-            <Text style={[styles.iconLabel, { color: theme.text }]}>Test Alarm</Text>
           </TouchableOpacity>
           <TouchableOpacity 
             style={[
-              styles.iconButton, 
+              styles.actionButton, 
               { 
                 backgroundColor: locateBoxActive ? theme.warning : theme.background,
                 borderWidth: isBluetoothConnected ? 2 : 0,
@@ -203,14 +169,14 @@ const ElderDashboard = () => {
           >
             <Ionicons 
               name="location" 
-              size={24} 
+              size={36} 
               color={locateBoxActive ? theme.card : (isBluetoothConnected ? theme.success : theme.text)} 
             />
             <Text style={[
               styles.iconLabel, 
               { 
                 color: locateBoxActive ? theme.card : (isBluetoothConnected ? theme.success : theme.text),
-                fontWeight: locateBoxActive ? 'bold' : 'normal'
+                fontWeight: locateBoxActive ? 'bold' : '600'
               }
             ]}>
               {locateBoxActive ? 'Stop Locate' : 'Locate Box'}
@@ -220,16 +186,14 @@ const ElderDashboard = () => {
             )}
           </TouchableOpacity>
         </View>
+        <TouchableOpacity 
+          style={[styles.monitorButton, { backgroundColor: theme.secondary }]}
+          onPress={() => router.push('/MonitorManageScreen')}
+        >
+          <Ionicons name="desktop" size={32} color={theme.card} />
+          <Text style={[styles.buttonText, { color: theme.card }]}>MONITOR & MANAGE</Text>
+        </TouchableOpacity>
       </View>
-
-      {/* Monitor & Manage Button */}
-      <TouchableOpacity 
-        style={[styles.dashboardButton, styles.monitorButton, { backgroundColor: theme.secondary }]}
-        onPress={() => router.push('/MonitorManageScreen')}
-      >
-        <Ionicons name="desktop" size={24} color={theme.card} />
-        <Text style={[styles.buttonText, { color: theme.card }]}>MONITOR & MANAGE</Text>
-      </TouchableOpacity>
       
       
     </ScrollView>
@@ -276,29 +240,30 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
     marginVertical: 8,
   },
-  iconRow: {
+  actionSection: {
     width: '90%',
     marginVertical: 10,
-    padding: 12,
-    borderRadius: 15,
+    padding: 16,
+    borderRadius: 20,
     elevation: 5,
   },
-  iconGrid: {
+  actionRow: {
     flexDirection: 'row',
-    justifyContent: 'space-around',
-    marginVertical: 5,
+    justifyContent: 'space-between',
+    gap: 12,
   },
-  iconButton: {
-    padding: 10,
-    borderRadius: 10,
+  actionButton: {
+    flex: 1,
+    paddingVertical: 30,
+    borderRadius: 16,
     alignItems: 'center',
-    width: '45%',
     elevation: 3,
   },
   iconLabel: {
     marginTop: 5,
-    fontSize: 11,
+    fontSize: 16,
     textAlign: 'center',
+    fontWeight: '600',
   },
   dashboardButton: {
     flexDirection: 'row',
@@ -310,7 +275,13 @@ const styles = StyleSheet.create({
     elevation: 3,
   },
   monitorButton: {
-    backgroundColor: '#D14A99',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 16,
+    paddingVertical: 22,
+    borderRadius: 16,
+    gap: 12,
   },
   buttonText: {
     textAlign: 'center',

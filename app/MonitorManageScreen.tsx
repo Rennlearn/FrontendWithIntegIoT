@@ -138,7 +138,19 @@ const MonitorManageScreen = () => {
   // Get latest schedule ID
   const getLatestScheduleId = async (): Promise<number> => {
     try {
-      const response = await fetch('https://pillnow-database.onrender.com/api/medication_schedules');
+      const token = await AsyncStorage.getItem('token');
+      const headers: HeadersInit = {
+        'Content-Type': 'application/json',
+        'Cache-Control': 'no-cache',
+        'Pragma': 'no-cache',
+        'If-Modified-Since': '0'
+      };
+      if (token) {
+        headers['Authorization'] = `Bearer ${token.trim()}`;
+      }
+      const response = await fetch('https://pillnow-database.onrender.com/api/medication_schedules', {
+        headers
+      });
       const data = await response.json();
       const allSchedules = data.data || [];
       
@@ -177,12 +189,18 @@ const MonitorManageScreen = () => {
       // Normalize medications to an array regardless of API wrapper shape
       const medsArray = Array.isArray(medicationsData) ? medicationsData : (medicationsData?.data || []);
       
+      const token = await AsyncStorage.getItem('token');
+      const scheduleHeaders: HeadersInit = {
+        'Content-Type': 'application/json',
+        'Cache-Control': 'no-cache',
+        'Pragma': 'no-cache',
+        'If-Modified-Since': '0'
+      };
+      if (token) {
+        scheduleHeaders['Authorization'] = `Bearer ${token.trim()}`;
+      }
       const schedulesResponse = await fetch('https://pillnow-database.onrender.com/api/medication_schedules', {
-        headers: {
-          'Cache-Control': 'no-cache',
-          'Pragma': 'no-cache',
-          'If-Modified-Since': '0'
-        }
+        headers: scheduleHeaders
       });
       const schedulesData = await schedulesResponse.json();
       

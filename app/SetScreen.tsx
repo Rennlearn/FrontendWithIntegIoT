@@ -268,12 +268,17 @@ const SetScreen = () => {
       }
       
       // Send each schedule record individually
+      const token = await AsyncStorage.getItem('token');
+      const headers: HeadersInit = {
+        'Content-Type': 'application/json',
+      };
+      if (token) {
+        headers['Authorization'] = `Bearer ${token.trim()}`;
+      }
       const promises = scheduleRecords.map(record => 
         fetch('https://pillnow-database.onrender.com/api/medication_schedules', {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
+          headers,
           body: JSON.stringify(record),
         })
       );
