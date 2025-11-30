@@ -7,10 +7,10 @@
 static const char* WIFI_SSID = "YOUR_WIFI_SSID";
 static const char* WIFI_PASS = "YOUR_WIFI_PASSWORD";
 
-static const char* MQTT_HOST = "10.134.156.91";    // Mosquitto/Broker host
+static const char* MQTT_HOST = "10.56.196.91";    // Mosquitto/Broker host
 static const uint16_t MQTT_PORT = 1883;
 
-static const char* BACKEND_HOST = "10.134.156.91"; // Node backend host
+static const char* BACKEND_HOST = "10.56.196.91"; // Node backend host
 static const uint16_t BACKEND_PORT = 5001;         // Node backend port (changed from 5000 due to AirTunes conflict)
 
 static const char* DEVICE_ID = "container1";         // Unique per ESP32-CAM: container1|container2|container3
@@ -39,6 +39,9 @@ PubSubClient mqttClient(wifiClient);
 #define VSYNC_GPIO_NUM    25
 #define HREF_GPIO_NUM     23
 #define PCLK_GPIO_NUM     22
+
+// Flash LED pin (built-in LED on most ESP32-CAM boards)
+static const gpio_num_t FLASH_GPIO_NUM = GPIO_NUM_4;
 
 // Topics
 String topicCmd = String("pillnow/") + DEVICE_ID + "/cmd";
@@ -76,9 +79,10 @@ void setup() {
   config.pin_reset = RESET_GPIO_NUM;
   config.xclk_freq_hz = 20000000;
   config.pixel_format = PIXFORMAT_JPEG;
-  config.frame_size = FRAMESIZE_XGA;  // tweak for quality/speed
+  config.frame_size = FRAMESIZE_VGA;  // start with VGA to avoid FB overflow
   config.jpeg_quality = 12;           // 10-12 good balance
   config.fb_count = 1;
+  config.fb_location = CAMERA_FB_IN_PSRAM;
 
   if (psramFound()) {
     config.fb_location = CAMERA_FB_IN_PSRAM;
@@ -91,7 +95,40 @@ void setup() {
   esp_err_t err = esp_camera_init(&config);
   if (err != ESP_OK) {
     Serial.printf("Camera init failed with error 0x%x\n", err);
+  } else {
+    // Configure camera sensor for better pill detection with flash
+    sensor_t *s = esp_camera_sensor_get();
+    if (s) {
+      // Adjust exposure and brightness for flash photography
+      s->set_brightness(s, 0);        // 0 = normal brightness (range: -2 to 2)
+      s->set_contrast(s, 0);         // 0 = normal contrast (range: -2 to 2)
+      s->set_saturation(s, 0);       // 0 = normal saturation (range: -2 to 2)
+      s->set_special_effect(s, 0);    // 0 = no effect
+      s->set_whitebal(s, 1);          // 1 = auto white balance
+      s->set_awb_gain(s, 1);         // 1 = auto white balance gain
+      s->set_wb_mode(s, 0);          // 0 = auto white balance mode
+      s->set_exposure_ctrl(s, 1);    // 1 = auto exposure
+      s->set_aec2(s, 0);             // 0 = disable AEC2 (auto exposure control 2)
+      s->set_ae_level(s, 0);         // 0 = normal exposure level (range: -2 to 2)
+      s->set_aec_value(s, 300);      // AEC value (0-1200), lower = brighter, higher = darker
+      s->set_gain_ctrl(s, 1);        // 1 = auto gain control
+      s->set_agc_gain(s, 0);         // 0 = auto gain (range: 0-30)
+      s->set_gainceiling(s, (gainceiling_t)6); // Gain ceiling (0-6), lower = less gain
+      s->set_bpc(s, 0);              // 0 = disable black pixel correction
+      s->set_wpc(s, 1);              // 1 = enable white pixel correction
+      s->set_raw_gma(s, 1);          // 1 = enable raw gamma
+      s->set_lenc(s, 1);             // 1 = enable lens correction
+      s->set_hmirror(s, 0);          // 0 = no horizontal mirror
+      s->set_vflip(s, 0);            // 0 = no vertical flip
+      s->set_dcw(s, 1);              // 1 = enable downsize EN
+      s->set_colorbar(s, 0);         // 0 = disable color bar
+      Serial.println("Camera sensor configured for flash photography");
+    }
   }
+
+  // Flash LED setup
+  pinMode(FLASH_GPIO_NUM, OUTPUT);
+  digitalWrite(FLASH_GPIO_NUM, LOW);
 
   ensureWifi();
 
@@ -210,7 +247,38 @@ static void handleMqttMessage(char* topic, byte* payload, unsigned int length) {
 }
 
 static bool captureAndUpload(const char* container, const char* expectedJson) {
+  // Configure camera for flash photography before turning on flash
+  sensor_t *s = esp_camera_sensor_get();
+  if (s) {
+    // Reduce exposure and gain to prevent overexposure from flash
+    s->set_aec_value(s, 200);        // Lower AEC value = less exposure (prevents overexposure)
+    s->set_agc_gain(s, 5);           // Lower gain = less amplification (range: 0-30)
+    s->set_gainceiling(s, (gainceiling_t)4); // Lower gain ceiling = less max gain
+    s->set_ae_level(s, -1);         // Slightly darker exposure level
+    delay(50); // Allow sensor to adjust
+  }
+  
+  // Turn on flash at reduced intensity (using PWM if possible, or just turn on)
+  // Note: GPIO_NUM_4 on ESP32-CAM is typically a simple digital pin, not PWM-capable
+  // For better control, you could use an external LED driver, but for now we'll use timing
+  digitalWrite(FLASH_GPIO_NUM, HIGH);
+  delay(200); // Allow flash to stabilize and camera to adjust exposure (increased from 150ms)
+  
+  // Capture frame
   camera_fb_t* fb = esp_camera_fb_get();
+  
+  // Turn off flash immediately after capture
+  digitalWrite(FLASH_GPIO_NUM, LOW);
+  
+  // Restore camera settings for normal operation
+  if (s) {
+    delay(50); // Small delay before restoring settings
+    s->set_aec_value(s, 300);        // Restore normal AEC
+    s->set_agc_gain(s, 0);           // Restore auto gain
+    s->set_gainceiling(s, (gainceiling_t)6); // Restore normal gain ceiling
+    s->set_ae_level(s, 0);           // Restore normal exposure level
+  }
+
   if (!fb) {
     Serial.println("Camera capture failed");
     return false;

@@ -56,3 +56,15 @@ env/
 *.pth
 *.onnx
 *.pb
+
+# Editor files
+*.swp
+*.swo
+*~
+
+# Log files
+*.log
+backend.log
+
+# Captured images (can be large)
+backend/captures/

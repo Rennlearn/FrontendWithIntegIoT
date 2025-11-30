@@ -1,32 +1,30 @@
 #include <SoftwareSerial.h>
 #include <Wire.h>
 #include "RTClib.h"
-#include <SPI.h>
-#include <SD.h>
 
-#define LED_PIN 8
 #define BUZZER_PIN 7
-#define CHIP_SELECT 10
 
-SoftwareSerial sim(4, 5);
+// Individual container indicator LEDs (via transistor/MOSFET drivers)
+#define LED_CONTAINER1_PIN 8
+#define LED_CONTAINER2_PIN 9
+#define LED_CONTAINER3_PIN 6
+
+// SIM800L GSM Module (commented out - uncomment to enable)
+// SoftwareSerial sim(4, 5);
 SoftwareSerial btSerial(2, 3);
 RTC_DS3231 rtc;
-File myFile;
 
-char phoneNumber[] = "+639633800442";
+// char phoneNumber[] = "+639633800442";
 bool locateBoxActive = false;
 unsigned long lastLocateBuzz = 0;
-unsigned long ledOnTime = 0;
-bool ledBlinking = false;
-unsigned long lastBlinkTime = 0;
-int blinkCount = 0;
-bool ledState = false;
+bool locateBuzzerState = false; // Track buzzer state for locate
 
 // ===== Scheduling (Medication Alarm) =====
 #define MAX_SCHEDULES 8
 struct DailySchedule {
   uint8_t hour;
   uint8_t minute;
+  uint8_t container; // 1, 2, or 3 - which container this alarm is for
   bool inUse;
   int lastTriggeredYmd; // yyyymmdd to ensure one trigger per day
 };
@@ -36,128 +34,182 @@ bool alarmActive = false;
 unsigned long lastAlarmToggle = 0;
 unsigned long alarmStartTime = 0;
 const unsigned long alarmMaxDurationMs = 60000; // 60 seconds
+uint8_t activeContainerLED = 0; // Track which container LED should be on (0 = none, 1-3 = container)
 
-void logToSD(const __FlashStringHelper *event, const __FlashStringHelper *data);
 void startLocateBox();
 void stopLocateBox();
-void sendSMS(const __FlashStringHelper *msg);
-void callNumber();
-void sendTimeSMS();
-void RecieveMessage();
+// SIM800L functions (commented out - uncomment to enable)
+// void sendSMS(const __FlashStringHelper *msg);
+// String readSIMResponse(unsigned long timeout = 2000);
+// void testSMS();
+// void checkSMSStatus();
+// void diagnoseSIM800L();
+// void callNumber();
+// void RecieveMessage();
 void handleCommand(const char *cmd);
 void blinkLEDandBuzz();
-String getTimestamp();
-void checkSchedules();
+String sanitizeCommand(String input);
 void startAlarm();
 void stopAlarm();
-void addSchedule(uint8_t hour, uint8_t minute);
-void clearSchedules();
-void listSchedules();
-int todayYmd();
-// RTC diagnostics
-void printRtcOnce();
-bool rtcDebug = false;
-unsigned long lastRtcDebug = 0;
-void setRtcFromString(const String &cmd);
+void setContainerLight(uint8_t container, bool on);
+void startAlarmForContainer(uint8_t container);
+void stopAlarmForContainer(uint8_t container);
 
 void setup() {
   Serial.begin(9600);
-  sim.begin(9600);
+  delay(1000);
+  // SIM800L initialization (commented out - uncomment to enable)
+  // sim.begin(9600);
   btSerial.begin(9600);
 
-  pinMode(LED_PIN, OUTPUT);
   pinMode(BUZZER_PIN, OUTPUT);
+  pinMode(LED_CONTAINER1_PIN, OUTPUT);
+  pinMode(LED_CONTAINER2_PIN, OUTPUT);
+  pinMode(LED_CONTAINER3_PIN, OUTPUT);
+  digitalWrite(LED_CONTAINER1_PIN, LOW);
+  digitalWrite(LED_CONTAINER2_PIN, LOW);
+  digitalWrite(LED_CONTAINER3_PIN, LOW);
+  digitalWrite(BUZZER_PIN, LOW);
 
   if (!rtc.begin()) {
     Serial.println(F("RTC not found!"));
-    while (1);
-  }
-
-  if (rtc.lostPower()) {
-    Serial.println(F("RTC lost power, setting time!"));
-    rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
-  }
-
-  if (!SD.begin(CHIP_SELECT)) {
-    Serial.println(F("SD card failed! Running without SD."));
   } else {
-    logToSD(F("SYSTEM_START"), F("PillNow IoT system started"));
+    if (rtc.lostPower()) {
+      rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+    }
   }
 
-  sim.println("AT");
-  delay(500);
-  sim.println("AT+CMGF=1");
-  delay(500);
-  sim.println("AT+CNMI=1,2,0,0,0");
-  delay(500);
 
-  Serial.println(F("System ready!"));
+  // SIM800L initialization (commented out - uncomment to enable)
+  // delay(2000);
+  // while (sim.available()) sim.read();
+  // sim.println("AT");
+  // delay(1000);
+  // if (readSIMResponse(2000).indexOf("OK") >= 0) {
+  //   sim.println("AT+CMGF=1");
+  //   delay(500);
+  //   sim.println("AT+CNMI=1,2,0,0,0");
+  //   delay(500);
+  // }
+  Serial.println(F("Ready"));
+}
+
+// Helper function to sanitize input - remove non-printable and invalid characters
+String sanitizeCommand(String input) {
+  String result = "";
+  for (int i = 0; i < input.length(); i++) {
+    char c = input.charAt(i);
+    // Only keep printable ASCII characters (32-126) and newline/carriage return
+    if ((c >= 32 && c <= 126) || c == '\n' || c == '\r' || c == '\t') {
+      // Fix common Bluetooth corruption patterns
+      if (c == '@') {
+        result += 'D';  // @ often replaces D
+      } else if (c == '#') {
+        result += 'H';  // # sometimes replaces H
+      } else if (c == 'Q' && i > 0 && result.length() > 0 && result.charAt(result.length() - 1) == 'R') {
+        // RQ often replaces SCH - try to fix it
+        result.setCharAt(result.length() - 1, 'S');
+        result += "CH";
+      } else {
+        result += c;
+      }
+    }
+  }
+  return result;
 }
 
 void loop() {
   if (Serial.available()) {
     String cmd = Serial.readStringUntil('\n');
+    cmd = sanitizeCommand(cmd);
     cmd.trim();
-    handleCommand(cmd.c_str());
+    cmd.replace("\r", "");
+    cmd.replace("\n", "");
+    if (cmd.length() > 0) {
+      handleCommand(cmd.c_str());
+    }
   }
 
   if (btSerial.available()) {
     String cmd = btSerial.readStringUntil('\n');
+    cmd = sanitizeCommand(cmd);
     cmd.trim();
-    handleCommand(cmd.c_str());
-  }
-
-  // LED blinking handler
-  if (ledBlinking && millis() - lastBlinkTime >= 200) {
-    ledState = !ledState;
-    digitalWrite(LED_PIN, ledState);
-    lastBlinkTime = millis();
-    blinkCount++;
-    if (blinkCount >= 10) {
-      ledBlinking = false;
-      digitalWrite(LED_PIN, LOW);
+    cmd.replace("\r", "");
+    cmd.replace("\n", "");
+    
+    // Additional check: if command contains too many invalid chars, ignore it
+    int validChars = 0;
+    int invalidChars = 0;
+    for (int i = 0; i < cmd.length(); i++) {
+      char c = cmd.charAt(i);
+      if ((c >= 32 && c <= 126) || c == ' ' || c == ':') {
+        validChars++;
+      } else {
+        invalidChars++;
+      }
+    }
+    
+    // Only process if:
+    // 1. Command is not empty
+    // 2. At least 70% of characters are valid (stricter than before)
+    // 3. Command length is reasonable (not too short, not too long)
+    if (cmd.length() > 0 && cmd.length() < 100 && validChars * 10 >= cmd.length() * 7) {
+      handleCommand(cmd.c_str());
+    } else if (cmd.length() > 0) {
+      // Log corrupted command but don't process it
+      Serial.print(F("Ignoring corrupted command: ["));
+      Serial.print(cmd);
+      Serial.println(F("]"));
+      // Don't send to Bluetooth to avoid feedback loop
     }
   }
 
-  // Stop after 5 sec if not locating and no alarm is active
-  if (!locateBoxActive && !alarmActive && millis() - ledOnTime > 5000) {
-    digitalWrite(LED_PIN, LOW);
-    digitalWrite(BUZZER_PIN, LOW);
-  }
-
-  // Locate buzzing
-  if (locateBoxActive && millis() - lastLocateBuzz >= 500) {
-    digitalWrite(BUZZER_PIN, !digitalRead(BUZZER_PIN));
-    lastLocateBuzz = millis();
-  }
-
-  // Alarm buzzing (medication schedule)
+  // Alarm buzzing (medication schedule) - has priority over locate
   if (alarmActive) {
     unsigned long nowMs = millis();
     if (nowMs - lastAlarmToggle >= 400) {
       digitalWrite(BUZZER_PIN, !digitalRead(BUZZER_PIN));
       lastAlarmToggle = nowMs;
     }
+    // CRITICAL: Ensure container LED stays on while alarm is active - check every loop
+    if (activeContainerLED > 0) {
+      // Force LED on - don't just call setContainerLight, directly write to pin
+      switch (activeContainerLED) {
+        case 1: digitalWrite(LED_CONTAINER1_PIN, HIGH); break;
+        case 2: digitalWrite(LED_CONTAINER2_PIN, HIGH); break;
+        case 3: digitalWrite(LED_CONTAINER3_PIN, HIGH); break;
+      }
+    }
     // auto-stop after max duration
     if (nowMs - alarmStartTime >= alarmMaxDurationMs) {
       stopAlarm();
     }
+  } else if (locateBoxActive) {
+    // Handle locate buzzer - only if alarm is not active
+    unsigned long nowMs = millis();
+    if (nowMs - lastLocateBuzz >= 500) {
+      locateBuzzerState = !locateBuzzerState; // Toggle state
+      digitalWrite(BUZZER_PIN, locateBuzzerState ? HIGH : LOW);
+      lastLocateBuzz = nowMs;
+    }
+    // Ensure container LEDs are off during locate (not an alarm)
+    if (activeContainerLED > 0) {
+      setContainerLight(activeContainerLED, false);
+      activeContainerLED = 0;
+    }
+  } else {
+    // If not locating and no alarm, ensure buzzer is off
+    digitalWrite(BUZZER_PIN, LOW);
+    // Also turn off all container LEDs when alarm is not active
+    if (activeContainerLED > 0) {
+      setContainerLight(activeContainerLED, false);
+      activeContainerLED = 0;
+    }
   }
 
-  RecieveMessage();
-
-  // Check schedules once per loop (RTC granularity handles matching)
+  // SIM800L message receiving (commented out - uncomment to enable)
+  // RecieveMessage();
   checkSchedules();
-
-  // RTC debug streaming (once per second)
-  if (rtcDebug && millis() - lastRtcDebug >= 1000) {
-    String ts = getTimestamp();
-    Serial.print(F("RTC_NOW "));
-    Serial.println(ts);
-    btSerial.print(F("RTC_NOW "));
-    btSerial.println(ts);
-    lastRtcDebug = millis();
-  }
 }
 
 // ===== Helper Functions =====
@@ -165,258 +217,532 @@ void handleCommand(const char *cmd) {
   // Preserve raw for argument parsing
   String raw = String(cmd);
   raw.trim();
+  // Remove any remaining newline/carriage return
+  raw.replace("\r", "");
+  raw.replace("\n", "");
+  
+  if (raw.length() == 0) return; // Empty command, ignore
+  
+  // Check commands that need full string with spaces FIRST (before normalization)
+  // Create uppercase version for comparison, but keep raw for parsing
+  String upper = raw; 
+  upper.toUpperCase();
+  upper.trim();
+  
+  // Check SETTIME
+  if (upper.startsWith("SETTIME")) {
+    setRtcFromString(raw);
+    return;
+  }
+  
+  // Check SCHED commands - handle corrupted versions (e.g., "SCE@CLEAR", "RQADD", etc.)
+  // First check for CLEAR command (even if corrupted)
+  if (upper.indexOf("CLEAR") >= 0 && (upper.indexOf("SCHED") >= 0 || upper.indexOf("SCE") >= 0 || upper.indexOf("SC") >= 0)) {
+    clearSchedules();
+    Serial.println(F("SCHEDULES_CLEARED"));
+    btSerial.println(F("SCHEDULES_CLEARED"));
+    return;
+  }
+  
+  // Check for ADD command - handle various corruption patterns
+  // Patterns: "SCHED ADD", "SCE ADD", "RQADD", "SCH ADD", etc.
+  // If we see "ADD" followed by a time pattern (HH:MM), treat it as schedule add
+  // Also handle cases where "ADD" appears without proper prefix (corruption)
+  if (upper.indexOf("ADD") >= 0) {
+    int addIdx = upper.indexOf("ADD");
+    if (addIdx >= 0) {
+      // Extract everything after "ADD"
+      String afterAdd = raw.substring(addIdx + 3);
+      afterAdd.trim();
+      
+      
+      // Look for time pattern (HH:MM) - this is the key indicator
+      int colon = afterAdd.indexOf(':');
+      if (colon > 0 && colon < (int)afterAdd.length() - 1) {
+        // Found time pattern - this is definitely a schedule add command
+        // Extract time (HH:MM format)
+        String timeToken = afterAdd.substring(0, colon + 3); // Get up to MM
+        if (timeToken.length() > colon + 3) {
+          timeToken = timeToken.substring(0, colon + 3);
+        }
+        timeToken.trim();
+        
+        // Extract container number (after time, could be space-separated or directly after)
+        String containerToken = "";
+        int spaceAfterTime = afterAdd.indexOf(' ', colon);
+        if (spaceAfterTime > 0 && spaceAfterTime + 1 < (int)afterAdd.length()) {
+          containerToken = afterAdd.substring(spaceAfterTime + 1);
+          containerToken.trim();
+        } else {
+          // No space - look for number directly after time
+          String rest = afterAdd.substring(colon + 3);
+          rest.trim();
+          // Find first digit 1-3
+          for (int i = 0; i < rest.length(); i++) {
+            char ch = rest.charAt(i);
+            if (ch >= '1' && ch <= '3') {
+              containerToken = String(ch);
+              break;
+            }
+          }
+        }
+        
+        // Parse time
+        int h = timeToken.substring(0, colon).toInt();
+        int m = timeToken.substring(colon + 1).toInt();
+        uint8_t container = 1;
+        
+        // Parse container
+        if (containerToken.length() > 0) {
+          containerToken.toUpperCase();
+          if (containerToken.startsWith("CONTAINER")) {
+            int c = containerToken.substring(9).toInt();
+            if (c >= 1 && c <= 3) container = (uint8_t)c;
+          } else {
+            int c = containerToken.toInt();
+            if (c >= 1 && c <= 3) container = (uint8_t)c;
+          }
+        }
+        
+        // Validate and add schedule
+        if (h >= 0 && h < 24 && m >= 0 && m < 60) {
+          addSchedule((uint8_t)h, (uint8_t)m, container);
+          char msgBuf[40];
+          snprintf(msgBuf, sizeof(msgBuf), "SCHEDULE_ADDED %02d:%02d C%d", h, m, container);
+          Serial.println(msgBuf);
+          btSerial.println(msgBuf);
+          return;
+        } else {
+          Serial.println(F("SCHEDULE_ADD_INVALID_TIME"));
+          btSerial.println(F("SCHEDULE_ADD_INVALID_TIME"));
+          return;
+        }
+      } else {
+        // ADD command found but no time pattern - likely corrupted
+        Serial.print(F("SCHEDULE_ADD_MISSING_TIME: ["));
+        Serial.print(afterAdd);
+        Serial.println(F("]"));
+        btSerial.println(F("SCHEDULE_ADD_MISSING_TIME"));
+        return;
+      }
+    }
+  }
+  
+  // Check for SCHED commands (normal or corrupted) - legacy check
+  if (upper.startsWith("SCHED") || (upper.startsWith("SCE") && upper.length() >= 3)) {
+    if (upper.indexOf("ADD") >= 0) {
+      // Already handled above, but keep for compatibility
+      return;
+    }
+    if (upper.indexOf("CLEAR") >= 0) {
+      clearSchedules();
+      Serial.println(F("SCHEDULES_CLEARED"));
+      btSerial.println(F("SCHEDULES_CLEARED"));
+      return;
+    }
+    if (upper.indexOf("LIST") >= 0) {
+      listSchedules();
+      return;
+    }
+    Serial.println(F("SCHEDULE_INVALID"));
+    btSerial.println(F("SCHEDULE_INVALID"));
+    return;
+  }
+  
   // Also build a normalized version for simple commands
-  String upper = raw; upper.toUpperCase();
   String normalized = "";
   for (size_t i = 0; i < upper.length(); i++) {
     char ch = upper.charAt(i);
     if (ch != ' ' && ch != '_') { normalized += ch; }
   }
 
-  if (normalized == "S") {
-    sendSMS(F("Medication reminder!"));
-    return;
-  }
-  if (normalized == "C") { callNumber(); return; }
+  // SIM800L commands (commented out - uncomment to enable)
+  // if (normalized == "S") {
+  //   sendSMS(F("Medication reminder!"));
+  //   return;
+  // }
+  // if (normalized == "SMSTEST") {
+  //   testSMS();
+  //   return;
+  // }
+  // if (normalized == "SMSSTATUS") {
+  //   checkSMSStatus();
+  //   return;
+  // }
+  // if (normalized == "SIMDIAG") {
+  //   diagnoseSIM800L();
+  //   return;
+  // }
+  // if (normalized == "C") { callNumber(); return; }
   if (normalized == "LOCATE") { startLocateBox(); return; }
   if (normalized == "STOP" || normalized == "STOPLOCATE") { stopLocateBox(); stopAlarm(); return; }
-  if (normalized == "TIME") { sendTimeSMS(); return; }
   // ALARM TEST, STOP
   if (normalized == "ALARMTEST") { startAlarm(); return; }
   if (normalized == "ALARMSTOP") { stopAlarm(); return; }
-
-  // SETTIME YYYY-MM-DD HH:MM:SS
-  if (upper.startsWith("SETTIME")) { setRtcFromString(raw); return; }
-
-  // RTC diagnostics commands
-  if (normalized == "RTC?" || normalized == "RTC") { printRtcOnce(); return; }
-  {
-    String up2 = upper;
-    if (up2.startsWith("RTC") && up2.indexOf("DEBUG") >= 0) {
-      if (up2.indexOf("ON") >= 0) {
-        rtcDebug = true;
-        Serial.println(F("RTC_DEBUG_ON"));
-        btSerial.println(F("RTC_DEBUG_ON"));
-        return;
-      }
-      if (up2.indexOf("OFF") >= 0) {
-        rtcDebug = false;
-        Serial.println(F("RTC_DEBUG_OFF"));
-        btSerial.println(F("RTC_DEBUG_OFF"));
+  // Test alarm for specific container: ALARMTEST1, ALARMTEST2, ALARMTEST3
+  if (normalized.startsWith("ALARMTEST")) {
+    String containerStr = normalized.substring(9);
+    if (containerStr.length() > 0) {
+      int container = containerStr.toInt();
+      if (container >= 1 && container <= 3) {
+        startAlarmForContainer((uint8_t)container);
         return;
       }
     }
+    startAlarm();
+    return;
   }
 
-  // Scheduling commands (raw parsing with spaces):
-  // Formats:
-  //   SCHED ADD HH:MM
-  //   SCHED CLEAR
-  //   SCHED LIST
-  {
-    String up = raw; up.toUpperCase();
-    if (up.startsWith("SCHED")) {
-      if (up.indexOf("ADD") >= 0) {
-        // Extract last token as HH:MM
-        int spaceIdx = raw.lastIndexOf(' ');
-        if (spaceIdx > 0 && spaceIdx + 1 < (int)raw.length()) {
-          String timeToken = raw.substring(spaceIdx + 1);
-          int colon = timeToken.indexOf(':');
-          if (colon > 0) {
-            int h = timeToken.substring(0, colon).toInt();
-            int m = timeToken.substring(colon + 1).toInt();
-            if (h >= 0 && h < 24 && m >= 0 && m < 60) {
-              addSchedule((uint8_t)h, (uint8_t)m);
-              String msg = "SCHEDULE_ADDED "; msg += timeToken;
-              Serial.println(msg); btSerial.println(msg);
-              logToSD(F("SCHED_ADD"), F("Added HH:MM"));
-              return;
-            }
-          }
-        }
-        Serial.println(F("SCHEDULE_ADD_INVALID"));
-        btSerial.println(F("SCHEDULE_ADD_INVALID"));
-        return;
-      }
-      if (up.indexOf("CLEAR") >= 0) {
-        clearSchedules();
-        Serial.println(F("SCHEDULES_CLEARED"));
-        btSerial.println(F("SCHEDULES_CLEARED"));
-        logToSD(F("SCHED_CLEAR"), F("Cleared"));
-        return;
-      }
-      if (up.indexOf("LIST") >= 0) {
-        listSchedules();
-        return;
-      }
-    }
-  }
 
-  Serial.println(F("Unknown command"));
+  Serial.print(F("Unknown command: [")); Serial.print(raw); Serial.print(F("] (normalized: [")); Serial.print(normalized); Serial.println(F("]"));
 }
 
-void sendSMS(const __FlashStringHelper *msg) {
-  Serial.println(F("Sending SMS..."));
-  sim.print(F("AT+CMGS=\""));
-  sim.print(phoneNumber);
-  sim.println(F("\""));
-  delay(500);
-  sim.print(F("PillNow: "));
-  sim.println(msg);
-  sim.println((char)26);
-  delay(1000);
-  blinkLEDandBuzz();
-  logToSD(F("SMS_SENT"), F("Reminder sent"));
-}
+// SIM800L SMS Functions (commented out - uncomment to enable)
+// void sendSMS(const __FlashStringHelper *msg) {
+//   sim.print(F("AT+CMGS=\""));
+//   sim.print(phoneNumber);
+//   sim.println(F("\""));
+//   delay(500);
+//   sim.print(F("PillNow: "));
+//   sim.println(msg);
+//   sim.println((char)26);
+//   delay(1000);
+//   blinkLEDandBuzz();
+// }
+//
+// String readSIMResponse(unsigned long timeout = 2000) {
+//   String response = "";
+//   unsigned long startTime = millis();
+//   while (millis() - startTime < timeout) {
+//     if (sim.available()) {
+//       char c = sim.read();
+//       response += c;
+//       if (c == '\n') {
+//         delay(50);
+//       }
+//     }
+//   }
+//   return response;
+// }
+//
+// void testSMS() {
+//   Serial.println(F("SMS TEST"));
+//   while (sim.available()) sim.read();
+//   sim.println(F("AT"));
+//   delay(1000);
+//   String r = readSIMResponse(2000);
+//   if (r.indexOf("OK") >= 0) {
+//     sim.println(F("AT+CSQ"));
+//     delay(500);
+//     Serial.println(readSIMResponse(1000));
+//     sendSMS(F("Test"));
+//     delay(2000);
+//     Serial.println(readSIMResponse(2000));
+//   } else {
+//     Serial.println(F("NO RESPONSE"));
+//   }
+// }
+//
+// void checkSMSStatus() {
+//   Serial.println(F("SMS STATUS"));
+//   while (sim.available()) sim.read();
+//   sim.println(F("AT"));
+//   delay(1000);
+//   String r = readSIMResponse(2000);
+//   if (r.length() > 0) {
+//     Serial.println(r);
+//     sim.println(F("AT+CSQ"));
+//     delay(500);
+//     Serial.println(readSIMResponse(1000));
+//     sim.println(F("AT+CREG?"));
+//     delay(500);
+//     Serial.println(readSIMResponse(1000));
+//   } else {
+//     Serial.println(F("NO RESPONSE"));
+//   }
+// }
+//
+// void diagnoseSIM800L() {
+//   Serial.println(F("SIM800L DIAG"));
+//   while (sim.available()) sim.read();
+//   sim.println("AT");
+//   delay(2000);
+//   String r = readSIMResponse(2000);
+//   if (r.length() > 0) {
+//     Serial.print(F("OK: "));
+//     Serial.println(r);
+//   } else {
+//     Serial.println(F("NO RESPONSE"));
+//     Serial.println(F("Check: TX->Pin4, RX->Pin5, Power 3.7-4.2V, GND"));
+//   }
+// }
+//
+// void callNumber() {
+//   sim.print(F("ATD"));
+//   sim.print(phoneNumber);
+//   sim.println(F(";"));
+//   delay(1000);
+//   blinkLEDandBuzz();
+// }
 
-void callNumber() {
-  Serial.println(F("Calling..."));
-  sim.print(F("ATD"));
-  sim.print(phoneNumber);
-  sim.println(F(";"));
-  delay(1000);
-  blinkLEDandBuzz();
-  logToSD(F("CALL_SENT"), F("Call made"));
-}
-
-void sendTimeSMS() {
-  String timeNow = getTimestamp();
-  sim.print(F("AT+CMGS=\""));
-  sim.print(phoneNumber);
-  sim.println(F("\""));
-  delay(500);
-  sim.print(F("Current time: "));
-  sim.println(timeNow);
-  sim.println((char)26);
-  delay(1000);
-}
 
 void startLocateBox() {
+  if (alarmActive) stopAlarm();
   locateBoxActive = true;
+  lastLocateBuzz = millis();
+  locateBuzzerState = true;
   digitalWrite(BUZZER_PIN, HIGH);
-  Serial.println(F("Locate started"));
   btSerial.println(F("LOCATE_STARTED"));
-  logToSD(F("LOCATE_START"), F("Locate mode active"));
 }
 
 void stopLocateBox() {
   locateBoxActive = false;
+  locateBuzzerState = false;
   digitalWrite(BUZZER_PIN, LOW);
-  // Ensure LED/buzzer related transient states are cleared immediately
-  ledBlinking = false;
-  blinkCount = 0;
-  digitalWrite(LED_PIN, LOW);
   lastLocateBuzz = millis();
-  Serial.println(F("Locate stopped"));
+  delay(10);
   btSerial.println(F("LOCATE_STOPPED"));
-  logToSD(F("LOCATE_STOP"), F("Locate mode stopped"));
 }
 
-void RecieveMessage() {
-  if (sim.available()) {
-    String msg = sim.readString();
-    msg.trim();
-    if (msg.indexOf("LOCATE") >= 0) startLocateBox();
-    else if (msg.indexOf("STOP") >= 0) stopLocateBox();
-  }
-}
+// SIM800L message receiving (commented out - uncomment to enable)
+// void RecieveMessage() {
+//   if (sim.available()) {
+//     String msg = sim.readString();
+//     msg.trim();
+//     if (msg.indexOf("LOCATE") >= 0) startLocateBox();
+//     else if (msg.indexOf("STOP") >= 0) stopLocateBox();
+//   }
+// }
 
-String getTimestamp() {
-  DateTime now = rtc.now();
-  char buf[25];
-  snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d",
-           now.year(), now.month(), now.day(),
-           now.hour(), now.minute(), now.second());
-  return String(buf);
-}
-
-void printRtcOnce() {
-  String ts = getTimestamp();
-  Serial.print(F("RTC_NOW "));
-  Serial.println(ts);
-  btSerial.print(F("RTC_NOW "));
-  btSerial.println(ts);
-}
 
 void blinkLEDandBuzz() {
-  ledBlinking = true;
-  blinkCount = 0;
   digitalWrite(BUZZER_PIN, HIGH);
-  ledOnTime = millis();
+  delay(200);
+  digitalWrite(BUZZER_PIN, LOW);
 }
 
-void logToSD(const __FlashStringHelper *event, const __FlashStringHelper *data) {
-  if (!SD.begin(CHIP_SELECT)) return;
-  myFile = SD.open("log.txt", FILE_WRITE);
-  if (myFile) {
-    String entry = String("[") + getTimestamp() + "] " + String(event) + ": " + String(data);
-    myFile.println(entry);
-    myFile.close();
-  }
-}
 
 // ===== Scheduling helpers =====
 void startAlarm() {
+  if (alarmActive) return;
   alarmActive = true;
   alarmStartTime = millis();
   lastAlarmToggle = 0;
   digitalWrite(BUZZER_PIN, HIGH);
-  digitalWrite(LED_PIN, HIGH);
   btSerial.println(F("ALARM_STARTED"));
-  Serial.println(F("ALARM_STARTED"));
-  logToSD(F("ALARM_START"), F("Triggered by schedule"));
+  delay(10);
 }
 
 void stopAlarm() {
   if (!alarmActive) return;
+  uint8_t stoppedContainer = activeContainerLED; // Save container before clearing
   alarmActive = false;
   digitalWrite(BUZZER_PIN, LOW);
-  digitalWrite(LED_PIN, LOW);
-  btSerial.println(F("ALARM_STOPPED"));
-  Serial.println(F("ALARM_STOPPED"));
-  logToSD(F("ALARM_STOP"), F("Stopped"));
-}
-
-int todayYmd() {
-  DateTime now = rtc.now();
-  return now.year() * 10000 + now.month() * 100 + now.day();
-}
-
-void checkSchedules() {
-  DateTime now = rtc.now();
-  int ymd = now.year() * 10000 + now.month() * 100 + now.day();
-  for (int i = 0; i < MAX_SCHEDULES; i++) {
-    if (!schedules[i].inUse) continue;
-    if (schedules[i].hour == now.hour() && schedules[i].minute == now.minute()) {
-      if (schedules[i].lastTriggeredYmd != ymd) {
-        schedules[i].lastTriggeredYmd = ymd;
-        startAlarm();
-      }
-    }
-    // Reset lastTriggered for missed days automatically when day changes handled by ymd compare
+  if (activeContainerLED > 0) {
+    setContainerLight(activeContainerLED, false);
+    activeContainerLED = 0;
+  }
+  // Send ALARM_STOPPED with container info for ESP32-CAM capture
+  if (stoppedContainer > 0) {
+    char msgBuf[32];
+    snprintf(msgBuf, sizeof(msgBuf), "ALARM_STOPPED C%d", stoppedContainer);
+    Serial.println(msgBuf);
+    btSerial.println(msgBuf);
+  } else {
+    btSerial.println(F("ALARM_STOPPED"));
   }
 }
 
-void addSchedule(uint8_t hour, uint8_t minute) {
+void setContainerLight(uint8_t container, bool on) {
+  uint8_t pin = 0;
+  switch (container) {
+    case 1: pin = LED_CONTAINER1_PIN; break;
+    case 2: pin = LED_CONTAINER2_PIN; break;
+    case 3: pin = LED_CONTAINER3_PIN; break;
+    default: return;
+  }
+  if (pin > 0) {
+    digitalWrite(pin, on ? HIGH : LOW);
+    delay(5);
+  }
+}
+
+void startAlarmForContainer(uint8_t container) {
+  if (activeContainerLED > 0 && activeContainerLED != container) {
+    setContainerLight(activeContainerLED, false);
+  }
+  startAlarm();
+  activeContainerLED = container;
+  setContainerLight(container, true);
+  delay(10);
+}
+
+void stopAlarmForContainer(uint8_t container) {
+  stopAlarm(); // This will turn off the LED if it matches activeContainerLED
+  // If a different container, just turn off that specific one
+  if (activeContainerLED == container) {
+    activeContainerLED = 0;
+  }
+}
+
+void checkSchedules() {
+  if (!rtc.begin()) {
+    Serial.println(F("RTC not initialized!"));
+    return;
+  }
+  DateTime now = rtc.now();
+  if (now.year() < 2000) {
+    Serial.println(F("RTC time invalid!"));
+    return;
+  }
+  
+  int ymd = now.year() * 10000 + now.month() * 100 + now.day();
+  uint8_t currentHour = now.hour();
+  uint8_t currentMinute = now.minute();
+  
+  // Debug: Print current time every minute (to verify RTC is working)
+  static uint8_t lastPrintedMinute = 255;
+  if (currentMinute != lastPrintedMinute) {
+    Serial.print(F("Current time: "));
+    Serial.print(currentHour);
+    Serial.print(F(":"));
+    if (currentMinute < 10) Serial.print(F("0"));
+    Serial.println(currentMinute);
+    lastPrintedMinute = currentMinute;
+    
+    // Also print active schedules for debugging
+    Serial.print(F("Active schedules: "));
+    int activeCount = 0;
+    for (int i = 0; i < MAX_SCHEDULES; i++) {
+      if (schedules[i].inUse) {
+        activeCount++;
+        Serial.print(F("C"));
+        Serial.print(schedules[i].container);
+        Serial.print(F(" @ "));
+        Serial.print(schedules[i].hour);
+        Serial.print(F(":"));
+        if (schedules[i].minute < 10) Serial.print(F("0"));
+        Serial.print(schedules[i].minute);
+        Serial.print(F(" "));
+      }
+    }
+    Serial.println();
+    Serial.print(F("Total active: "));
+    Serial.println(activeCount);
+  }
+  
+  for (int i = 0; i < MAX_SCHEDULES; i++) {
+    if (!schedules[i].inUse) continue;
+    if (schedules[i].hour == currentHour && schedules[i].minute == currentMinute) {
+      if (schedules[i].lastTriggeredYmd != ymd) {
+        schedules[i].lastTriggeredYmd = ymd;
+        
+        Serial.print(F("Schedule matched! Container "));
+        Serial.print(schedules[i].container);
+        Serial.print(F(" at "));
+        Serial.print(currentHour);
+        Serial.print(F(":"));
+        if (currentMinute < 10) Serial.print(F("0"));
+        Serial.println(currentMinute);
+        
+        // Start alarm for container
+        startAlarmForContainer(schedules[i].container);
+        
+        // SIM800L SMS sending (commented out - uncomment to enable)
+        // sim.print(F("AT+CMGS=\""));
+        // sim.print(phoneNumber);
+        // sim.println(F("\""));
+        // delay(500);
+        // sim.print(F("PillNow: Time to take medication from Container "));
+        // sim.print(schedules[i].container);
+        // sim.print(F("! ("));
+        // if (schedules[i].hour < 10) sim.print(F("0"));
+        // sim.print(schedules[i].hour);
+        // sim.print(F(":"));
+        // if (schedules[i].minute < 10) sim.print(F("0"));
+        // sim.print(schedules[i].minute);
+        // sim.println(F(")"));
+        // sim.println((char)26);
+        // delay(1000);
+        
+        // Send notification via Bluetooth
+        char msgBuf[64];
+        snprintf(msgBuf, sizeof(msgBuf), "ALARM_TRIGGERED C%d %02d:%02d", 
+                 schedules[i].container, schedules[i].hour, schedules[i].minute);
+        Serial.print(F("Sending: "));
+        Serial.println(msgBuf);
+        btSerial.println(msgBuf);
+        btSerial.flush(); // Ensure message is sent immediately
+        
+        Serial.println(F("Alarm triggered and message sent!"));
+        delay(50);
+      }
+    }
+  }
+}
+
+void addSchedule(uint8_t hour, uint8_t minute, uint8_t container) {
+  if (container < 1 || container > 3) container = 1;
+  if (hour >= 24 || minute >= 60) {
+    Serial.print(F("Invalid schedule time: "));
+    Serial.print(hour);
+    Serial.print(F(":"));
+    Serial.println(minute);
+    return;
+  }
+  
   for (int i = 0; i < MAX_SCHEDULES; i++) {
     if (!schedules[i].inUse) {
       schedules[i].inUse = true;
       schedules[i].hour = hour;
       schedules[i].minute = minute;
+      schedules[i].container = container;
       schedules[i].lastTriggeredYmd = 0;
+      Serial.print(F("Schedule added: Container "));
+      Serial.print(container);
+      Serial.print(F(" at "));
+      Serial.print(hour);
+      Serial.print(F(":"));
+      if (minute < 10) Serial.print(F("0"));
+      Serial.println(minute);
+      btSerial.print(F("SCHEDULE_ADDED "));
+      if (hour < 10) btSerial.print(F("0"));
+      btSerial.print(hour);
+      btSerial.print(F(":"));
+      if (minute < 10) btSerial.print(F("0"));
+      btSerial.print(minute);
+      btSerial.print(F(" C"));
+      btSerial.println(container);
       return;
     }
   }
-  // If full, replace the last one
+  // If all slots full, overwrite last one
   schedules[MAX_SCHEDULES - 1].inUse = true;
   schedules[MAX_SCHEDULES - 1].hour = hour;
   schedules[MAX_SCHEDULES - 1].minute = minute;
+  schedules[MAX_SCHEDULES - 1].container = container;
   schedules[MAX_SCHEDULES - 1].lastTriggeredYmd = 0;
+  Serial.print(F("Schedule added (overwrite): Container "));
+  Serial.print(container);
+  Serial.print(F(" at "));
+  Serial.print(hour);
+  Serial.print(F(":"));
+  if (minute < 10) Serial.print(F("0"));
+  Serial.println(minute);
+  btSerial.print(F("SCHEDULE_ADDED "));
+  if (hour < 10) btSerial.print(F("0"));
+  btSerial.print(hour);
+  btSerial.print(F(":"));
+  if (minute < 10) btSerial.print(F("0"));
+  btSerial.print(minute);
+  btSerial.print(F(" C"));
+  btSerial.println(container);
 }
 
 void clearSchedules() {
   for (int i = 0; i < MAX_SCHEDULES; i++) {
     schedules[i].inUse = false;
+    schedules[i].container = 1;
     schedules[i].lastTriggeredYmd = 0;
   }
 }
@@ -424,42 +750,65 @@ void clearSchedules() {
 void listSchedules() {
   Serial.println(F("SCHEDULES_BEGIN"));
   btSerial.println(F("SCHEDULES_BEGIN"));
+  int count = 0;
   for (int i = 0; i < MAX_SCHEDULES; i++) {
     if (schedules[i].inUse) {
-      char buf[16];
-      snprintf(buf, sizeof(buf), "%02d:%02d", schedules[i].hour, schedules[i].minute);
+      count++;
+      char buf[32];
+      snprintf(buf, sizeof(buf), "%02d:%02d C%d", 
+               schedules[i].hour, schedules[i].minute, schedules[i].container);
       Serial.println(buf);
       btSerial.println(buf);
     }
+  }
+  if (count == 0) {
+    Serial.println(F("No schedules"));
+    btSerial.println(F("No schedules"));
   }
   Serial.println(F("SCHEDULES_END"));
   btSerial.println(F("SCHEDULES_END"));
 }
 
 void setRtcFromString(const String &cmd) {
-  // Expects format: SETTIME YYYY-MM-DD HH:MM:SS
   int y, M, d, h, m, s;
-  int sp = cmd.indexOf(' '); // Space after SETTIME
-  if (sp < 0) goto fail;
+  int sp = cmd.indexOf(' ');
+  if (sp < 0 || sp + 1 >= cmd.length()) {
+    Serial.println(F("RTC_SET_FAIL"));
+    btSerial.println(F("RTC_SET_FAIL"));
+    return;
+  }
   String tpart = cmd.substring(sp + 1);
+  tpart.trim();
   int dash1 = tpart.indexOf('-');
   int dash2 = tpart.indexOf('-', dash1 + 1);
   int space2 = tpart.indexOf(' ');
   int colon1 = tpart.indexOf(':', space2);
   int colon2 = tpart.indexOf(':', colon1 + 1);
-  if (dash1 < 0 || dash2 < 0 || space2 < 0 || colon1 < 0 || colon2 < 0) goto fail;
+  if (dash1 < 0 || dash2 < 0 || space2 < 0 || colon1 < 0 || colon2 < 0) {
+    Serial.println(F("RTC_SET_FAIL"));
+    btSerial.println(F("RTC_SET_FAIL"));
+    return;
+  }
   y = tpart.substring(0, dash1).toInt();
   M = tpart.substring(dash1 + 1, dash2).toInt();
   d = tpart.substring(dash2 + 1, space2).toInt();
   h = tpart.substring(space2 + 1, colon1).toInt();
   m = tpart.substring(colon1 + 1, colon2).toInt();
   s = tpart.substring(colon2 + 1).toInt();
-  if (y < 2000 || M < 1 || M > 12 || d < 1 || h < 0 || h > 23 || m < 0 || m > 59 || s < 0 || s > 59) goto fail;
+  if (y < 2000 || y > 2099 || M < 1 || M > 12 || d < 1 || d > 31 || h < 0 || h > 23 || m < 0 || m > 59 || s < 0 || s > 59) {
+    Serial.println(F("RTC_SET_FAIL"));
+    btSerial.println(F("RTC_SET_FAIL"));
+    return;
+  }
+  if (!rtc.begin()) {
+    Serial.println(F("RTC_SET_FAIL"));
+    btSerial.println(F("RTC_SET_FAIL"));
+    return;
+  }
   rtc.adjust(DateTime(y, M, d, h, m, s));
-  String msg = "RTC_SET "; msg += tpart;
-  Serial.println(msg); btSerial.println(msg);
-  logToSD(F("RTC_SET"), F("RTC set by user"));
-  return;
-fail:
-  Serial.println(F("RTC_SET_FAIL")); btSerial.println(F("RTC_SET_FAIL"));
+  char msgBuf[32];
+  snprintf(msgBuf, sizeof(msgBuf), "RTC_SET %04d-%02d-%02d %02d:%02d:%02d", y, M, d, h, m, s);
+  Serial.println(msgBuf);
+  btSerial.println(msgBuf);
 }
+

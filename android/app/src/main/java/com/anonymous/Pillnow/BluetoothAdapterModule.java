@@ -26,6 +26,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public class BluetoothAdapterModule extends ReactContextBaseJavaModule implements ActivityEventListener {
     private static final int REQUEST_ENABLE_BT = 1;
@@ -37,6 +38,8 @@ public class BluetoothAdapterModule extends ReactContextBaseJavaModule implement
     private OutputStream outputStream;
     private InputStream inputStream;
     private boolean isConnected = false;
+    private Thread dataReadThread;
+    private AtomicBoolean shouldReadData = new AtomicBoolean(false);
 
     public BluetoothAdapterModule(ReactApplicationContext reactContext) {
         super(reactContext);
@@ -249,9 +252,13 @@ public class BluetoothAdapterModule extends ReactContextBaseJavaModule implement
 
             isConnected = true;
 
+            // Start data reading thread
+            startDataReadingThread();
+
             // Log successful connection
             android.util.Log.d("BluetoothAdapter", "✅ Successfully connected to HC-05: " + deviceAddress);
             android.util.Log.d("BluetoothAdapter", "✅ HC-05 LED should now be slower (connected state)");
+            android.util.Log.d("BluetoothAdapter", "✅ Data reading thread started");
 
             promise.resolve(true);
         } catch (Exception e) {
@@ -277,6 +284,18 @@ public class BluetoothAdapterModule extends ReactContextBaseJavaModule implement
     public void disconnect(Promise promise) {
         try {
             isConnected = false;
+            shouldReadData.set(false);
+            
+            // Stop data reading thread
+            if (dataReadThread != null && dataReadThread.isAlive()) {
+                dataReadThread.interrupt();
+                try {
+                    dataReadThread.join(1000);
+                } catch (InterruptedException e) {
+                    android.util.Log.w("BluetoothAdapter", "Interrupted while stopping data thread");
+                }
+                dataReadThread = null;
+            }
             
             if (outputStream != null) {
                 outputStream.close();
@@ -297,6 +316,44 @@ public class BluetoothAdapterModule extends ReactContextBaseJavaModule implement
         } catch (Exception e) {
             promise.reject("DISCONNECT_ERROR", e.getMessage());
         }
+    }
+
+    private void startDataReadingThread() {
+        shouldReadData.set(true);
+        dataReadThread = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                android.util.Log.d("BluetoothAdapter", "Data reading thread started");
+                byte[] buffer = new byte[1024];
+                int bytes;
+                
+                while (shouldReadData.get() && isConnected && inputStream != null) {
+                    try {
+                        bytes = inputStream.read(buffer);
+                        if (bytes > 0) {
+                            String data = new String(buffer, 0, bytes);
+                            android.util.Log.d("BluetoothAdapter", "📡 Data received: " + data.trim());
+                            
+                            // Emit event to JavaScript
+                            getReactApplicationContext()
+                                .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter.class)
+                                .emit("BluetoothDataReceived", data);
+                        }
+                    } catch (IOException e) {
+                        if (shouldReadData.get()) {
+                            android.util.Log.e("BluetoothAdapter", "Error reading data: " + e.getMessage());
+                            shouldReadData.set(false);
+                            isConnected = false;
+                        }
+                        break;
+                    } catch (Exception e) {
+                        android.util.Log.e("BluetoothAdapter", "Unexpected error in data thread: " + e.getMessage());
+                    }
+                }
+                android.util.Log.d("BluetoothAdapter", "Data reading thread stopped");
+            }
+        });
+        dataReadThread.start();
     }
 
     @ReactMethod

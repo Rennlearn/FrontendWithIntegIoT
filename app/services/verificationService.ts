@@ -6,7 +6,9 @@
 // Backend URL - update this if your backend IP changes
 // For development: use your Mac's IP address
 // For production: use your deployed backend URL
-const BACKEND_URL = 'http://10.177.65.91:5001'; // Local backend URL
+// NOTE: This should match the BACKEND_HOST in esp32_cam_client.ino
+// Current IP: 10.56.196.91 (update if your network IP changes)
+const BACKEND_URL = 'http://10.56.196.91:5001'; // Local backend URL
 
 export interface VerificationResult {
   success: boolean;
@@ -33,38 +35,56 @@ class VerificationService {
   async triggerCapture(containerId: string, pillConfig: { count?: number }): Promise<{ ok: boolean; message: string }> {
     try {
       console.log(`[VerificationService] Triggering capture for ${containerId} with config:`, pillConfig);
-      console.log(`[VerificationService] Backend URL: ${BACKEND_URL}`);
+      console.log(`[VerificationService] Using endpoint: ${BACKEND_URL}/trigger-capture/${containerId}`);
       
-      const response = await fetch(`${BACKEND_URL}/set-schedule`, {
+      // Add timeout to prevent hanging
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
+      
+      // Use the dedicated trigger-capture endpoint
+      // Send pill config in request body so backend can use it if not in memory
+      const response = await fetch(`${BACKEND_URL}/trigger-capture/${containerId}`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({
-          container_id: containerId,
-          pill_config: pillConfig,
-          times: [], // Not needed for verification trigger
-        }),
+        body: JSON.stringify({ expected: pillConfig }), // Send pill config in body
+        signal: controller.signal,
       });
+
+      clearTimeout(timeoutId);
 
       if (!response.ok) {
         const errorText = await response.text();
         console.error(`[VerificationService] Backend error (${response.status}):`, errorText);
-        throw new Error(`Backend returned ${response.status}: ${errorText || 'Unknown error'}`);
+        return { ok: false, message: `Backend error: ${response.status} - ${errorText}` };
       }
 
       const data = await response.json();
       console.log(`[VerificationService] Capture triggered successfully:`, data);
       return { ok: data.ok || false, message: data.message || 'Capture triggered' };
     } catch (error) {
-      console.error('[VerificationService] Error triggering capture:', error);
-      
-      // Provide more helpful error messages
-      if (error instanceof TypeError && error.message.includes('fetch')) {
-        throw new Error(`Cannot connect to backend at ${BACKEND_URL}. Make sure your backend server is running.`);
+      // Handle network errors gracefully - don't throw, return error status
+      if (error instanceof TypeError) {
+        if (error.message.includes('fetch') || error.message.includes('Network request failed') || error.message.includes('Failed to fetch')) {
+          console.warn(`[VerificationService] Network error - backend unreachable at ${BACKEND_URL}`);
+          return { 
+            ok: false, 
+            message: 'Backend unreachable. ESP32-CAM verification may still work via MQTT.' 
+          };
+        }
       }
       
-      throw new Error(`Failed to trigger capture: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      if (error instanceof Error && error.name === 'AbortError') {
+        console.warn('[VerificationService] Request timed out');
+        return { ok: false, message: 'Request timed out' };
+      }
+      
+      console.warn('[VerificationService] Error triggering capture:', error);
+      return { 
+        ok: false, 
+        message: error instanceof Error ? error.message : 'Unknown error' 
+      };
     }
   }
 
@@ -75,27 +95,67 @@ class VerificationService {
    */
   async getVerificationResult(containerId: string): Promise<VerificationResult> {
     try {
+      console.log(`[VerificationService] Fetching verification for ${containerId} from ${BACKEND_URL}`);
+      
+      // Add timeout to prevent hanging
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 8000); // 8 second timeout
+      
       const response = await fetch(`${BACKEND_URL}/containers/${containerId}/verification`, {
         method: 'GET',
         headers: {
           'Content-Type': 'application/json',
         },
+        signal: controller.signal,
       });
+
+      clearTimeout(timeoutId);
 
       if (!response.ok) {
         if (response.status === 404) {
+          console.log(`[VerificationService] No verification found for ${containerId}`);
           return { success: false, message: 'No verification found' };
         }
-        throw new Error(`HTTP error! status: ${response.status}`);
+        const errorText = await response.text();
+        console.error(`[VerificationService] HTTP error (${response.status}):`, errorText);
+        return { success: false, message: `HTTP error: ${response.status}` };
       }
 
       const data = await response.json();
+      console.log(`[VerificationService] Verification result for ${containerId}:`, data);
       return data as VerificationResult;
     } catch (error) {
-      console.error('Error fetching verification result:', error);
+      // Silently handle network errors - don't spam console
+      // Only log if it's not a network connectivity issue
+      if (error instanceof TypeError) {
+        if (error.message.includes('fetch') || error.message.includes('Network request failed') || error.message.includes('Failed to fetch')) {
+          // Network error - silently return, don't log
+          return { 
+            success: false, 
+            message: 'Backend unreachable - check network connection' 
+          };
+        }
+      }
+      
+      // Log other errors
+      console.warn('[VerificationService] Error fetching verification result:', error);
+      
+      // Provide helpful error messages but don't throw - return gracefully
+      let errorMessage = 'Unable to fetch verification';
+      if (error instanceof TypeError) {
+        errorMessage = 'Network error - check connection';
+      } else if (error instanceof Error) {
+        if (error.name === 'AbortError') {
+          errorMessage = 'Request timed out';
+        } else {
+          errorMessage = error.message;
+        }
+      }
+      
+      // Return gracefully instead of throwing
       return { 
         success: false, 
-        message: `Failed to fetch verification: ${error instanceof Error ? error.message : 'Unknown error'}` 
+        message: errorMessage 
       };
     }
   }
@@ -125,6 +185,35 @@ class VerificationService {
       evening: 3,
     };
     return mapping[containerId] || 1;
+  }
+
+  /**
+   * Test backend connectivity
+   */
+  async testConnection(): Promise<{ success: boolean; message: string }> {
+    try {
+      console.log(`[VerificationService] Testing connection to ${BACKEND_URL}`);
+      const response = await fetch(`${BACKEND_URL}/test`, {
+        method: 'GET',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        console.log('[VerificationService] Connection test successful:', data);
+        return { success: true, message: 'Backend is reachable' };
+      } else {
+        return { success: false, message: `Backend returned status ${response.status}` };
+      }
+    } catch (error) {
+      console.error('[VerificationService] Connection test failed:', error);
+      return { 
+        success: false, 
+        message: `Cannot connect to ${BACKEND_URL}. Make sure:\n1. Backend is running\n2. Device is on same WiFi network\n3. No firewall blocking port 5001` 
+      };
+    }
   }
 }
 

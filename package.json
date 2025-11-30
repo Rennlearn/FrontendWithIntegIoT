@@ -35,6 +35,7 @@
     "expo-haptics": "~14.0.1",
     "expo-image-picker": "~16.0.6",
     "expo-linking": "~7.0.5",
+    "expo-notifications": "^0.29.14",
     "expo-print": "~14.0.3",
     "expo-router": "~4.0.21",
     "expo-sharing": "~13.0.1",

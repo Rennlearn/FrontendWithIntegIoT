@@ -1,30 +1,86 @@
-import React, { useState, useCallback } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, FlatList, Image } from 'react-native';
+import React, { useState, useCallback, useEffect } from 'react';
+import { View, Text, StyleSheet, TouchableOpacity, FlatList, Image, ActivityIndicator, RefreshControl } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import { useTheme } from './context/ThemeContext';
 import { lightTheme, darkTheme } from './styles/theme';
 
+const BACKEND_URL = 'http://10.56.196.91:5001';
+
 interface Notification {
   id: string;
+  type: 'verification' | 'schedule';
+  scheduleType?: string;
+  container: string;
   title: string;
   message: string;
+  timestamp: string;
+  changes?: {
+    countChanged?: boolean;
+    countDiff?: number;
+    beforeCount?: number;
+    afterCount?: number;
+    pillsChanged?: Array<{ type: string; before: number; after: number; change: number }>;
+    typesChanged?: boolean;
+  };
+  beforeImage?: string;
+  afterImage?: string;
 }
-
-const initialNotifications: Notification[] = [
-  { id: '1', title: 'MEDICINE RUNOUT', message: 'Please refill your medication supply soon.' },
-  { id: '3', title: 'MEDICINE IDENTIFIED', message: 'Your medicine has been successfully identified.' },
-];
 
 export default function NotificationScreen() {
   const router = useRouter();
   const { isDarkMode } = useTheme();
   const theme = isDarkMode ? darkTheme : lightTheme;
-  const [notifications, setNotifications] = useState(initialNotifications);
+  const [notifications, setNotifications] = useState<Notification[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
 
-  const removeNotification = useCallback((id: string) => {
-    setNotifications((prev) => prev.filter((notif) => notif.id !== id));
+  const loadNotifications = useCallback(async () => {
+    try {
+      const response = await fetch(`${BACKEND_URL}/notifications`);
+      if (response.ok) {
+        const data = await response.json();
+        setNotifications(data.notifications || []);
+      } else {
+        console.error('Failed to load notifications:', response.status);
+      }
+    } catch (error) {
+      console.error('Error loading notifications:', error);
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
   }, []);
+
+  useEffect(() => {
+    loadNotifications();
+    // Refresh every 30 seconds
+    const interval = setInterval(loadNotifications, 30000);
+    return () => clearInterval(interval);
+  }, [loadNotifications]);
+
+  const removeNotification = useCallback(async (id: string) => {
+    try {
+      const response = await fetch(`${BACKEND_URL}/notifications/${id}`, {
+        method: 'DELETE'
+      });
+      if (response.ok) {
+        setNotifications((prev) => prev.filter((notif) => notif.id !== id));
+      } else {
+        // If delete fails, just remove from local state
+        setNotifications((prev) => prev.filter((notif) => notif.id !== id));
+      }
+    } catch (error) {
+      console.error('Error deleting notification:', error);
+      // Remove from local state anyway
+      setNotifications((prev) => prev.filter((notif) => notif.id !== id));
+    }
+  }, []);
+
+  const onRefresh = useCallback(() => {
+    setRefreshing(true);
+    loadNotifications();
+  }, [loadNotifications]);
 
   return (
     <View style={[styles.container, { backgroundColor: theme.background }]}>
@@ -138,9 +194,68 @@ const styles = StyleSheet.create({
     fontSize: 12,
     marginTop: 5,
   },
+  emptyContainer: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 60,
+  },
   emptyMessage: {
     textAlign: 'center',
-    fontSize: 14,
+    fontSize: 16,
     marginTop: 20,
+    fontWeight: '600',
+  },
+  emptySubtext: {
+    textAlign: 'center',
+    fontSize: 12,
+    marginTop: 8,
+    paddingHorizontal: 40,
+  },
+  loadingContainer: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 60,
+  },
+  loadingText: {
+    marginTop: 10,
+    fontSize: 14,
+  },
+  notificationHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 4,
+  },
+  notificationTime: {
+    fontSize: 11,
+  },
+  changesContainer: {
+    marginTop: 10,
+    padding: 10,
+    borderRadius: 8,
+    gap: 6,
+  },
+  changeItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  changeText: {
+    fontSize: 12,
+    flex: 1,
+  },
+  containerBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    marginTop: 8,
+  },
+  containerText: {
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  closeButton: {
+    padding: 5,
   },
 });

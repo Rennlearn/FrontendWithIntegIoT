@@ -390,6 +390,69 @@ class BluetoothService {
     return this.isConnected;
   }
 
+  // Listen for incoming data from Bluetooth device
+  onDataReceived(callback: (data: string) => void): () => void {
+    console.log('[BluetoothService] Setting up onDataReceived listener...');
+    
+    if (Platform.OS === 'android' && NativeModules.BluetoothAdapter) {
+      const BluetoothAdapter = NativeModules.BluetoothAdapter;
+      console.log('[BluetoothService] BluetoothAdapter module found:', !!BluetoothAdapter);
+      console.log('[BluetoothService] Available methods:', BluetoothAdapter ? Object.keys(BluetoothAdapter) : 'none');
+      
+      // Use NativeEventEmitter to listen for BluetoothDataReceived events
+      try {
+        const { NativeEventEmitter } = require('react-native');
+        const eventEmitter = new NativeEventEmitter(NativeModules.BluetoothAdapter);
+        
+        console.log('[BluetoothService] ✅ Setting up NativeEventEmitter listener for BluetoothDataReceived...');
+        
+        const subscription = eventEmitter.addListener('BluetoothDataReceived', (event: any) => {
+          // Java emits the data as a string directly, but React Native might wrap it
+          let dataString: string;
+          if (typeof event === 'string') {
+            dataString = event;
+          } else if (event?.data) {
+            dataString = String(event.data);
+          } else if (event?.message) {
+            dataString = String(event.message);
+          } else {
+            dataString = String(event);
+          }
+          
+          console.log('[BluetoothService] 📡 Raw event received:', event);
+          console.log('[BluetoothService] 📡 Extracted data string:', dataString);
+          
+          if (dataString && dataString.trim().length > 0) {
+            // Call callback with trimmed data
+            callback(dataString.trim());
+          } else {
+            console.warn('[BluetoothService] ⚠️ Received empty or invalid data:', event);
+          }
+        });
+        
+        console.log('[BluetoothService] ✅ NativeEventEmitter listener registered successfully');
+        
+        return () => {
+          console.log('[BluetoothService] Cleaning up NativeEventEmitter listener...');
+          subscription.remove();
+        };
+      } catch (error) {
+        console.error('[BluetoothService] ❌ Error setting up NativeEventEmitter:', error);
+      }
+    } else {
+      console.warn('[BluetoothService] ⚠️ BluetoothAdapter native module not available');
+      if (Platform.OS !== 'android') {
+        console.warn('[BluetoothService] Platform is not Android:', Platform.OS);
+      }
+    }
+    
+    // Return empty cleanup function if no listener available
+    console.warn('[BluetoothService] ⚠️ Returning empty cleanup - listener not set up');
+    return () => {
+      console.log('[BluetoothService] Empty cleanup called');
+    };
+  }
+
   // Check real connection status
   async checkRealConnectionStatus(): Promise<boolean> {
     try {
