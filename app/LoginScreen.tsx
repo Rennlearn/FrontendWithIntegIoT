@@ -20,6 +20,10 @@ const LoginScreen = () => {
   const [isForgotOpen, setIsForgotOpen] = useState(false);
   const [phoneNumber, setPhoneNumber] = useState("");
   const [isSendingCode, setIsSendingCode] = useState(false);
+  const [generatedOTP, setGeneratedOTP] = useState<string | null>(null);
+  const [showOTPInput, setShowOTPInput] = useState(false);
+  const [enteredOTP, setEnteredOTP] = useState("");
+  const [isVerifying, setIsVerifying] = useState(false);
 
   const handleLogin = async () => {
     try {
@@ -70,44 +74,236 @@ const LoginScreen = () => {
     }
   };
 
-  const generateSixDigitCode = (): string => {
-    return Math.floor(100000 + Math.random() * 900000).toString();
+  const generateOTP = (length: number = 6): string => {
+    // Generate a random OTP with the specified length
+    const min = Math.pow(10, length - 1);
+    const max = Math.pow(10, length) - 1;
+    const otp = Math.floor(min + Math.random() * (max - min + 1)).toString();
+    console.log("[OTP] Generated OTP:", otp, "Length:", otp.length);
+    return otp;
   };
 
   const handleSendResetCode = async () => {
+    console.log("[OTP] handleSendResetCode called");
     const trimmed = phoneNumber.trim();
+    console.log("[OTP] Phone number entered:", trimmed);
+    
     if (!trimmed) {
+      console.log("[OTP] Error: Phone number is empty");
       Alert.alert("Missing Number", "Please enter your contact number.");
       return;
     }
 
-    setIsSendingCode(true);
-    try {
-      const isAvailable = await SMS.isAvailableAsync();
-      const code = generateSixDigitCode();
-      const message = `PILLNOW reset code: ${code}`;
+    // Basic phone number validation
+    const phoneRegex = /^[\d\s\-\+\(\)]+$/;
+    if (!phoneRegex.test(trimmed) || trimmed.length < 10) {
+      console.log("[OTP] Error: Invalid phone number format or too short");
+      Alert.alert("Invalid Number", "Please enter a valid contact number.");
+      return;
+    }
 
+    console.log("[OTP] Phone number validation passed");
+    setIsSendingCode(true);
+    console.log("[OTP] isSendingCode set to true");
+    
+    try {
+      // Check if SMS is available
+      console.log("[OTP] Checking SMS availability...");
+      const isAvailable = await SMS.isAvailableAsync();
+      console.log("[OTP] SMS available:", isAvailable);
+      
       if (!isAvailable) {
+        console.log("[OTP] Error: SMS not available on device");
         Alert.alert(
           "SMS Unavailable",
           "SMS is not available on this device. Please contact support or try another method."
         );
+        setIsSendingCode(false);
         return;
       }
 
+      // Generate a random 6-digit OTP
+      const otp = generateOTP(6);
+      console.log("[OTP] OTP generated and set in state:", otp);
+      setGeneratedOTP(otp);
+      
+      // Store OTP in AsyncStorage for verification (optional, expires after 10 minutes)
+      const otpData = {
+        code: otp,
+        phoneNumber: trimmed,
+        timestamp: Date.now(),
+        expiresAt: Date.now() + 10 * 60 * 1000 // 10 minutes
+      };
+      console.log("[OTP] Storing OTP data in AsyncStorage:", JSON.stringify(otpData, null, 2));
+      await AsyncStorage.setItem("resetOTP", JSON.stringify(otpData));
+      console.log("[OTP] OTP data stored successfully");
+
+      // Verify storage
+      const stored = await AsyncStorage.getItem("resetOTP");
+      console.log("[OTP] Verified stored OTP:", stored);
+
+      // Create the SMS message
+      const message = `Your PILLNOW password reset code is: ${otp}. This code will expire in 10 minutes. Do not share this code with anyone.`;
+      console.log("[OTP] SMS message prepared:", message);
+
+      // Send SMS
+      console.log("[OTP] Attempting to send SMS to:", trimmed);
       const result = await SMS.sendSMSAsync([trimmed], message);
+      console.log("[OTP] SMS send result:", JSON.stringify(result, null, 2));
+      
       if (result.result === "sent") {
-        Alert.alert("Code Sent", "A reset code has been sent to your number.");
-        setIsForgotOpen(false);
-        setPhoneNumber("");
+        console.log("[OTP] SMS sent successfully, switching to OTP input view");
+        // Switch to OTP verification step
+        setShowOTPInput(true);
+        console.log("[OTP] showOTPInput set to true");
+        Alert.alert(
+          "Code Sent", 
+          `A 6-digit reset code has been sent to ${trimmed}. Please enter the code to verify.`
+        );
+      } else if (result.result === "cancelled") {
+        console.log("[OTP] SMS sending was cancelled by user");
+        Alert.alert("Cancelled", "SMS sending was cancelled.");
       } else {
+        console.log("[OTP] SMS was not sent, result:", result.result);
         Alert.alert("Not Sent", "The SMS was not sent. Please try again.");
       }
-    } catch (err) {
-      Alert.alert("Error", "Failed to send SMS. Please try again.");
+    } catch (err: any) {
+      console.error("[OTP] SMS Error:", err);
+      console.error("[OTP] Error details:", JSON.stringify(err, null, 2));
+      Alert.alert(
+        "Error", 
+        `Failed to send SMS: ${err.message || "Please try again."}`
+      );
     } finally {
       setIsSendingCode(false);
+      console.log("[OTP] isSendingCode set to false");
     }
+  };
+
+  const handleVerifyOTP = async () => {
+    console.log("[OTP Verification] handleVerifyOTP called");
+    console.log("[OTP Verification] Entered OTP:", enteredOTP);
+    console.log("[OTP Verification] Entered OTP length:", enteredOTP.length);
+    console.log("[OTP Verification] Generated OTP in state:", generatedOTP);
+    
+    if (!enteredOTP.trim()) {
+      console.log("[OTP Verification] Error: OTP is empty");
+      Alert.alert("Missing Code", "Please enter the 6-digit code.");
+      return;
+    }
+
+    if (enteredOTP.length !== 6) {
+      console.log("[OTP Verification] Error: OTP length is not 6");
+      Alert.alert("Invalid Code", "Please enter a valid 6-digit code.");
+      return;
+    }
+
+    setIsVerifying(true);
+    console.log("[OTP Verification] isVerifying set to true");
+    
+    try {
+      // Retrieve stored OTP data
+      console.log("[OTP Verification] Retrieving OTP from AsyncStorage...");
+      const storedOTPData = await AsyncStorage.getItem("resetOTP");
+      console.log("[OTP Verification] Stored OTP data:", storedOTPData);
+      
+      if (!storedOTPData) {
+        console.log("[OTP Verification] Error: No OTP data found in storage");
+        Alert.alert("Error", "OTP session expired. Please request a new code.");
+        setShowOTPInput(false);
+        setEnteredOTP("");
+        setGeneratedOTP(null);
+        return;
+      }
+
+      const otpData = JSON.parse(storedOTPData);
+      console.log("[OTP Verification] Parsed OTP data:", JSON.stringify(otpData, null, 2));
+      console.log("[OTP Verification] Stored code:", otpData.code);
+      console.log("[OTP Verification] Current time:", Date.now());
+      console.log("[OTP Verification] Expires at:", otpData.expiresAt);
+      console.log("[OTP Verification] Time remaining (ms):", otpData.expiresAt - Date.now());
+      
+      // Check if OTP has expired
+      if (Date.now() > otpData.expiresAt) {
+        console.log("[OTP Verification] Error: OTP has expired");
+        Alert.alert("Expired", "The verification code has expired. Please request a new code.");
+        await AsyncStorage.removeItem("resetOTP");
+        setShowOTPInput(false);
+        setEnteredOTP("");
+        setGeneratedOTP(null);
+        return;
+      }
+
+      // Verify the entered OTP matches the stored OTP
+      const enteredOTPTrimmed = enteredOTP.trim();
+      const storedCode = otpData.code;
+      console.log("[OTP Verification] Comparing codes:");
+      console.log("[OTP Verification]   Entered (trimmed):", enteredOTPTrimmed);
+      console.log("[OTP Verification]   Stored code:", storedCode);
+      console.log("[OTP Verification]   Match:", enteredOTPTrimmed === storedCode);
+      
+      if (enteredOTPTrimmed === storedCode) {
+        console.log("[OTP Verification] SUCCESS: OTP verified correctly!");
+        // OTP verified successfully
+        Alert.alert(
+          "Verification Successful",
+          "Your code has been verified. You can now reset your password.",
+          [
+            {
+              text: "OK",
+              onPress: () => {
+                console.log("[OTP Verification] Clearing OTP data and resetting states");
+                // Clear OTP data
+                AsyncStorage.removeItem("resetOTP");
+                // Reset states
+                setShowOTPInput(false);
+                setEnteredOTP("");
+                setPhoneNumber("");
+                setGeneratedOTP(null);
+                setIsForgotOpen(false);
+                console.log("[OTP Verification] All states reset, modal closed");
+                // TODO: Navigate to password reset screen or show password reset form
+                // For now, just close the modal
+              }
+            }
+          ]
+        );
+      } else {
+        console.log("[OTP Verification] FAILED: Codes do not match");
+        Alert.alert("Invalid Code", "The code you entered is incorrect. Please try again.");
+        setEnteredOTP("");
+      }
+    } catch (error: any) {
+      console.error("[OTP Verification] Error:", error);
+      console.error("[OTP Verification] Error details:", JSON.stringify(error, null, 2));
+      Alert.alert("Error", "Failed to verify code. Please try again.");
+    } finally {
+      setIsVerifying(false);
+      console.log("[OTP Verification] isVerifying set to false");
+    }
+  };
+
+  const handleResendCode = async () => {
+    console.log("[OTP] handleResendCode called");
+    // Reset OTP input view
+    setShowOTPInput(false);
+    setEnteredOTP("");
+    setGeneratedOTP(null);
+    console.log("[OTP] Resend: Reset OTP input view and cleared states");
+    // Resend the code
+    await handleSendResetCode();
+  };
+
+  const handleCloseModal = () => {
+    console.log("[OTP] handleCloseModal called - resetting all states");
+    setIsForgotOpen(false);
+    setShowOTPInput(false);
+    setPhoneNumber("");
+    setEnteredOTP("");
+    setGeneratedOTP(null);
+    setIsSendingCode(false);
+    setIsVerifying(false);
+    console.log("[OTP] All states reset");
   };
 
   return (
@@ -141,7 +337,10 @@ const LoginScreen = () => {
 
           <TouchableOpacity 
             style={styles.forgotButton}
-            onPress={() => setIsForgotOpen(true)}
+            onPress={() => {
+              console.log("[OTP] Forgot password button clicked - opening modal");
+              setIsForgotOpen(true);
+            }}
           >
             <Text style={[styles.forgotText, { color: theme.primary }]}>Forgot password?</Text>
           </TouchableOpacity>
@@ -170,45 +369,119 @@ const LoginScreen = () => {
         visible={isForgotOpen}
         transparent
         animationType="fade"
-        onRequestClose={() => setIsForgotOpen(false)}
+        onRequestClose={handleCloseModal}
       >
         <View style={styles.modalBackdrop}>
           <View style={[styles.modalCard, { backgroundColor: theme.card }]}>
-            <Text style={[styles.modalTitle, { color: theme.text }]}>Reset your password</Text>
-            <Text style={[styles.modalSubtitle, { color: theme.textSecondary }]}>Enter your contact number to receive a reset code via SMS.</Text>
-            <TextInput
-              style={[styles.input, { 
-                backgroundColor: theme.background,
-                borderColor: theme.border,
-                color: theme.text
-              }]}
-              placeholder="Contact Number"
-              placeholderTextColor={theme.textSecondary}
-              value={phoneNumber}
-              onChangeText={setPhoneNumber}
-              keyboardType="phone-pad"
-            />
+            {!showOTPInput ? (
+              // Phone Number Input Step
+              <>
+                <Text style={[styles.modalTitle, { color: theme.text }]}>Reset your password</Text>
+                <Text style={[styles.modalSubtitle, { color: theme.textSecondary }]}>
+                  Enter your contact number to receive a reset code via SMS.
+                </Text>
+                <TextInput
+                  style={[styles.input, { 
+                    backgroundColor: theme.background,
+                    borderColor: theme.border,
+                    color: theme.text
+                  }]}
+                  placeholder="Contact Number"
+                  placeholderTextColor={theme.textSecondary}
+                  value={phoneNumber}
+                  onChangeText={setPhoneNumber}
+                  keyboardType="phone-pad"
+                  editable={!isSendingCode}
+                />
 
-            <View style={styles.modalActions}>
-              <TouchableOpacity
-                style={[styles.modalButton, { borderColor: theme.border }]}
-                onPress={() => setIsForgotOpen(false)}
-                disabled={isSendingCode}
-              >
-                <Text style={[styles.modalButtonText, { color: theme.textSecondary }]}>Cancel</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.modalPrimaryButton, { backgroundColor: theme.primary }]}
-                onPress={handleSendResetCode}
-                disabled={isSendingCode}
-              >
-                {isSendingCode ? (
-                  <ActivityIndicator color="#fff" />
-                ) : (
-                  <Text style={styles.modalPrimaryButtonText}>Send Code</Text>
-                )}
-              </TouchableOpacity>
-            </View>
+                <View style={styles.modalActions}>
+                  <TouchableOpacity
+                    style={[styles.modalButton, { borderColor: theme.border }]}
+                    onPress={handleCloseModal}
+                    disabled={isSendingCode}
+                  >
+                    <Text style={[styles.modalButtonText, { color: theme.textSecondary }]}>Cancel</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[styles.modalPrimaryButton, { backgroundColor: theme.primary }]}
+                    onPress={handleSendResetCode}
+                    disabled={isSendingCode}
+                  >
+                    {isSendingCode ? (
+                      <ActivityIndicator color="#fff" />
+                    ) : (
+                      <Text style={styles.modalPrimaryButtonText}>Send Code</Text>
+                    )}
+                  </TouchableOpacity>
+                </View>
+              </>
+            ) : (
+              // OTP Verification Step
+              <>
+                <Text style={[styles.modalTitle, { color: theme.text }]}>Enter Verification Code</Text>
+                <Text style={[styles.modalSubtitle, { color: theme.textSecondary }]}>
+                  We've sent a 6-digit code to {phoneNumber}. Please enter it below.
+                </Text>
+                <TextInput
+                  style={[styles.input, { 
+                    backgroundColor: theme.background,
+                    borderColor: theme.border,
+                    color: theme.text,
+                    textAlign: "center",
+                    fontSize: 20,
+                    letterSpacing: 8,
+                    fontWeight: "bold"
+                  }]}
+                  placeholder="000000"
+                  placeholderTextColor={theme.textSecondary}
+                  value={enteredOTP}
+                  onChangeText={(text) => {
+                    // Only allow numbers and limit to 6 digits
+                    const numericText = text.replace(/[^0-9]/g, "").slice(0, 6);
+                    console.log("[OTP Input] Text changed:", text, "-> Filtered:", numericText);
+                    setEnteredOTP(numericText);
+                  }}
+                  keyboardType="number-pad"
+                  maxLength={6}
+                  editable={!isVerifying}
+                />
+
+                <TouchableOpacity
+                  style={styles.resendButton}
+                  onPress={handleResendCode}
+                  disabled={isSendingCode || isVerifying}
+                >
+                  <Text style={[styles.resendText, { color: theme.primary }]}>
+                    Didn't receive the code? Resend
+                  </Text>
+                </TouchableOpacity>
+
+                <View style={styles.modalActions}>
+                  <TouchableOpacity
+                    style={[styles.modalButton, { borderColor: theme.border }]}
+                    onPress={() => {
+                      console.log("[OTP] Back button clicked - returning to phone input");
+                      setShowOTPInput(false);
+                      setEnteredOTP("");
+                    }}
+                    disabled={isVerifying}
+                  >
+                    <Text style={[styles.modalButtonText, { color: theme.textSecondary }]}>Back</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[styles.modalPrimaryButton, { backgroundColor: theme.primary }]}
+                    onPress={handleVerifyOTP}
+                    disabled={isVerifying || enteredOTP.length !== 6}
+                  >
+                    {isVerifying ? (
+                      <ActivityIndicator color="#fff" />
+                    ) : (
+                      <Text style={styles.modalPrimaryButtonText}>Verify</Text>
+                    )}
+                  </TouchableOpacity>
+                </View>
+              </>
+            )}
           </View>
         </View>
       </Modal>
@@ -324,6 +597,15 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: "700",
     color: "#fff",
+  },
+  resendButton: {
+    marginTop: 8,
+    marginBottom: 16,
+    alignItems: "center",
+  },
+  resendText: {
+    fontSize: 14,
+    fontWeight: "600",
   },
 });
 
