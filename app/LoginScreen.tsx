@@ -391,11 +391,10 @@ const LoginScreen = () => {
             secureTextEntry
           />
 
-          <TouchableOpacity 
+            <TouchableOpacity
             style={styles.forgotButton}
             onPress={() => {
-              console.log("[OTP] Forgot password button clicked - opening modal");
-              setIsForgotOpen(true);
+              router.push("/ForgotPassword");
             }}
           >
             <Text style={[styles.forgotText, { color: theme.primary }]}>Forgot password?</Text>

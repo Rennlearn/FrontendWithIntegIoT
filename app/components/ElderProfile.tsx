@@ -42,6 +42,14 @@ export default function ElderProfile({ onElderSelected, onBack }: ElderProfilePr
   const [isConnecting, setIsConnecting] = useState(false);
   const [connectedElders, setConnectedElders] = useState<ElderUser[]>([]);
   const [loading, setLoading] = useState(false);
+  
+  // State for creating new elder account
+  const [showCreateForm, setShowCreateForm] = useState(false);
+  const [elderName, setElderName] = useState('');
+  const [elderEmail, setElderEmail] = useState('');
+  const [elderPhoneCreate, setElderPhoneCreate] = useState('');
+  const [elderPassword, setElderPassword] = useState('');
+  const [isCreating, setIsCreating] = useState(false);
 
   // Get current caregiver ID from JWT token
   const getCurrentCaregiverId = async (): Promise<string> => {
@@ -100,6 +108,148 @@ export default function ElderProfile({ onElderSelected, onBack }: ElderProfilePr
       console.log('Connected elders saved successfully');
     } catch (error) {
       console.error('Error saving connected elders:', error);
+    }
+  };
+
+  // Generate a default password for elder (since they won't be logging in)
+  const generateDefaultPassword = () => {
+    return `Elder${Date.now().toString().slice(-6)}`;
+  };
+
+  // Create new elder account (for elders who can't use the app)
+  const createElderAccount = async () => {
+    if (!elderName.trim() || !elderEmail.trim() || !elderPhoneCreate.trim()) {
+      Alert.alert('Error', 'Please fill in all required fields (Name, Email, Phone)');
+      return;
+    }
+
+    // Validate email format
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(elderEmail.trim())) {
+      Alert.alert('Error', 'Please enter a valid email address');
+      return;
+    }
+
+    try {
+      setIsCreating(true);
+      
+      // Use generated password if not provided (elder won't be logging in)
+      const password = elderPassword.trim() || generateDefaultPassword();
+      
+      // Create elder account
+      const response = await fetch('https://pillnow-database.onrender.com/api/users/register', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          name: elderName.trim(),
+          email: elderEmail.trim(),
+          phone: elderPhoneCreate.trim(),
+          password: password,
+          role: 2, // Elder role
+        }),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.message || 'Failed to create elder account');
+      }
+
+      const newElderData = await response.json();
+      console.log('Elder account created:', newElderData);
+
+      // Get the created elder's ID
+      let elderId = newElderData.user?.userId || newElderData.user?._id || newElderData.user?.id || newElderData.userId || newElderData._id || newElderData.id;
+      
+      // If we don't have the ID from response, fetch the elder by phone
+      if (!elderId) {
+        const token = await AsyncStorage.getItem('token');
+        const endpoints = [
+          `https://pillnow-database.onrender.com/api/elders/phone/${elderPhoneCreate.trim()}`,
+          `https://pillnow-database.onrender.com/api/users/elder/${elderPhoneCreate.trim()}`,
+          `https://pillnow-database.onrender.com/api/users/phone/${elderPhoneCreate.trim()}?role=2`,
+        ];
+
+        for (const endpoint of endpoints) {
+          try {
+            const elderResponse = await fetch(endpoint, {
+              headers: {
+                'Authorization': `Bearer ${token}`,
+                'Content-Type': 'application/json',
+              },
+            });
+            
+            if (elderResponse.ok) {
+              const elderData = await elderResponse.json();
+              let userData = null;
+              
+              if (Array.isArray(elderData)) {
+                userData = elderData[0];
+              } else if (elderData.user) {
+                userData = elderData.user;
+              } else if (elderData.name || elderData.email) {
+                userData = elderData;
+              }
+              
+              if (userData && userData.role === 2) {
+                elderId = userData.userId || userData._id || userData.id;
+                break;
+              }
+            }
+          } catch (e) {
+            continue;
+          }
+        }
+      }
+
+      // Create elder object for connection
+      const newElder: ElderUser = {
+        userId: elderId,
+        name: elderName.trim(),
+        email: elderEmail.trim(),
+        contactNumber: elderPhoneCreate.trim(),
+        role: 2,
+      };
+
+      // Check if already in the list
+      const existingElder = connectedElders.find(conn => 
+        (conn.userId === elderId) || (conn.contactNumber === elderPhoneCreate.trim())
+      );
+      
+      if (existingElder) {
+        Alert.alert('Already Connected', `${elderName.trim()} is already in your list.`);
+        // Reset form
+        setElderName('');
+        setElderEmail('');
+        setElderPhoneCreate('');
+        setElderPassword('');
+        setShowCreateForm(false);
+        return;
+      }
+
+      // Add to connected elders list
+      const updatedElders = [...connectedElders, newElder];
+      await saveConnectedElders(updatedElders);
+      setConnectedElders(updatedElders);
+
+      Alert.alert(
+        'Success',
+        `Elder account created and connected successfully!\n\nName: ${elderName.trim()}\nPhone: ${elderPhoneCreate.trim()}\n\nNote: The elder does not need to login. You can manage their medication schedules.`
+      );
+
+      // Reset form
+      setElderName('');
+      setElderEmail('');
+      setElderPhoneCreate('');
+      setElderPassword('');
+      setShowCreateForm(false);
+      
+    } catch (error: any) {
+      console.error('Error creating elder account:', error);
+      Alert.alert('Error', error.message || 'Failed to create elder account. Please try again.');
+    } finally {
+      setIsCreating(false);
     }
   };
 
@@ -381,37 +531,158 @@ export default function ElderProfile({ onElderSelected, onBack }: ElderProfilePr
         </Text>
       </View>
 
-      {/* Connect Elder Section */}
+      {/* Connect/Create Elder Section */}
       <View style={[styles.section, { backgroundColor: theme.card }]}>
-        <Text style={[styles.sectionTitle, { color: theme.secondary }]}>Connect to Elder</Text>
-        <Text style={[styles.helperText, { color: theme.textSecondary }]}>
-          Enter the elder's registered phone number to connect
-        </Text>
-        
-        <TextInput 
-          style={[styles.input, { 
-            backgroundColor: theme.background,
-            borderColor: theme.border,
-            color: theme.text,
-          }]} 
-          placeholder="Elder's Phone Number" 
-          placeholderTextColor={theme.textSecondary}
-          value={elderPhone}
-          onChangeText={setElderPhone}
-          keyboardType="phone-pad"
-        />
+        {/* Toggle between Connect and Create */}
+        <View style={[styles.toggleContainer, { backgroundColor: theme.background }]}>
+          <TouchableOpacity
+            style={[
+              styles.toggleButton,
+              !showCreateForm && { backgroundColor: theme.primary },
+              showCreateForm && { backgroundColor: 'transparent' },
+            ]}
+            onPress={() => setShowCreateForm(false)}
+          >
+            <Text
+              style={[
+                styles.toggleText,
+                { color: !showCreateForm ? theme.card : theme.text },
+              ]}
+            >
+              Connect Existing
+            </Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[
+              styles.toggleButton,
+              showCreateForm && { backgroundColor: theme.primary },
+              !showCreateForm && { backgroundColor: 'transparent' },
+            ]}
+            onPress={() => setShowCreateForm(true)}
+          >
+            <Text
+              style={[
+                styles.toggleText,
+                { color: showCreateForm ? theme.card : theme.text },
+              ]}
+            >
+              Create New Elder
+            </Text>
+          </TouchableOpacity>
+        </View>
 
-        <TouchableOpacity 
-          style={[styles.connectButton, { backgroundColor: theme.primary }]}
-          onPress={connectToElder}
-          disabled={isConnecting}
-        >
-          {isConnecting ? (
-            <ActivityIndicator color={theme.card} />
-          ) : (
-            <Text style={[styles.buttonText, { color: theme.card }]}>CONNECT</Text>
-          )}
-        </TouchableOpacity>
+        {!showCreateForm ? (
+          // Connect to Existing Elder
+          <>
+            <Text style={[styles.sectionTitle, { color: theme.secondary }]}>Connect to Existing Elder</Text>
+            <Text style={[styles.helperText, { color: theme.textSecondary }]}>
+              Connect to an elder who already has an account. Enter their registered phone number.
+            </Text>
+            
+            <TextInput 
+              style={[styles.input, { 
+                backgroundColor: theme.background,
+                borderColor: theme.border,
+                color: theme.text,
+              }]} 
+              placeholder="Elder's Phone Number" 
+              placeholderTextColor={theme.textSecondary}
+              value={elderPhone}
+              onChangeText={setElderPhone}
+              keyboardType="phone-pad"
+            />
+
+            <TouchableOpacity 
+              style={[styles.connectButton, { backgroundColor: theme.primary }]}
+              onPress={connectToElder}
+              disabled={isConnecting}
+            >
+              {isConnecting ? (
+                <ActivityIndicator color={theme.card} />
+              ) : (
+                <Text style={[styles.buttonText, { color: theme.card }]}>CONNECT</Text>
+              )}
+            </TouchableOpacity>
+          </>
+        ) : (
+          // Create New Elder Account
+          <>
+            <Text style={[styles.sectionTitle, { color: theme.secondary }]}>Create Elder Account</Text>
+            <Text style={[styles.helperText, { color: theme.textSecondary }]}>
+              Create an account for an elder who cannot use the app. You will manage their medication schedules.
+            </Text>
+            
+            <TextInput 
+              style={[styles.input, { 
+                backgroundColor: theme.background,
+                borderColor: theme.border,
+                color: theme.text,
+              }]} 
+              placeholder="Elder's Full Name *" 
+              placeholderTextColor={theme.textSecondary}
+              value={elderName}
+              onChangeText={setElderName}
+              autoCapitalize="words"
+            />
+
+            <TextInput 
+              style={[styles.input, { 
+                backgroundColor: theme.background,
+                borderColor: theme.border,
+                color: theme.text,
+              }]} 
+              placeholder="Elder's Email *" 
+              placeholderTextColor={theme.textSecondary}
+              value={elderEmail}
+              onChangeText={setElderEmail}
+              keyboardType="email-address"
+              autoCapitalize="none"
+              autoCorrect={false}
+            />
+
+            <TextInput 
+              style={[styles.input, { 
+                backgroundColor: theme.background,
+                borderColor: theme.border,
+                color: theme.text,
+              }]} 
+              placeholder="Elder's Phone Number *" 
+              placeholderTextColor={theme.textSecondary}
+              value={elderPhoneCreate}
+              onChangeText={setElderPhoneCreate}
+              keyboardType="phone-pad"
+            />
+
+            <TextInput 
+              style={[styles.input, { 
+                backgroundColor: theme.background,
+                borderColor: theme.border,
+                color: theme.text,
+              }]} 
+              placeholder="Password (Optional - auto-generated if empty)" 
+              placeholderTextColor={theme.textSecondary}
+              value={elderPassword}
+              onChangeText={setElderPassword}
+              secureTextEntry
+            />
+
+            <Text style={[styles.helperText, { color: theme.textSecondary, fontSize: 12, marginTop: -10, marginBottom: 15 }]}>
+              Note: Password is optional. If left empty, a default password will be generated. The elder does not need to login.
+            </Text>
+
+            <TouchableOpacity 
+              style={[styles.connectButton, { backgroundColor: theme.primary }]}
+              onPress={createElderAccount}
+              disabled={isCreating}
+            >
+              {isCreating ? (
+                <ActivityIndicator color={theme.card} />
+              ) : (
+                <Text style={[styles.buttonText, { color: theme.card }]}>CREATE & CONNECT</Text>
+              )}
+            </TouchableOpacity>
+          </>
+        )}
       </View>
 
       {/* Connected Elders Section */}
@@ -655,5 +926,23 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     gap: 4,
     justifyContent: 'center',
+  },
+  toggleContainer: {
+    flexDirection: 'row',
+    marginBottom: 20,
+    borderRadius: 10,
+    padding: 4,
+    gap: 4,
+  },
+  toggleButton: {
+    flex: 1,
+    paddingVertical: 10,
+    paddingHorizontal: 15,
+    borderRadius: 8,
+    alignItems: 'center',
+  },
+  toggleText: {
+    fontSize: 14,
+    fontWeight: '600',
   },
 });
