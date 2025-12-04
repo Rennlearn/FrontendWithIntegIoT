@@ -1,10 +1,10 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { 
-  View, Text, TextInput, TouchableOpacity, Alert, StyleSheet, ScrollView, Modal, ActivityIndicator
+  View, Text, TextInput, TouchableOpacity, Alert, StyleSheet, ScrollView, Modal, ActivityIndicator, BackHandler
 } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import axios from "axios";
-import { useRouter } from "expo-router";
+import { useRouter, useFocusEffect } from "expo-router";
 import { useTheme } from "./context/ThemeContext";
 import { lightTheme, darkTheme } from "./styles/theme";
 import * as SMS from "expo-sms";
@@ -24,6 +24,55 @@ const LoginScreen = () => {
   const [showOTPInput, setShowOTPInput] = useState(false);
   const [enteredOTP, setEnteredOTP] = useState("");
   const [isVerifying, setIsVerifying] = useState(false);
+
+  // Track if user is logged in
+  const [isLoggedIn, setIsLoggedIn] = useState(false);
+
+  // Check if user is already logged in when screen comes into focus
+  useFocusEffect(
+    React.useCallback(() => {
+      const checkAuth = async () => {
+        const token = await AsyncStorage.getItem("token");
+        if (token) {
+          setIsLoggedIn(true);
+          // User is already logged in, redirect to appropriate dashboard
+          try {
+            const decodedToken = JSON.parse(atob(token.split('.')[1]));
+            const roleId = parseInt(decodedToken.role || decodedToken.user?.role || "0");
+            
+            if (roleId === 3) {
+              router.replace("/CaregiverDashboard");
+            } else if (roleId === 2) {
+              router.replace("/ElderDashboard");
+            }
+          } catch (error) {
+            // If token is invalid, clear it and stay on login
+            await AsyncStorage.removeItem("token");
+            setIsLoggedIn(false);
+          }
+        } else {
+          setIsLoggedIn(false);
+          // Clear form when screen is focused and user is not logged in
+          setEmail("");
+          setPassword("");
+        }
+      };
+      checkAuth();
+    }, [])
+  );
+
+  // Prevent back button navigation if user is logged in
+  useEffect(() => {
+    const backHandler = BackHandler.addEventListener('hardwareBackPress', () => {
+      // If user is logged in, prevent going back to login screen
+      if (isLoggedIn) {
+        return true; // Prevent default back behavior
+      }
+      return false; // Allow default back behavior if not logged in
+    });
+
+    return () => backHandler.remove();
+  }, [isLoggedIn]);
 
   const handleLogin = async () => {
     try {
@@ -50,19 +99,26 @@ const LoginScreen = () => {
         const roleId = parseInt(userRole);
         console.log("Role ID:", roleId);
         
+        // Clear form inputs after successful login
+        setEmail("");
+        setPassword("");
+        setIsLoggedIn(true);
+        
         if (roleId === 3) {
           console.log("Navigating to CaregiverDashboard (Role ID: 3)");
-          router.push("/CaregiverDashboard");
+          router.replace("/CaregiverDashboard");
         } else if (roleId === 2) {
           console.log("Navigating to ElderDashboard (Role ID: 2)");
-          router.push("/ElderDashboard");
+          router.replace("/ElderDashboard");
         } else if (roleId === 1) {
           console.log("Admin role detected (Role ID: 1) - showing alert");
           Alert.alert("Login Failed", "Admin access not supported in this app.");
+          setIsLoggedIn(false);
         } else {
           console.log("Unknown role, showing alert");
           // If role is not recognized, show an alert
           Alert.alert("Login Failed", "Invalid user role. Please contact support.");
+          setIsLoggedIn(false);
         }
       } else {
         Alert.alert("Login Failed", "Invalid username or password");
@@ -451,9 +507,18 @@ const LoginScreen = () => {
                   onPress={handleResendCode}
                   disabled={isSendingCode || isVerifying}
                 >
-                  <Text style={[styles.resendText, { color: theme.primary }]}>
-                    Didn't receive the code? Resend
-                  </Text>
+                  {isSendingCode ? (
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                      <ActivityIndicator size="small" color={theme.primary} />
+                      <Text style={[styles.resendText, { color: theme.primary }]}>
+                        Sending...
+                      </Text>
+                    </View>
+                  ) : (
+                    <Text style={[styles.resendText, { color: theme.primary }]}>
+                      Didn't receive the code? Resend
+                    </Text>
+                  )}
                 </TouchableOpacity>
 
                 <View style={styles.modalActions}>

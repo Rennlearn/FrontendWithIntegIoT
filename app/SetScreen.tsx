@@ -65,6 +65,9 @@ const SetScreen = () => {
   });
   const [pillCounts, setPillCounts] = useState<Record<number, number>>({ 1: 0, 2: 0, 3: 0 });
   const [pillCountsLocked, setPillCountsLocked] = useState<Record<number, boolean>>({ 1: false, 2: false, 3: false });
+  const [addingPill, setAddingPill] = useState<Record<number, boolean>>({ 1: false, 2: false, 3: false });
+  const [addingTime, setAddingTime] = useState(false);
+  const [continuing, setContinuing] = useState(false);
 
   // Remove useEffect that resets pill modal/alarm modal etc on mount
   // Only keep fetchMedications and initial setup that doesn't cause a jump or open modals
@@ -78,6 +81,9 @@ const SetScreen = () => {
     setShowTimePicker(false);
     setPillCounts({ 1: 0, 2: 0, 3: 0 });
     setPillCountsLocked({ 1: false, 2: false, 3: false });
+    setAddingPill({ 1: false, 2: false, 3: false });
+    setAddingTime(false);
+    setContinuing(false);
     // do NOT open any modals
   }, []);
 
@@ -97,6 +103,9 @@ const SetScreen = () => {
       setWarningModalVisible(false);
       setPillCounts({ 1: 0, 2: 0, 3: 0 });
       setPillCountsLocked({ 1: false, 2: false, 3: false });
+      setAddingPill({ 1: false, 2: false, 3: false });
+      setAddingTime(false);
+      setContinuing(false);
     });
 
     return unsubscribe;
@@ -115,6 +124,9 @@ const SetScreen = () => {
     setWarningModalVisible(false);
     setPillCounts({ 1: 0, 2: 0, 3: 0 });
     setPillCountsLocked({ 1: false, 2: false, 3: false });
+    setAddingPill({ 1: false, 2: false, 3: false });
+    setAddingTime(false);
+    setContinuing(false);
   };
 
   const fetchMedications = async () => {
@@ -145,7 +157,7 @@ const SetScreen = () => {
     setAlarmModalVisible(true);
   };
 
-  const handleAddPill = (slot: PillSlot) => {
+  const handleAddPill = async (slot: PillSlot) => {
     // Check if we've reached max pill count for this container
     const maxCount = pillCounts[slot] || 0;
     const currentScheduleCount = alarms[slot].length;
@@ -160,13 +172,21 @@ const SetScreen = () => {
       return;
     }
     
+    setAddingPill(prev => ({ ...prev, [slot]: true }));
+    // Small delay to show loading animation
+    await new Promise(resolve => setTimeout(resolve, 300));
     setCurrentPillSlot(slot);
     setWarningModalVisible(true);
+    setAddingPill(prev => ({ ...prev, [slot]: false }));
   };
 
-  const handleContinue = () => {
+  const handleContinue = async () => {
+    setContinuing(true);
+    // Small delay to show loading animation
+    await new Promise(resolve => setTimeout(resolve, 300));
     setWarningModalVisible(false);
     setPillModalVisible(true);
+    setContinuing(false);
   };
 
   const onChangeDate = (event: any, selected?: Date) => {
@@ -213,8 +233,9 @@ const SetScreen = () => {
     setCurrentPillSlot(null);
   };
 
-  const confirmAlarm = () => {
+  const confirmAlarm = async () => {
     if (currentPillSlot === null) return;
+    setAddingTime(true);
     // Use the selectedDate that was set
     const today = new Date();
     const alarmTime = new Date(today);
@@ -223,7 +244,10 @@ const SetScreen = () => {
     alarmTime.setSeconds(0);
     alarmTime.setMilliseconds(0);
     
+    // Small delay to show loading animation
+    await new Promise(resolve => setTimeout(resolve, 300));
     confirmAlarmWithTime(alarmTime);
+    setAddingTime(false);
   };
 
   // Get current user ID from JWT token
@@ -650,7 +674,11 @@ const SetScreen = () => {
   };
 
   return (
-    <ScrollView style={[styles.container, { backgroundColor: theme.background }]}>
+    <ScrollView 
+      style={[styles.container, { backgroundColor: theme.background }]}
+      contentContainerStyle={styles.scrollContent}
+      showsVerticalScrollIndicator={false}
+    >
       {/* Header */}
       <View style={[styles.header, { backgroundColor: theme.card }]}>
         <TouchableOpacity 
@@ -669,7 +697,7 @@ const SetScreen = () => {
             }, 0);
           }}
         >
-          <Ionicons name="arrow-back" size={30} color={theme.text} />
+          <Ionicons name="arrow-back" size={24} color={theme.text} />
         </TouchableOpacity>
         <Text style={[styles.headerTitle, { color: theme.secondary }]}>
           SET-UP <Text style={[styles.headerHighlight, { color: theme.primary }]}>SCHEDULE</Text>
@@ -678,13 +706,11 @@ const SetScreen = () => {
 
       {/* RTC Time Display */}
       <View style={[styles.rtcTimeContainer, { backgroundColor: theme.card }]}>
-        <Ionicons name="time-outline" size={20} color={theme.primary} />
+        <Ionicons name="time-outline" size={16} color={theme.primary} />
         <Text style={[styles.rtcTimeText, { color: theme.text }]}>
           Device Time: {new Date().toLocaleString()}
         </Text>
       </View>
-
-      <Text style={[styles.sectionTitle, { color: theme.secondary }]}>Set Schedule</Text>
       
       {loading ? (
         <View style={styles.loadingContainer}>
@@ -695,10 +721,18 @@ const SetScreen = () => {
         <View style={styles.errorContainer}>
           <Text style={[styles.errorText, { color: theme.text }]}>{error}</Text>
           <TouchableOpacity 
-            style={[styles.retryButton, { backgroundColor: theme.primary }]}
+            style={[styles.retryButton, { backgroundColor: theme.primary, opacity: loading ? 0.7 : 1 }]}
             onPress={fetchMedications}
+            disabled={loading}
           >
-            <Text style={[styles.retryButtonText, { color: theme.card }]}>Retry</Text>
+            {loading ? (
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                <ActivityIndicator size="small" color={theme.card} />
+                <Text style={[styles.retryButtonText, { color: theme.card }]}>Loading...</Text>
+              </View>
+            ) : (
+              <Text style={[styles.retryButtonText, { color: theme.card }]}>Retry</Text>
+            )}
           </TouchableOpacity>
         </View>
       ) : (
@@ -707,148 +741,150 @@ const SetScreen = () => {
           const hasSchedule = alarms[num].length > 0;
           return (
           <View key={num} style={[styles.pillContainer, { backgroundColor: theme.card }]}>
-            <View style={{ flex: 1 }}>
-              {/* Container Header */}
-              <View style={styles.containerHeader}>
-                <View style={[styles.containerBadge, { backgroundColor: theme.primary }]}>
-                  <Text style={[styles.containerBadgeText, { color: theme.card }]}>Container {num}</Text>
-                </View>
-                <TouchableOpacity 
-                  onPress={() => handleAddPill(num)}
-                  style={[
-                    styles.addButton, 
-                    { 
-                      backgroundColor: theme.background,
-                      opacity: (!pillCountsLocked[num] || (alarms[num].length < (pillCounts[num] || 0))) ? 1 : 0.5
-                    }
-                  ]}
-                  disabled={pillCountsLocked[num] && alarms[num].length >= (pillCounts[num] || 0)}
-                >
+            {/* Container Header */}
+            <View style={styles.containerHeader}>
+              <View style={[styles.containerBadge, { backgroundColor: theme.primary }]}>
+                <Text style={[styles.containerBadgeText, { color: theme.card }]}>Container {num}</Text>
+              </View>
+              <TouchableOpacity 
+                onPress={() => handleAddPill(num)}
+                style={[
+                  styles.addButton, 
+                  { 
+                    backgroundColor: theme.background,
+                    opacity: (!pillCountsLocked[num] || (alarms[num].length < (pillCounts[num] || 0))) && !addingPill[num] ? 1 : 0.5
+                  }
+                ]}
+                disabled={(pillCountsLocked[num] && alarms[num].length >= (pillCounts[num] || 0)) || addingPill[num]}
+              >
+                {addingPill[num] ? (
+                  <ActivityIndicator size="small" color={theme.primary} />
+                ) : (
                   <Ionicons 
                     name="add-circle" 
-                    size={24} 
+                    size={22} 
                     color={pillCountsLocked[num] && alarms[num].length >= (pillCounts[num] || 0) ? theme.textSecondary : theme.primary} 
                   />
-                </TouchableOpacity>
+                )}
+              </TouchableOpacity>
+            </View>
+
+            {/* Pill Name */}
+            <Text style={[styles.pillName, { color: theme.text }]}>
+              {selectedPills[num] || "Tap + to add medication"}
+            </Text>
+
+            {/* Schedule Times */}
+            {hasSchedule ? (
+              <View style={styles.scheduleList}>
+                {alarms[num].map((alarm: Date, index: number) => {
+                  const timeStr = alarm.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
+                  return (
+                    <View key={index} style={[styles.scheduleItem, { backgroundColor: theme.background }]}>
+                      <Ionicons name="alarm" size={14} color={theme.primary} />
+                      <Text style={[styles.scheduleTime, { color: theme.text }]}>{timeStr}</Text>
+                      <TouchableOpacity 
+                        onPress={() => {
+                          const newAlarms = [...alarms[num]];
+                          newAlarms.splice(index, 1);
+                          setAlarms(prev => ({ ...prev, [num]: newAlarms }));
+                        }}
+                      >
+                        <Ionicons name="close-circle" size={16} color={theme.error} />
+                      </TouchableOpacity>
+                    </View>
+                  );
+                })}
               </View>
-
-              {/* Pill Name */}
-              <Text style={[styles.pillName, { color: theme.text }]}>
-                {selectedPills[num] || "Tap + to add medication"}
+            ) : (
+              <Text style={[styles.noScheduleText, { color: theme.textSecondary }]}>
+                No schedule set
               </Text>
+            )}
 
-              {/* Schedule Times */}
-              {hasSchedule ? (
-                <View style={styles.scheduleList}>
-                  {alarms[num].map((alarm: Date, index: number) => {
-                    const timeStr = alarm.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
-                    return (
-                      <View key={index} style={[styles.scheduleItem, { backgroundColor: theme.background }]}>
-                        <Ionicons name="alarm" size={16} color={theme.primary} />
-                        <Text style={[styles.scheduleTime, { color: theme.text }]}>{timeStr}</Text>
-                        <TouchableOpacity 
-                          onPress={() => {
-                            const newAlarms = [...alarms[num]];
-                            newAlarms.splice(index, 1);
-                            setAlarms(prev => ({ ...prev, [num]: newAlarms }));
-                          }}
-                        >
-                          <Ionicons name="close-circle" size={18} color={theme.error} />
-                        </TouchableOpacity>
-                      </View>
-                    );
-                  })}
+            {/* Pill Count */}
+            <View style={[styles.pillCountContainer, { borderTopColor: isDarkMode ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)' }]}>
+              <Text style={[styles.pillCountLabel, { color: theme.text }]}>Max Count:</Text>
+              {pillCountsLocked[num] ? (
+                <View style={styles.lockedCountContainer}>
+                  <Text style={[styles.pillCountValue, { color: theme.primary }]}>
+                    {pillCounts[num] || 0}
+                  </Text>
+                  <Ionicons name="lock-closed" size={14} color={theme.textSecondary} />
                 </View>
               ) : (
-                <Text style={[styles.noScheduleText, { color: theme.textSecondary }]}>
-                  No schedule set
-                </Text>
-              )}
-
-              {/* Pill Count */}
-              <View style={styles.pillCountContainer}>
-                <Text style={[styles.pillCountLabel, { color: theme.text }]}>Max Pill Count:</Text>
-                {pillCountsLocked[num] ? (
-                  <View style={styles.lockedCountContainer}>
-                    <Text style={[styles.pillCountValue, { color: theme.primary }]}>
-                      {pillCounts[num] || 0} (Locked)
-                    </Text>
-                    <Ionicons name="lock-closed" size={16} color={theme.textSecondary} />
-                  </View>
-                ) : (
-                  <View style={styles.pillCountControls}>
-                    <TouchableOpacity
-                      onPress={() => {
-                        const newCount = Math.max(0, (pillCounts[num] || 0) - 1);
-                        setPillCounts(prev => ({ ...prev, [num]: newCount }));
-                      }}
-                      style={[styles.countButton, { backgroundColor: theme.background }]}
-                    >
-                      <Text style={[styles.countButtonText, { color: theme.text }]}>−</Text>
-                    </TouchableOpacity>
-                    <Text style={[styles.pillCountValue, { color: theme.primary }]}>
-                      {pillCounts[num] || 0}
-                    </Text>
-                    <TouchableOpacity
-                      onPress={() => {
-                        const newCount = (pillCounts[num] || 0) + 1;
-                        setPillCounts(prev => ({ ...prev, [num]: newCount }));
-                      }}
-                      style={[styles.countButton, { backgroundColor: theme.background }]}
-                    >
-                      <Text style={[styles.countButtonText, { color: theme.text }]}>+</Text>
-                    </TouchableOpacity>
-                    {pillCounts[num] > 0 && (
-                      <TouchableOpacity
-                        onPress={() => {
-                          setPillCountsLocked(prev => ({ ...prev, [num]: true }));
-                          Alert.alert('Pill Count Locked', `Maximum pill count for Container ${num} is set to ${pillCounts[num]}. You can add up to ${pillCounts[num]} schedule times.`);
-                        }}
-                        style={[styles.lockButton, { backgroundColor: theme.primary }]}
-                      >
-                        <Ionicons name="lock-closed" size={16} color={theme.card} />
-                        <Text style={[styles.lockButtonText, { color: theme.card }]}>Lock</Text>
-                      </TouchableOpacity>
-                    )}
-                  </View>
-                )}
-                {pillCountsLocked[num] && (
-                  <Text style={[styles.countInfoText, { color: theme.textSecondary }]}>
-                    {alarms[num].length} / {pillCounts[num]} schedule times added
+                <View style={styles.pillCountControls}>
+                  <TouchableOpacity
+                    onPress={() => {
+                      const newCount = Math.max(0, (pillCounts[num] || 0) - 1);
+                      setPillCounts(prev => ({ ...prev, [num]: newCount }));
+                    }}
+                    style={[styles.countButton, { backgroundColor: theme.background }]}
+                  >
+                    <Text style={[styles.countButtonText, { color: theme.text }]}>−</Text>
+                  </TouchableOpacity>
+                  <Text style={[styles.pillCountValue, { color: theme.primary }]}>
+                    {pillCounts[num] || 0}
                   </Text>
-                )}
-              </View>
-
-              {/* Verification Status */}
-              {verifyStatus?.status && (
-                <View style={styles.verificationStatus}>
-                  {verifyStatus.status === 'pending' && (
-                    <>
-                      <ActivityIndicator size="small" color={theme.primary} />
-                      <Text style={[styles.verificationText, { color: theme.primary }]}>
-                        Verifying...
-                      </Text>
-                    </>
-                  )}
-                  {verifyStatus.status === 'success' && (
-                    <>
-                      <Ionicons name="checkmark-circle" size={16} color={theme.success} />
-                      <Text style={[styles.verificationText, { color: theme.success }]}>
-                        Verified
-                      </Text>
-                    </>
-                  )}
-                  {verifyStatus.status === 'failed' && (
-                    <>
-                      <Ionicons name="close-circle" size={16} color={theme.error} />
-                      <Text style={[styles.verificationText, { color: theme.error }]}>
-                        Failed
-                      </Text>
-                    </>
+                  <TouchableOpacity
+                    onPress={() => {
+                      const newCount = (pillCounts[num] || 0) + 1;
+                      setPillCounts(prev => ({ ...prev, [num]: newCount }));
+                    }}
+                    style={[styles.countButton, { backgroundColor: theme.background }]}
+                  >
+                    <Text style={[styles.countButtonText, { color: theme.text }]}>+</Text>
+                  </TouchableOpacity>
+                  {pillCounts[num] > 0 && (
+                    <TouchableOpacity
+                      onPress={() => {
+                        setPillCountsLocked(prev => ({ ...prev, [num]: true }));
+                        Alert.alert('Pill Count Locked', `Maximum pill count for Container ${num} is set to ${pillCounts[num]}. You can add up to ${pillCounts[num]} schedule times.`);
+                      }}
+                      style={[styles.lockButton, { backgroundColor: theme.primary }]}
+                    >
+                      <Ionicons name="lock-closed" size={14} color={theme.card} />
+                      <Text style={[styles.lockButtonText, { color: theme.card }]}>Lock</Text>
+                    </TouchableOpacity>
                   )}
                 </View>
               )}
             </View>
+            {pillCountsLocked[num] && (
+              <Text style={[styles.countInfoText, { color: theme.textSecondary }]}>
+                {alarms[num].length} / {pillCounts[num]} schedule times added
+              </Text>
+            )}
+
+            {/* Verification Status */}
+            {verifyStatus?.status && (
+              <View style={styles.verificationStatus}>
+                {verifyStatus.status === 'pending' && (
+                  <>
+                    <ActivityIndicator size="small" color={theme.primary} />
+                    <Text style={[styles.verificationText, { color: theme.primary }]}>
+                      Verifying...
+                    </Text>
+                  </>
+                )}
+                {verifyStatus.status === 'success' && (
+                  <>
+                    <Ionicons name="checkmark-circle" size={14} color={theme.success} />
+                    <Text style={[styles.verificationText, { color: theme.success }]}>
+                      Verified
+                    </Text>
+                  </>
+                )}
+                {verifyStatus.status === 'failed' && (
+                  <>
+                    <Ionicons name="close-circle" size={14} color={theme.error} />
+                    <Text style={[styles.verificationText, { color: theme.error }]}>
+                      Failed
+                    </Text>
+                  </>
+                )}
+              </View>
+            )}
           </View>
           );
         })
@@ -885,9 +921,17 @@ const SetScreen = () => {
             </Text>
             <TouchableOpacity 
               onPress={handleContinue} 
-              style={[styles.continueButton, { backgroundColor: theme.primary }]}
+              style={[styles.continueButton, { backgroundColor: theme.primary, opacity: continuing ? 0.7 : 1 }]}
+              disabled={continuing}
             >
-              <Text style={[styles.continueButtonText, { color: theme.card }]}>Continue</Text>
+              {continuing ? (
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                  <ActivityIndicator size="small" color={theme.card} />
+                  <Text style={[styles.continueButtonText, { color: theme.card }]}>Loading...</Text>
+                </View>
+              ) : (
+                <Text style={[styles.continueButtonText, { color: theme.card }]}>Continue</Text>
+              )}
             </TouchableOpacity>
           </View>
         </View>
@@ -902,7 +946,7 @@ const SetScreen = () => {
             <FlatList 
               data={medications} 
               keyExtractor={(item) => item._id} 
-              style={{ maxHeight: 300, width: '100%' }}
+              style={{ maxHeight: 250, width: '100%' }}
               renderItem={({ item }) => (
                 <TouchableOpacity 
                   onPress={() => handlePillSelection(item.name)} 
@@ -978,14 +1022,23 @@ const SetScreen = () => {
                   setShowTimePicker(false);
                 }}
                 style={[styles.modalButton, { backgroundColor: theme.secondary }]}
+                disabled={addingTime}
               >
                 <Text style={[styles.modalButtonText, { color: theme.card }]}>Cancel</Text>
               </TouchableOpacity>
               <TouchableOpacity 
                 onPress={confirmAlarm} 
-                style={[styles.modalButton, { backgroundColor: theme.primary }]}
+                style={[styles.modalButton, { backgroundColor: theme.primary, opacity: addingTime ? 0.7 : 1 }]}
+                disabled={addingTime}
               >
-                <Text style={[styles.modalButtonText, { color: theme.card }]}>Add Time</Text>
+                {addingTime ? (
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                    <ActivityIndicator size="small" color={theme.card} />
+                    <Text style={[styles.modalButtonText, { color: theme.card }]}>Adding...</Text>
+                  </View>
+                ) : (
+                  <Text style={[styles.modalButtonText, { color: theme.card }]}>Add Time</Text>
+                )}
               </TouchableOpacity>
             </View>
           </View>
@@ -998,25 +1051,31 @@ const SetScreen = () => {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    padding: 20,
+  },
+  scrollContent: {
+    padding: 12,
+    paddingBottom: 20,
   },
   header: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'flex-start',
     width: '100%',
-    marginTop: 40,
-    padding: 15,
-    borderRadius: 15,
-    elevation: 8,
+    marginTop: 10,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderRadius: 12,
+    elevation: 3,
+    marginBottom: 10,
   },
   backButton: {
-    padding: 10,
+    padding: 6,
+    marginRight: 4,
   },
   headerTitle: {
-    fontSize: 22,
+    fontSize: 18,
     fontWeight: 'bold',
-    marginLeft: 10,
+    marginLeft: 4,
   },
   headerHighlight: {
     color: '#4A90E2',
@@ -1035,40 +1094,38 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
   pillContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    borderRadius: 15,
-    padding: 15,
-    marginVertical: 8,
+    borderRadius: 12,
+    padding: 12,
+    marginVertical: 6,
     width: '100%',
-    justifyContent: 'space-between',
-    elevation: 3,
+    elevation: 2,
   },
   rtcTimeContainer: {
     flexDirection: 'row',
     alignItems: 'center',
-    padding: 12,
+    padding: 10,
     borderRadius: 10,
-    marginBottom: 15,
-    gap: 8,
+    marginBottom: 10,
+    gap: 6,
   },
   rtcTimeText: {
-    fontSize: 14,
+    fontSize: 12,
     fontWeight: '500',
+    flex: 1,
   },
   containerHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 8,
+    marginBottom: 6,
   },
   containerBadge: {
-    paddingHorizontal: 12,
+    paddingHorizontal: 10,
     paddingVertical: 4,
-    borderRadius: 12,
+    borderRadius: 8,
   },
   containerBadgeText: {
-    fontSize: 14,
+    fontSize: 12,
     fontWeight: 'bold',
   },
   addButton: {
@@ -1076,64 +1133,64 @@ const styles = StyleSheet.create({
     borderRadius: 20,
   },
   pillName: {
-    fontSize: 16,
+    fontSize: 14,
     fontWeight: '600',
-    marginBottom: 10,
-    minHeight: 24,
+    marginBottom: 8,
+    minHeight: 20,
   },
   scheduleList: {
-    marginBottom: 10,
-    gap: 6,
+    marginBottom: 8,
+    gap: 4,
   },
   scheduleItem: {
     flexDirection: 'row',
     alignItems: 'center',
-    padding: 8,
-    borderRadius: 8,
-    gap: 8,
+    padding: 6,
+    borderRadius: 6,
+    gap: 6,
   },
   scheduleTime: {
-    fontSize: 14,
+    fontSize: 13,
     fontWeight: '500',
     flex: 1,
   },
   noScheduleText: {
-    fontSize: 13,
+    fontSize: 12,
     fontStyle: 'italic',
-    marginBottom: 10,
+    marginBottom: 8,
   },
   pillCountContainer: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    marginTop: 8,
-    paddingTop: 8,
+    marginTop: 6,
+    paddingTop: 6,
     borderTopWidth: 1,
   },
   pillCountLabel: {
-    fontSize: 14,
+    fontSize: 12,
     fontWeight: '500',
   },
   pillCountControls: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 12,
+    gap: 8,
   },
   countButton: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
+    width: 28,
+    height: 28,
+    borderRadius: 14,
     justifyContent: 'center',
     alignItems: 'center',
   },
   countButtonText: {
-    fontSize: 20,
+    fontSize: 18,
     fontWeight: 'bold',
   },
   pillCountValue: {
-    fontSize: 18,
+    fontSize: 16,
     fontWeight: 'bold',
-    minWidth: 30,
+    minWidth: 24,
     textAlign: 'center',
   },
   pillText: {
@@ -1145,9 +1202,9 @@ const styles = StyleSheet.create({
     marginTop: 4,
   },
   confirmButton: {
-    padding: 15,
+    padding: 14,
     borderRadius: 12,
-    marginTop: 20,
+    marginTop: 12,
     width: '100%',
     alignItems: 'center',
     elevation: 3,
@@ -1163,9 +1220,10 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(0,0,0,0.5)',
   },
   modalContent: {
-    width: 350,
-    maxHeight: 500,
-    padding: 20,
+    width: '90%',
+    maxWidth: 350,
+    maxHeight: '80%',
+    padding: 16,
     borderRadius: 15,
     alignItems: 'center',
     elevation: 5,
@@ -1178,47 +1236,48 @@ const styles = StyleSheet.create({
     padding: 5,
   },
   modalTitle: {
-    fontSize: 20,
+    fontSize: 18,
     fontWeight: 'bold',
-    marginBottom: 8,
+    marginBottom: 6,
     textAlign: 'center',
+    marginTop: 8,
   },
   modalSubtitle: {
-    fontSize: 14,
-    marginBottom: 20,
+    fontSize: 13,
+    marginBottom: 16,
     textAlign: 'center',
   },
   timeButton: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    padding: 15,
-    borderRadius: 12,
+    padding: 12,
+    borderRadius: 10,
     borderWidth: 2,
-    marginBottom: 20,
-    gap: 10,
+    marginBottom: 16,
+    gap: 8,
   },
   timeButtonText: {
-    fontSize: 18,
+    fontSize: 16,
     fontWeight: 'bold',
   },
   modalButtons: {
     flexDirection: 'row',
-    gap: 12,
+    gap: 10,
     width: '100%',
   },
   modalButton: {
     flex: 1,
-    padding: 12,
-    borderRadius: 10,
+    padding: 10,
+    borderRadius: 8,
     alignItems: 'center',
   },
   modalButtonText: {
-    fontSize: 16,
+    fontSize: 14,
     fontWeight: 'bold',
   },
   modalItem: {
-    padding: 15,
+    padding: 12,
     borderBottomWidth: 1,
     width: '100%',
   },
@@ -1226,14 +1285,14 @@ const styles = StyleSheet.create({
     fontSize: 16,
   },
   cancelButton: {
-    marginTop: 20,
-    padding: 15,
-    borderRadius: 12,
+    marginTop: 12,
+    padding: 12,
+    borderRadius: 10,
     width: '100%',
     alignItems: 'center',
   },
   cancelButtonText: {
-    fontSize: 16,
+    fontSize: 14,
     fontWeight: 'bold',
   },
   datePickerText: {
@@ -1241,24 +1300,24 @@ const styles = StyleSheet.create({
     marginBottom: 15,
   },
   warningIcon: {
-    marginBottom: 15,
-    marginTop: 10,
+    marginBottom: 12,
+    marginTop: 8,
   },
   warningText: {
-    fontSize: 16,
+    fontSize: 14,
     textAlign: 'center',
-    marginBottom: 25,
-    lineHeight: 24,
+    marginBottom: 16,
+    lineHeight: 20,
   },
   continueButton: {
-    padding: 15,
-    borderRadius: 12,
+    padding: 12,
+    borderRadius: 10,
     width: '100%',
     alignItems: 'center',
     elevation: 3,
   },
   continueButtonText: {
-    fontSize: 18,
+    fontSize: 16,
     fontWeight: 'bold',
   },
   errorText: {
@@ -1294,22 +1353,22 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
   },
   medicationItem: {
-    paddingVertical: 8,
+    paddingVertical: 6,
   },
   medicationName: {
-    fontSize: 18,
+    fontSize: 16,
     fontWeight: 'bold',
-    marginBottom: 4,
+    marginBottom: 3,
   },
   medicationStrength: {
-    fontSize: 14,
-    marginBottom: 4,
+    fontSize: 13,
+    marginBottom: 3,
     opacity: 0.8,
   },
   medicationDescription: {
-    fontSize: 12,
+    fontSize: 11,
     opacity: 0.7,
-    lineHeight: 16,
+    lineHeight: 14,
   },
   debugText: {
     fontSize: 14,
@@ -1340,23 +1399,23 @@ const styles = StyleSheet.create({
   lockedCountContainer: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
+    gap: 6,
   },
   lockButton: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 6,
     gap: 4,
-    marginLeft: 8,
+    marginLeft: 6,
   },
   lockButtonText: {
-    fontSize: 12,
+    fontSize: 11,
     fontWeight: 'bold',
   },
   countInfoText: {
-    fontSize: 12,
+    fontSize: 11,
     marginTop: 4,
     fontStyle: 'italic',
   },

@@ -1,25 +1,29 @@
-import React from 'react';
-import { useNavigation } from '@react-navigation/native';
-import { StackNavigationProp } from '@react-navigation/stack';
+import React, { useEffect } from 'react';
+import { BackHandler } from 'react-native';
+import { useRouter } from 'expo-router';
 import ElderProfile from './components/ElderProfile';
 
-type RootStackParamList = {
-  CaregiverDashboard: undefined;
-};
-
-type NavigationProp = StackNavigationProp<RootStackParamList>;
-
 export default function EldersProf() {
-  const navigation = useNavigation<NavigationProp>();
+  const router = useRouter();
 
   const handleElderSelected = (elderId: string, elderName: string) => {
     // Navigate back to dashboard after elder selection
-    navigation.navigate('CaregiverDashboard');
+    router.back();
   };
 
   const handleBack = () => {
-    navigation.navigate('CaregiverDashboard');
+    router.back();
   };
+
+  // Handle Android hardware back button
+  useEffect(() => {
+    const backHandler = BackHandler.addEventListener('hardwareBackPress', () => {
+      handleBack();
+      return true; // Prevent default behavior
+    });
+
+    return () => backHandler.remove();
+  }, []);
 
   return (
     <ElderProfile 

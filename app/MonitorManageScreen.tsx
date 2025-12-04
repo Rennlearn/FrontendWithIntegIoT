@@ -67,7 +67,7 @@ const MonitorManageScreen = () => {
   // NO auto-deletion, NO auto-sync - user must manually sync or delete
   useEffect(() => {
     const loadData = async () => {
-      await loadScheduleData(false, false); // NO sync to Arduino, NO auto-delete
+      await loadScheduleData(false, false, true); // NO sync to Arduino, NO auto-delete, show loading on initial load
       await loadVerifications();
     };
     loadData();
@@ -103,7 +103,7 @@ const MonitorManageScreen = () => {
   // Auto-delete missed schedules, then sync remaining schedules to Arduino
   useEffect(() => {
     const unsubscribe = navigation.addListener('focus', async () => {
-      await loadScheduleData(true, true); // Sync to Arduino AND auto-delete missed schedules
+      await loadScheduleData(true, true, true); // Sync to Arduino AND auto-delete missed schedules, show loading
       await loadVerifications();
     });
 
@@ -115,8 +115,14 @@ const MonitorManageScreen = () => {
   // Note: We reload data but don't sync to Arduino to avoid constant re-syncing
   useEffect(() => {
     let cycleCount = 0;
-    const id = setInterval(async () => {
+    
+    // Update clock tick every 10 seconds to trigger status re-derivation
+    const statusUpdateInterval = setInterval(() => {
       setClockTick((t) => t + 1);
+    }, 10000); // Update every 10 seconds for real-time status changes
+    
+    // Reload data every 30 seconds
+    const dataReloadInterval = setInterval(async () => {
       cycleCount++;
       
       // Every 2 minutes (4 cycles of 30 seconds), run auto-deletion to clean up missed schedules
@@ -125,16 +131,20 @@ const MonitorManageScreen = () => {
       try {
         if (shouldAutoDelete) {
           console.log('[MonitorManageScreen] 🔄 Periodic auto-deletion cycle (every 2 minutes)');
-          await loadScheduleData(false, true); // Skip Arduino sync, but run auto-deletion
+          await loadScheduleData(false, true, false); // Skip Arduino sync, but run auto-deletion, no loading
         } else {
-          // Just reload for status updates, no deletion
-          await loadScheduleData(false, false); // Pass false to skip Arduino sync and auto-deletion
+          // Just reload for status updates, no deletion, no loading
+          await loadScheduleData(false, false, false); // Pass false to skip Arduino sync, auto-deletion, and loading
         }
       } catch (err) {
         console.warn('[MonitorManageScreen] Error during periodic schedule cleanup:', err);
       }
-    }, 30000); // Check every 30 seconds
-    return () => clearInterval(id);
+    }, 30000); // Reload data every 30 seconds
+    
+    return () => {
+      clearInterval(statusUpdateInterval);
+      clearInterval(dataReloadInterval);
+    };
   }, [loadScheduleData]);
 
   // Listen for Bluetooth alarm notifications
@@ -306,7 +316,7 @@ const MonitorManageScreen = () => {
           setTimeout(async () => {
             console.log('[MonitorManageScreen] Reloading schedules after alarm trigger...');
             try {
-              await loadScheduleData(false, false); // Don't sync to Arduino, don't auto-delete
+              await loadScheduleData(false, false, false); // Don't sync to Arduino, don't auto-delete, no loading
             } catch (err) {
               console.warn('[MonitorManageScreen] Error reloading schedules after alarm:', err);
             }
@@ -458,7 +468,7 @@ const MonitorManageScreen = () => {
                 
                 // Also reload schedules to update status after pill taken
                 try {
-                  await loadScheduleData(false, false); // Don't sync to Arduino, don't auto-delete
+                  await loadScheduleData(false, false, false); // Don't sync to Arduino, don't auto-delete, no loading
                 } catch (err) {
                   console.warn('[MonitorManageScreen] Error reloading schedules after post-pill capture:', err);
                 }
@@ -581,9 +591,11 @@ const MonitorManageScreen = () => {
   };
 
   // Load schedule data
-  const loadScheduleData = useCallback(async (syncToArduino: boolean = true, autoDeleteMissed: boolean = true) => {
+  const loadScheduleData = useCallback(async (syncToArduino: boolean = true, autoDeleteMissed: boolean = true, showLoading: boolean = true) => {
     try {
-      setLoading(true);
+      if (showLoading) {
+        setLoading(true);
+      }
       setError(null);
       
       // Get current user ID
@@ -896,14 +908,16 @@ const MonitorManageScreen = () => {
       const errorMessage = err instanceof Error ? err.message : 'Failed to load schedule data';
       setError(errorMessage);
     } finally {
-      setLoading(false);
+      if (showLoading) {
+        setLoading(false);
+      }
     }
   }, []);
 
   // Manual refresh function
   // Auto-delete missed schedules, then sync remaining schedules to Arduino
   const handleRefresh = async () => {
-    await loadScheduleData(true, true); // Sync to Arduino AND auto-delete missed schedules
+    await loadScheduleData(true, true, true); // Sync to Arduino AND auto-delete missed schedules, show loading
     await loadVerifications();
   };
 
@@ -1039,7 +1053,7 @@ const MonitorManageScreen = () => {
 
               // Reload schedules to reflect deletions
               console.log('[MonitorManageScreen] Reloading schedules after deletion...');
-              await loadScheduleData(true, false);
+              await loadScheduleData(true, false, false); // Sync to Arduino, no auto-delete, no loading
               await loadVerifications();
               
               // Show appropriate alert based on results
@@ -1155,26 +1169,41 @@ const MonitorManageScreen = () => {
   const containerSchedules = getContainerSchedules();
 
   // Helper to derive status locally without mutating backend
-  // Only mark as "Missed" if it's been more than 2 minutes past the scheduled time
-  const deriveStatus = (schedule: any): 'Pending' | 'Missed' | string => {
-    if (!schedule?.date || !schedule?.time) return schedule?.status || 'Pending';
+  // Mark as "Missed" if it's been more than 1 minute past the scheduled time
+  const deriveStatus = (schedule: any): 'Pending' | 'Missed' | 'Taken' | string => {
+    const rawStatus = (schedule?.status || 'Pending') as string;
+    
+    // If already marked as Done, show as Taken
+    if (rawStatus.toLowerCase() === 'done') {
+      return 'Taken';
+    }
+    
+    // If already marked as Missed, keep it as Missed
+    if (rawStatus.toLowerCase() === 'missed') {
+      return 'Missed';
+    }
+    
+    if (!schedule?.date || !schedule?.time) return rawStatus || 'Pending';
+    
     try {
       const [y, m, d] = String(schedule.date).split('-').map(Number);
       const [hh, mm] = String(schedule.time).split(':').map(Number);
       const when = new Date(y, (m || 1) - 1, d, hh, mm);
       const now = new Date();
-      const twoMinutesAgo = now.getTime() - (2 * 60 * 1000); // 2 minutes buffer
+      const oneMinuteAgo = now.getTime() - (1 * 60 * 1000); // 1 minute buffer
       
-      // Only mark as "Missed" if:
-      // 1. Status is "Pending" (not already Done/Missed)
+      // Mark as "Missed" if:
+      // 1. Status is "Pending" or "Active" (not already Done/Missed)
       // 2. Current time is past scheduled time
-      // 3. It's been more than 2 minutes past (buffer to prevent premature marking)
-      if (schedule.status === 'Pending' && when.getTime() < twoMinutesAgo) {
+      // 3. It's been more than 1 minute past (buffer to prevent premature marking)
+      const isPendingOrActive = rawStatus === 'Pending' || rawStatus === 'Active' || !rawStatus;
+      if (isPendingOrActive && when.getTime() < oneMinuteAgo) {
         return 'Missed';
       }
-      return schedule.status;
+      
+      return rawStatus || 'Pending';
     } catch {
-      return schedule.status || 'Pending';
+      return rawStatus || 'Pending';
     }
   };
 
@@ -1329,12 +1358,6 @@ const MonitorManageScreen = () => {
           onPress={() => navigation.navigate("Adherence" as never)}
         > 
           <Text style={[styles.buttonText, { color: theme.card }]}>VIEW ADHERENCE STATS & LOGS</Text>
-        </TouchableOpacity>
-        <TouchableOpacity 
-          style={[styles.button, { backgroundColor: theme.primary }]} 
-          onPress={() => navigation.navigate("Generate" as never)}
-        > 
-          <Text style={[styles.buttonText, { color: theme.card }]}>GENERATE REPORTS</Text>
         </TouchableOpacity>
       </View>
     </ScrollView>

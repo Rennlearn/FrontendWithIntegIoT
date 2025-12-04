@@ -1,16 +1,16 @@
 import React, { useState, useEffect } from "react";
-import { View, Text, TouchableOpacity, Image, StyleSheet, Alert, AppState, ScrollView } from "react-native";
+import { View, Text, TouchableOpacity, Image, StyleSheet, Modal, Alert, AppState, ScrollView } from "react-native";
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import MedicationNotification from './components/MedicationNotification';
 import { useTheme } from './context/ThemeContext';
 import { lightTheme, darkTheme } from './styles/theme';
 import BluetoothService from './services/BluetoothService';
 
-const isDevEnv = typeof globalThis !== 'undefined' && Boolean((globalThis as any).__DEV__);
-
 const ElderDashboard = () => {
   const router = useRouter();
+  const [showNotification, setShowNotification] = useState(false);
   const [isBluetoothConnected, setIsBluetoothConnected] = useState(false);
   const [locateBoxActive, setLocateBoxActive] = useState(false);
   const { isDarkMode } = useTheme();
@@ -32,9 +32,7 @@ const ElderDashboard = () => {
   useEffect(() => {
     const handleAppStateChange = (nextAppState: string) => {
       if (nextAppState === 'active') {
-        if (isDevEnv) {
-          console.log('App became active - checking connection status');
-        }
+        console.log('App became active - checking connection status');
         checkBluetoothConnection();
       }
     };
@@ -53,13 +51,15 @@ const ElderDashboard = () => {
       const isConnected = await BluetoothService.isConnectionActive();
       setIsBluetoothConnected(isConnected);
       
-      if (isDevEnv) {
-        console.log(`ElderDashboard connection check: ${isConnected ? 'Connected' : 'Disconnected'}`);
-      }
+      console.log(`ElderDashboard connection check: ${isConnected ? 'Connected' : 'Disconnected'}`);
     } catch (error) {
       console.error('Error checking Bluetooth connection:', error);
       setIsBluetoothConnected(false);
     }
+  };
+
+  const handleDismissNotification = () => {
+    setShowNotification(false);
   };
 
   const handleLocateBox = async () => {
@@ -102,13 +102,32 @@ const ElderDashboard = () => {
   };
 
 
-  const handleLogout = async () => {
-    try {
-      await AsyncStorage.removeItem('token');
-      router.push('/LoginScreen');
-    } catch (error) {
-      console.error('Logout error:', error);
-    }
+  const handleLogout = () => {
+    Alert.alert(
+      'Logout',
+      'Are you sure you want to logout?',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Logout',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              await AsyncStorage.multiRemove([
+                'token',
+                'userRole',
+                'selectedElderId',
+              ]);
+              router.replace('/LoginScreen');
+            } catch (error) {
+              console.error('Logout error:', error);
+              Alert.alert('Error', 'Failed to logout. Please try again.');
+            }
+          },
+        },
+      ],
+      { cancelable: true }
+    );
   };
 
   return (
@@ -117,85 +136,120 @@ const ElderDashboard = () => {
       contentContainerStyle={styles.scrollContent}
       showsVerticalScrollIndicator={false}
     >
+      <Modal
+        visible={showNotification}
+        transparent={true}
+        animationType="slide"
+        onRequestClose={handleDismissNotification}
+      >
+        <View style={[styles.modalOverlay, { backgroundColor: 'rgba(0, 0, 0, 0.5)' }]}>
+          <View style={[styles.modalContent, { backgroundColor: theme.card }]}>
+            <MedicationNotification
+              medicineName="Metformin"
+              containerId={2}
+              scheduledTime="08:00 AM"
+              onDismiss={handleDismissNotification}
+            />
+          </View>
+        </View>
+      </Modal>
+
       {/* Header */}
       <View style={[styles.header, { backgroundColor: theme.card }]}>
-        <TouchableOpacity 
-          style={styles.backButton} 
-          onPress={() => router.push('/LoginScreen')}
-        >
-          
-        </TouchableOpacity>
+        <View style={{ width: 40 }} />
         <Text style={[styles.title, { color: theme.secondary }]}>
-          WELCOME TO, <Text style={[styles.highlight, { color: theme.primary }]}>PILLNOW</Text>
+          WELCOME TO <Text style={[styles.highlight, { color: theme.primary }]}>PILLNOW</Text>
         </Text>
         <TouchableOpacity 
           style={styles.logoutButton} 
           onPress={handleLogout}
         >
-          <Ionicons name="log-out-outline" size={30} color={theme.text} />
+          <Ionicons name="log-out-outline" size={24} color={theme.text} />
         </TouchableOpacity>
       </View>
 
-      
+      {/* Compact Logo */}
+      <View style={styles.logoContainer}>
+        <Image
+          source={require("../assets/images/pill.png")}
+          style={styles.pillImage}
+        />
+        <Text style={[styles.dashboardTitle, { color: theme.secondary }]}>ELDER'S DASHBOARD</Text>
+      </View>
 
-      {/* Logo */}
-      <Image
-        source={require("../assets/images/pill.png")}
-        style={styles.pillImage}
-      />
-
-      {/* Elder's Dashboard */}
-      <Text style={[styles.dashboardTitle, { color: theme.secondary }]}>ELDER'S DASHBOARD</Text>
-
-      <View style={[styles.actionSection, { backgroundColor: theme.card }]}>
-        <View style={styles.actionRow}>
-          <TouchableOpacity 
-            style={[styles.actionButton, { backgroundColor: theme.background }]} 
-            onPress={() => router.push('/BluetoothScreen')}
-          >
-            <Ionicons name="bluetooth" size={36} color={theme.text} />
-            <Text style={[styles.iconLabel, { color: theme.text }]}>Bluetooth</Text>
-          </TouchableOpacity>
-          <TouchableOpacity 
-            style={[
-              styles.actionButton, 
-              { 
-                backgroundColor: locateBoxActive ? theme.warning : theme.background,
-                borderWidth: isBluetoothConnected ? 2 : 0,
-                borderColor: isBluetoothConnected ? theme.success : 'transparent'
-              }
-            ]} 
-            onPress={handleLocateBox}
-          >
-            <Ionicons 
-              name="location" 
-              size={36} 
-              color={locateBoxActive ? theme.card : (isBluetoothConnected ? theme.success : theme.text)} 
-            />
-            <Text style={[
-              styles.iconLabel, 
-              { 
-                color: locateBoxActive ? theme.card : (isBluetoothConnected ? theme.success : theme.text),
-                fontWeight: locateBoxActive ? 'bold' : '600'
-              }
-            ]}>
-              {locateBoxActive ? 'Stop Locate' : 'Locate Box'}
-            </Text>
-            {isBluetoothConnected && (
-              <View style={[styles.connectionIndicator, { backgroundColor: theme.success }]} />
-            )}
-          </TouchableOpacity>
-        </View>
+      {/* Action Buttons - Compact Grid */}
+      <View style={[styles.actionCard, { backgroundColor: theme.card }]}>
         <TouchableOpacity 
-          style={[styles.monitorButton, { backgroundColor: theme.secondary }]}
+          style={[
+            styles.actionButton, 
+            { 
+              backgroundColor: theme.background,
+              borderWidth: isBluetoothConnected ? 2 : 1,
+              borderColor: isBluetoothConnected ? theme.success : theme.border
+            }
+          ]} 
+          onPress={() => router.push('/BluetoothScreen')}
+        >
+          <Ionicons 
+            name="bluetooth" 
+            size={28} 
+            color={isBluetoothConnected ? theme.success : theme.text} 
+          />
+          <Text style={[
+            styles.actionLabel, 
+            { 
+              color: isBluetoothConnected ? theme.success : theme.text,
+              fontWeight: isBluetoothConnected ? 'bold' : 'normal'
+            }
+          ]}>
+            Bluetooth
+          </Text>
+          {isBluetoothConnected && (
+            <View style={[styles.connectionIndicator, { backgroundColor: theme.success }]} />
+          )}
+        </TouchableOpacity>
+
+        <TouchableOpacity 
+          style={[
+            styles.actionButton, 
+            { 
+              backgroundColor: locateBoxActive ? theme.warning : theme.background,
+              borderWidth: isBluetoothConnected ? 2 : 1,
+              borderColor: isBluetoothConnected ? theme.success : theme.border
+            }
+          ]} 
+          onPress={handleLocateBox}
+        >
+          <Ionicons 
+            name="location" 
+            size={28} 
+            color={locateBoxActive ? theme.card : (isBluetoothConnected ? theme.success : theme.text)} 
+          />
+          <Text style={[
+            styles.actionLabel, 
+            { 
+              color: locateBoxActive ? theme.card : (isBluetoothConnected ? theme.success : theme.text),
+              fontWeight: locateBoxActive ? 'bold' : 'normal'
+            }
+          ]}>
+            {locateBoxActive ? 'Stop Locate' : 'Locate Box'}
+          </Text>
+          {isBluetoothConnected && (
+            <View style={[styles.connectionIndicator, { backgroundColor: theme.success }]} />
+          )}
+        </TouchableOpacity>
+      </View>
+
+      {/* Monitor & Manage Button */}
+      <View style={styles.buttonContainer}>
+        <TouchableOpacity 
+          style={[styles.dashboardButton, { backgroundColor: theme.secondary }]}
           onPress={() => router.push('/MonitorManageScreen')}
         >
-          <Ionicons name="desktop" size={32} color={theme.card} />
+          <Ionicons name="desktop" size={22} color={theme.card} />
           <Text style={[styles.buttonText, { color: theme.card }]}>MONITOR & MANAGE</Text>
         </TouchableOpacity>
       </View>
-      
-      
     </ScrollView>
   );
 };
@@ -205,89 +259,108 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   scrollContent: {
-    alignItems: 'center',
-    padding: 15,
-    paddingBottom: 30,
+    paddingBottom: 20,
   },
   header: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    width: '100%',
-    marginTop: 20,
-    padding: 12,
-    borderRadius: 15,
-    elevation: 8,
-  },
-  backButton: {
-    padding: 10,
+    paddingHorizontal: 16,
+    paddingTop: 50,
+    paddingBottom: 16,
+    elevation: 4,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
   },
   title: {
-    fontSize: 22,
+    fontSize: 20,
     fontWeight: 'bold',
-    marginLeft: 10,
+    flex: 1,
+    textAlign: 'center',
   },
   highlight: {
-    color: '#4A90E2',
+    fontWeight: 'bold',
+  },
+  logoutButton: {
+    padding: 8,
+    borderRadius: 20,
+    width: 40,
+    height: 40,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  logoContainer: {
+    alignItems: 'center',
+    marginTop: 12,
+    marginBottom: 16,
   },
   pillImage: {
-    width: 70,
-    height: 70,
-    marginVertical: 10,
+    width: 60,
+    height: 60,
+    marginBottom: 8,
   },
   dashboardTitle: {
-    fontSize: 18,
+    fontSize: 16,
     fontWeight: 'bold',
-    marginVertical: 8,
   },
-  actionSection: {
-    width: '90%',
-    marginVertical: 10,
-    padding: 16,
-    borderRadius: 20,
-    elevation: 5,
-  },
-  actionRow: {
+  actionCard: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
+    marginHorizontal: 16,
+    marginBottom: 16,
+    padding: 12,
+    borderRadius: 16,
     gap: 12,
+    elevation: 3,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
   },
   actionButton: {
     flex: 1,
-    paddingVertical: 30,
-    borderRadius: 16,
     alignItems: 'center',
-    elevation: 3,
+    justifyContent: 'center',
+    paddingVertical: 16,
+    paddingHorizontal: 12,
+    borderRadius: 12,
+    position: 'relative',
   },
-  iconLabel: {
-    marginTop: 5,
-    fontSize: 16,
+  actionLabel: {
+    marginTop: 6,
+    fontSize: 12,
     textAlign: 'center',
-    fontWeight: '600',
+  },
+  connectionIndicator: {
+    position: 'absolute',
+    top: 8,
+    right: 8,
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+  },
+  buttonContainer: {
+    paddingHorizontal: 16,
+    gap: 10,
   },
   dashboardButton: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    padding: 12,
-    borderRadius: 10,
-    marginVertical: 6,
+    paddingVertical: 14,
+    paddingHorizontal: 16,
+    borderRadius: 12,
+    gap: 8,
     elevation: 3,
-  },
-  monitorButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginTop: 16,
-    paddingVertical: 22,
-    borderRadius: 16,
-    gap: 12,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
   },
   buttonText: {
-    textAlign: 'center',
-    marginLeft: 8,
-    fontWeight: 'bold',
     fontSize: 14,
+    fontWeight: 'bold',
   },
   modalOverlay: {
     flex: 1,
@@ -301,35 +374,6 @@ const styles = StyleSheet.create({
     borderRadius: 25,
     padding: 30,
     elevation: 5,
-  },
-  logoutButton: {
-    padding: 10,
-  },
-  statusContainer: {
-    width: '90%',
-    marginVertical: 8,
-  },
-  notificationBadge: {
-    position: 'absolute',
-    top: 5,
-    right: 5,
-    borderRadius: 10,
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    minWidth: 20,
-    alignItems: 'center',
-  },
-  notificationBadgeText: {
-    fontSize: 10,
-    fontWeight: 'bold',
-  },
-  connectionIndicator: {
-    position: 'absolute',
-    top: 5,
-    right: 5,
-    width: 8,
-    height: 8,
-    borderRadius: 4,
   },
 });
 
