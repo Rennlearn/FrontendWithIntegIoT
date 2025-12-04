@@ -152,6 +152,23 @@ const SetScreen = () => {
 
   const handlePillSelection = (pill: string) => {
     if (currentPillSlot === null) return;
+    
+    // Check if this pill is already assigned to another container
+    const otherContainers = Object.entries(selectedPills)
+      .filter(([slot, selectedPill]) => 
+        slot !== currentPillSlot.toString() && selectedPill === pill
+      );
+    
+    if (otherContainers.length > 0) {
+      const containerNumbers = otherContainers.map(([slot]) => slot).join(', ');
+      Alert.alert(
+        'Pill Already Assigned',
+        `This pill (${pill}) is already assigned to Container ${containerNumbers}. Each pill can only be assigned to one container.`,
+        [{ text: 'OK' }]
+      );
+      return;
+    }
+    
     setSelectedPills((prev) => ({ ...prev, [currentPillSlot]: pill }));
     setPillModalVisible(false);
     setAlarmModalVisible(true);
@@ -278,6 +295,34 @@ const SetScreen = () => {
   // Save schedule data to database
   const saveScheduleData = async () => {
     try {
+      // Validate: Check for duplicate pills across containers
+      const pillToContainers: Record<string, number[]> = {};
+      for (let containerNum = 1; containerNum <= 3; containerNum++) {
+        const pillName = selectedPills[containerNum as PillSlot];
+        if (pillName) {
+          if (!pillToContainers[pillName]) {
+            pillToContainers[pillName] = [];
+          }
+          pillToContainers[pillName].push(containerNum);
+        }
+      }
+      
+      // Check for duplicates
+      const duplicates = Object.entries(pillToContainers)
+        .filter(([_, containers]) => containers.length > 1);
+      
+      if (duplicates.length > 0) {
+        const duplicateMessages = duplicates.map(([pill, containers]) => 
+          `${pill} is assigned to Containers ${containers.join(', ')}`
+        );
+        Alert.alert(
+          'Duplicate Pills Detected',
+          `Each pill can only be assigned to one container.\n\n${duplicateMessages.join('\n')}\n\nPlease remove the duplicate assignments before saving.`,
+          [{ text: 'OK' }]
+        );
+        return;
+      }
+      
       // Get current user ID
       const currentUserId = await getCurrentUserId();
       

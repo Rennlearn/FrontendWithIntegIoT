@@ -594,7 +594,7 @@ const MonitorManageScreen = () => {
   const loadScheduleData = useCallback(async (syncToArduino: boolean = true, autoDeleteMissed: boolean = true, showLoading: boolean = true) => {
     try {
       if (showLoading) {
-        setLoading(true);
+      setLoading(true);
       }
       setError(null);
       
@@ -909,8 +909,8 @@ const MonitorManageScreen = () => {
       setError(errorMessage);
     } finally {
       if (showLoading) {
-        setLoading(false);
-      }
+      setLoading(false);
+    }
     }
   }, []);
 
@@ -1319,14 +1319,24 @@ const MonitorManageScreen = () => {
                                 size={16} 
                                 color={verifications[parseInt(schedule.container)].result?.pass_ ? "#4CAF50" : "#F44336"} 
                               />
-                              <Text style={[
-                                styles.verificationDetailText, 
-                                { color: verifications[parseInt(schedule.container)].result?.pass_ ? "#4CAF50" : "#F44336" }
-                              ]}>
-                                {verifications[parseInt(schedule.container)].result?.pass_ 
-                                  ? `Verified: ${verifications[parseInt(schedule.container)].result?.count || 0} pills (${Math.round((verifications[parseInt(schedule.container)].result?.confidence || 0) * 100)}%)`
-                                  : 'Verification failed'}
-                    </Text>
+                              <View style={{ flex: 1 }}>
+                                <Text style={[
+                                  styles.verificationDetailText, 
+                                  { color: verifications[parseInt(schedule.container)].result?.pass_ ? "#4CAF50" : "#F44336" }
+                                ]}>
+                                  {verifications[parseInt(schedule.container)].result?.pass_ 
+                                    ? `Verified: ${verifications[parseInt(schedule.container)].result?.count || 0} pills (${Math.round((verifications[parseInt(schedule.container)].result?.confidence || 0) * 100)}%)`
+                                    : 'Verification failed'}
+                                </Text>
+                                {verifications[parseInt(schedule.container)].result?.classesDetected && 
+                                 verifications[parseInt(schedule.container)].result.classesDetected.length > 0 && (
+                                  <Text style={[styles.verificationDetailText, { fontSize: 11, marginTop: 2, opacity: 0.8 }]}>
+                                    {verifications[parseInt(schedule.container)].result.classesDetected
+                                      .map((pill: { label: string; n: number }) => `${pill.label} (${pill.n})`)
+                                      .join(', ')}
+                                  </Text>
+                                )}
+                              </View>
                             </View>
                           )}
                   </View>
@@ -1344,13 +1354,13 @@ const MonitorManageScreen = () => {
         <TouchableOpacity 
           style={[styles.button, { backgroundColor: theme.primary }]} 
             onPress={() => navigation.navigate("SetScreen" as never)}
-          > 
+        > 
             <Text style={[styles.buttonText, { color: theme.card }]}>SET MED SCHED</Text>
-          </TouchableOpacity>
-          <TouchableOpacity 
-            style={[styles.button, { backgroundColor: theme.secondary }]} 
+        </TouchableOpacity>
+        <TouchableOpacity 
+          style={[styles.button, { backgroundColor: theme.secondary }]} 
             onPress={() => navigation.navigate("ModifyScheduleScreen" as never)}
-          > 
+        > 
             <Text style={[styles.buttonText, { color: theme.card }]}>MODIFY SCHED</Text>
         </TouchableOpacity>
         <TouchableOpacity 

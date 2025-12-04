@@ -238,6 +238,9 @@ app.post('/ingest/:deviceId/:container', upload.single('image'), async (req, res
       }
     }
 
+    // Use annotated image if available, otherwise use original
+    const imagePathToSave = result?.annotatedImagePath || filePath;
+    
     // Persist latest verification per container
     verifications[container] = {
       deviceId,
@@ -245,7 +248,8 @@ app.post('/ingest/:deviceId/:container', upload.single('image'), async (req, res
       expected,
       result,
       timestamp: new Date().toISOString(),
-      savedImagePath: filePath,
+      savedImagePath: imagePathToSave,
+      originalImagePath: filePath, // Keep original for comparison
       changes: changes // Add detected changes
     };
 
