@@ -9,12 +9,12 @@
 #define LED_CONTAINER2_PIN 9
 #define LED_CONTAINER3_PIN 6
 
-// SIM800L GSM Module (commented out - uncomment to enable)
-// SoftwareSerial sim(4, 5);
+// SIM800L GSM Module
+SoftwareSerial sim(4, 5);
 SoftwareSerial btSerial(2, 3);
 RTC_DS3231 rtc;
 
-// char phoneNumber[] = "+639633800442";
+char phoneNumber[] = "+639633800442";
 bool locateBoxActive = false;
 unsigned long lastLocateBuzz = 0;
 bool locateBuzzerState = false; // Track buzzer state for locate
@@ -38,14 +38,14 @@ uint8_t activeContainerLED = 0; // Track which container LED should be on (0 = n
 
 void startLocateBox();
 void stopLocateBox();
-// SIM800L functions (commented out - uncomment to enable)
-// void sendSMS(const __FlashStringHelper *msg);
-// String readSIMResponse(unsigned long timeout = 2000);
-// void testSMS();
-// void checkSMSStatus();
-// void diagnoseSIM800L();
-// void callNumber();
-// void RecieveMessage();
+// SIM800L functions
+void sendSMS(const __FlashStringHelper *msg);
+String readSIMResponse(unsigned long timeout = 2000);
+void testSMS();
+void checkSMSStatus();
+void diagnoseSIM800L();
+void callNumber();
+void RecieveMessage();
 void handleCommand(const char *cmd);
 void blinkLEDandBuzz();
 String sanitizeCommand(String input);
@@ -58,8 +58,8 @@ void stopAlarmForContainer(uint8_t container);
 void setup() {
   Serial.begin(9600);
   delay(1000);
-  // SIM800L initialization (commented out - uncomment to enable)
-  // sim.begin(9600);
+  // SIM800L initialization
+  sim.begin(9600);
   btSerial.begin(9600);
 
   pinMode(BUZZER_PIN, OUTPUT);
@@ -80,17 +80,17 @@ void setup() {
   }
 
 
-  // SIM800L initialization (commented out - uncomment to enable)
-  // delay(2000);
-  // while (sim.available()) sim.read();
-  // sim.println("AT");
-  // delay(1000);
-  // if (readSIMResponse(2000).indexOf("OK") >= 0) {
-  //   sim.println("AT+CMGF=1");
-  //   delay(500);
-  //   sim.println("AT+CNMI=1,2,0,0,0");
-  //   delay(500);
-  // }
+  // SIM800L initialization
+  delay(2000);
+  while (sim.available()) sim.read();
+  sim.println("AT");
+  delay(1000);
+  if (readSIMResponse(2000).indexOf("OK") >= 0) {
+    sim.println("AT+CMGF=1");
+    delay(500);
+    sim.println("AT+CNMI=1,2,0,0,0");
+    delay(500);
+  }
   Serial.println(F("Ready"));
 }
 
@@ -207,8 +207,8 @@ void loop() {
     }
   }
 
-  // SIM800L message receiving (commented out - uncomment to enable)
-  // RecieveMessage();
+  // SIM800L message receiving
+  RecieveMessage();
   checkSchedules();
 }
 
@@ -356,24 +356,24 @@ void handleCommand(const char *cmd) {
     if (ch != ' ' && ch != '_') { normalized += ch; }
   }
 
-  // SIM800L commands (commented out - uncomment to enable)
-  // if (normalized == "S") {
-  //   sendSMS(F("Medication reminder!"));
-  //   return;
-  // }
-  // if (normalized == "SMSTEST") {
-  //   testSMS();
-  //   return;
-  // }
-  // if (normalized == "SMSSTATUS") {
-  //   checkSMSStatus();
-  //   return;
-  // }
-  // if (normalized == "SIMDIAG") {
-  //   diagnoseSIM800L();
-  //   return;
-  // }
-  // if (normalized == "C") { callNumber(); return; }
+  // SIM800L commands
+  if (normalized == "S") {
+    sendSMS(F("Medication reminder!"));
+    return;
+  }
+  if (normalized == "SMSTEST") {
+    testSMS();
+    return;
+  }
+  if (normalized == "SMSSTATUS") {
+    checkSMSStatus();
+    return;
+  }
+  if (normalized == "SIMDIAG") {
+    diagnoseSIM800L();
+    return;
+  }
+  if (normalized == "C") { callNumber(); return; }
   if (normalized == "LOCATE") { startLocateBox(); return; }
   if (normalized == "STOP" || normalized == "STOPLOCATE") { stopLocateBox(); stopAlarm(); return; }
   // ALARM TEST, STOP
@@ -397,93 +397,93 @@ void handleCommand(const char *cmd) {
   Serial.print(F("Unknown command: [")); Serial.print(raw); Serial.print(F("] (normalized: [")); Serial.print(normalized); Serial.println(F("]"));
 }
 
-// SIM800L SMS Functions (commented out - uncomment to enable)
-// void sendSMS(const __FlashStringHelper *msg) {
-//   sim.print(F("AT+CMGS=\""));
-//   sim.print(phoneNumber);
-//   sim.println(F("\""));
-//   delay(500);
-//   sim.print(F("PillNow: "));
-//   sim.println(msg);
-//   sim.println((char)26);
-//   delay(1000);
-//   blinkLEDandBuzz();
-// }
-//
-// String readSIMResponse(unsigned long timeout = 2000) {
-//   String response = "";
-//   unsigned long startTime = millis();
-//   while (millis() - startTime < timeout) {
-//     if (sim.available()) {
-//       char c = sim.read();
-//       response += c;
-//       if (c == '\n') {
-//         delay(50);
-//       }
-//     }
-//   }
-//   return response;
-// }
-//
-// void testSMS() {
-//   Serial.println(F("SMS TEST"));
-//   while (sim.available()) sim.read();
-//   sim.println(F("AT"));
-//   delay(1000);
-//   String r = readSIMResponse(2000);
-//   if (r.indexOf("OK") >= 0) {
-//     sim.println(F("AT+CSQ"));
-//     delay(500);
-//     Serial.println(readSIMResponse(1000));
-//     sendSMS(F("Test"));
-//     delay(2000);
-//     Serial.println(readSIMResponse(2000));
-//   } else {
-//     Serial.println(F("NO RESPONSE"));
-//   }
-// }
-//
-// void checkSMSStatus() {
-//   Serial.println(F("SMS STATUS"));
-//   while (sim.available()) sim.read();
-//   sim.println(F("AT"));
-//   delay(1000);
-//   String r = readSIMResponse(2000);
-//   if (r.length() > 0) {
-//     Serial.println(r);
-//     sim.println(F("AT+CSQ"));
-//     delay(500);
-//     Serial.println(readSIMResponse(1000));
-//     sim.println(F("AT+CREG?"));
-//     delay(500);
-//     Serial.println(readSIMResponse(1000));
-//   } else {
-//     Serial.println(F("NO RESPONSE"));
-//   }
-// }
-//
-// void diagnoseSIM800L() {
-//   Serial.println(F("SIM800L DIAG"));
-//   while (sim.available()) sim.read();
-//   sim.println("AT");
-//   delay(2000);
-//   String r = readSIMResponse(2000);
-//   if (r.length() > 0) {
-//     Serial.print(F("OK: "));
-//     Serial.println(r);
-//   } else {
-//     Serial.println(F("NO RESPONSE"));
-//     Serial.println(F("Check: TX->Pin4, RX->Pin5, Power 3.7-4.2V, GND"));
-//   }
-// }
-//
-// void callNumber() {
-//   sim.print(F("ATD"));
-//   sim.print(phoneNumber);
-//   sim.println(F(";"));
-//   delay(1000);
-//   blinkLEDandBuzz();
-// }
+// SIM800L SMS Functions
+void sendSMS(const __FlashStringHelper *msg) {
+  sim.print(F("AT+CMGS=\""));
+  sim.print(phoneNumber);
+  sim.println(F("\""));
+  delay(500);
+  sim.print(F("PillNow: "));
+  sim.println(msg);
+  sim.println((char)26);
+  delay(1000);
+  blinkLEDandBuzz();
+}
+
+String readSIMResponse(unsigned long timeout = 2000) {
+  String response = "";
+  unsigned long startTime = millis();
+  while (millis() - startTime < timeout) {
+    if (sim.available()) {
+      char c = sim.read();
+      response += c;
+      if (c == '\n') {
+        delay(50);
+      }
+    }
+  }
+  return response;
+}
+
+void testSMS() {
+  Serial.println(F("SMS TEST"));
+  while (sim.available()) sim.read();
+  sim.println(F("AT"));
+  delay(1000);
+  String r = readSIMResponse(2000);
+  if (r.indexOf("OK") >= 0) {
+    sim.println(F("AT+CSQ"));
+    delay(500);
+    Serial.println(readSIMResponse(1000));
+    sendSMS(F("Test"));
+    delay(2000);
+    Serial.println(readSIMResponse(2000));
+  } else {
+    Serial.println(F("NO RESPONSE"));
+  }
+}
+
+void checkSMSStatus() {
+  Serial.println(F("SMS STATUS"));
+  while (sim.available()) sim.read();
+  sim.println(F("AT"));
+  delay(1000);
+  String r = readSIMResponse(2000);
+  if (r.length() > 0) {
+    Serial.println(r);
+    sim.println(F("AT+CSQ"));
+    delay(500);
+    Serial.println(readSIMResponse(1000));
+    sim.println(F("AT+CREG?"));
+    delay(500);
+    Serial.println(readSIMResponse(1000));
+  } else {
+    Serial.println(F("NO RESPONSE"));
+  }
+}
+
+void diagnoseSIM800L() {
+  Serial.println(F("SIM800L DIAG"));
+  while (sim.available()) sim.read();
+  sim.println("AT");
+  delay(2000);
+  String r = readSIMResponse(2000);
+  if (r.length() > 0) {
+    Serial.print(F("OK: "));
+    Serial.println(r);
+  } else {
+    Serial.println(F("NO RESPONSE"));
+    Serial.println(F("Check: TX->Pin4, RX->Pin5, Power 3.7-4.2V, GND"));
+  }
+}
+
+void callNumber() {
+  sim.print(F("ATD"));
+  sim.print(phoneNumber);
+  sim.println(F(";"));
+  delay(1000);
+  blinkLEDandBuzz();
+}
 
 
 void startLocateBox() {
@@ -504,15 +504,15 @@ void stopLocateBox() {
   btSerial.println(F("LOCATE_STOPPED"));
 }
 
-// SIM800L message receiving (commented out - uncomment to enable)
-// void RecieveMessage() {
-//   if (sim.available()) {
-//     String msg = sim.readString();
-//     msg.trim();
-//     if (msg.indexOf("LOCATE") >= 0) startLocateBox();
-//     else if (msg.indexOf("STOP") >= 0) stopLocateBox();
-//   }
-// }
+// SIM800L message receiving
+void RecieveMessage() {
+  if (sim.available()) {
+    String msg = sim.readString();
+    msg.trim();
+    if (msg.indexOf("LOCATE") >= 0) startLocateBox();
+    else if (msg.indexOf("STOP") >= 0) stopLocateBox();
+  }
+}
 
 
 void blinkLEDandBuzz() {
@@ -648,22 +648,22 @@ void checkSchedules() {
         // Start alarm for container
         startAlarmForContainer(schedules[i].container);
         
-        // SIM800L SMS sending (commented out - uncomment to enable)
-        // sim.print(F("AT+CMGS=\""));
-        // sim.print(phoneNumber);
-        // sim.println(F("\""));
-        // delay(500);
-        // sim.print(F("PillNow: Time to take medication from Container "));
-        // sim.print(schedules[i].container);
-        // sim.print(F("! ("));
-        // if (schedules[i].hour < 10) sim.print(F("0"));
-        // sim.print(schedules[i].hour);
-        // sim.print(F(":"));
-        // if (schedules[i].minute < 10) sim.print(F("0"));
-        // sim.print(schedules[i].minute);
-        // sim.println(F(")"));
-        // sim.println((char)26);
-        // delay(1000);
+        // SIM800L SMS sending
+        sim.print(F("AT+CMGS=\""));
+        sim.print(phoneNumber);
+        sim.println(F("\""));
+        delay(500);
+        sim.print(F("PillNow: Time to take medication from Container "));
+        sim.print(schedules[i].container);
+        sim.print(F("! ("));
+        if (schedules[i].hour < 10) sim.print(F("0"));
+        sim.print(schedules[i].hour);
+        sim.print(F(":"));
+        if (schedules[i].minute < 10) sim.print(F("0"));
+        sim.print(schedules[i].minute);
+        sim.println(F(")"));
+        sim.println((char)26);
+        delay(1000);
         
         // Send notification via Bluetooth
         char msgBuf[64];
