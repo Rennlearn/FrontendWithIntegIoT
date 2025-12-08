@@ -4,6 +4,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { useTheme } from '../context/ThemeContext';
 import { lightTheme, darkTheme } from '../styles/theme';
 import iotService from '../services/IoTService';
+import { soundService } from '../services/soundService';
 
 interface MedicationNotificationProps {
   medicineName: string;
@@ -27,10 +28,21 @@ const MedicationNotification: React.FC<MedicationNotificationProps> = ({
   const theme = isDarkMode ? darkTheme : lightTheme;
 
   useEffect(() => {
+    // Initialize sound service
+    soundService.initialize();
+    
+    // Play alarm sound when notification appears
+    soundService.playAlarmSound('alarm');
+    
     // Trigger IoT alert when notification appears
     if (enableIoT && iotService.isDeviceConnected()) {
       triggerIoTAlert();
     }
+
+    // Cleanup: Stop sound when component unmounts
+    return () => {
+      soundService.stopSound();
+    };
   }, []);
 
   const triggerIoTAlert = async () => {
@@ -59,6 +71,9 @@ const MedicationNotification: React.FC<MedicationNotificationProps> = ({
   };
 
   const handleDismiss = async () => {
+    // Stop alarm sound
+    await soundService.stopSound();
+    
     // Stop IoT alert if active
     if (iotAlertActive) {
       await stopIoTAlert();
@@ -89,13 +104,19 @@ const MedicationNotification: React.FC<MedicationNotificationProps> = ({
 
   const snoozeMedication = async (minutes: number) => {
     try {
+      // Stop alarm sound
+      await soundService.stopSound();
+      
       // Stop current alert
       if (iotAlertActive) {
         await stopIoTAlert();
       }
 
-      // Schedule new alert
+      // Schedule new alert with sound
       setTimeout(async () => {
+        // Play alarm sound again when snooze time is up
+        await soundService.playAlarmSound('alarm');
+        
         if (enableIoT && iotService.isDeviceConnected()) {
           await triggerIoTAlert();
         }

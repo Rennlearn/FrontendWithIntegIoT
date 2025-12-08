@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import { View, Text, TouchableOpacity, ScrollView, StyleSheet, Platform, ActivityIndicator, Alert, FlatList, Modal } from "react-native";
 import DateTimePicker from "@react-native-community/datetimepicker";
 import { useNavigation } from "@react-navigation/native";
@@ -50,69 +50,81 @@ const ModifyScheduleScreen = () => {
   const [error, setError] = useState<string | null>(null);
   const [editModalVisible, setEditModalVisible] = useState(false);
   const [editingSchedule, setEditingSchedule] = useState<Schedule | null>(null);
-  const [editTime, setEditTime] = useState<Date>(new Date());
+  const [editDateTime, setEditDateTime] = useState<Date>(new Date());
   const [showTimePicker, setShowTimePicker] = useState(false);
+  const [showDatePicker, setShowDatePicker] = useState(false);
   const [editPillCount, setEditPillCount] = useState<Record<number, number>>({ 1: 0, 2: 0, 3: 0 });
   const [pillCountsLocked, setPillCountsLocked] = useState<Record<number, boolean>>({ 1: false, 2: false, 3: false });
   const [saving, setSaving] = useState(false);
 
-  useEffect(() => {
-    loadSchedules();
-    loadMedications();
-  }, []);
-
-  useEffect(() => {
-    const unsubscribe = navigation.addListener('focus', () => {
-      loadSchedules();
-    });
-    return unsubscribe;
-  }, [navigation]);
-
   // Get current user ID from JWT token
-  const getCurrentUserId = async (): Promise<number> => {
+  const getCurrentUserIdentifiers = async (): Promise<{ idNum: number; idStr: string }> => {
     try {
       const token = await AsyncStorage.getItem('token');
       if (!token) {
         console.warn('No token found, using default user ID 1');
-        return 1;
+        return { idNum: 1, idStr: '1' };
       }
       const decodedToken = jwtDecode<DecodedToken>(token.trim());
-      const rawId = decodedToken.userId ?? decodedToken.id;
+      const rawId = decodedToken.userId ?? decodedToken.id ?? '1';
       const userId = parseInt(rawId);
+      const idNum = isNaN(userId) ? 1 : userId;
+      const idStr = rawId?.toString?.() || '1';
       if (isNaN(userId)) {
         console.warn('Invalid user ID in token, using default user ID 1');
-        return 1;
       }
-      return userId;
+      return { idNum, idStr };
     } catch (error) {
       console.error('Error getting user ID from token:', error);
-      return 1;
+      return { idNum: 1, idStr: '1' };
     }
   };
 
-  const loadMedications = async () => {
+  // Get selected elder ID for caregivers
+  const getSelectedElderId = async (): Promise<string | null> => {
     try {
-      const response = await fetch('https://pillnow-database.onrender.com/api/medications');
+      const selectedElderId = await AsyncStorage.getItem('selectedElderId');
+      return selectedElderId;
+    } catch (error) {
+      console.error('Error getting selected elder ID:', error);
+      return null;
+    }
+  };
+
+  const loadMedications = useCallback(async (): Promise<Medication[]> => {
+    try {
+      const response = await fetch('https://pillnow-database.onrender.com/api/medications', {
+        headers: {
+          'Cache-Control': 'no-cache',
+          'Pragma': 'no-cache',
+          'If-Modified-Since': '0'
+        }
+      });
       if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
       const data = await response.json();
       const medsArray = Array.isArray(data) ? data : (data?.data || []);
       setMedications(medsArray);
+      return medsArray;
     } catch (err) {
       console.error('Error fetching medications:', err);
       setError(err instanceof Error ? err.message : 'Failed to fetch medications');
+      return [];
     }
-  };
+  }, []);
 
-  const loadSchedules = async () => {
+  const loadSchedules = useCallback(async () => {
     try {
       setLoading(true);
       setError(null);
-      const userId = await getCurrentUserId();
+      const { idNum: userId, idStr: userIdStr } = await getCurrentUserIdentifiers();
       
       // Get token for authentication
       const token = await AsyncStorage.getItem('token');
       const headers: HeadersInit = {
         'Content-Type': 'application/json',
+        'Cache-Control': 'no-cache',
+        'Pragma': 'no-cache',
+        'If-Modified-Since': '0'
       };
       if (token) {
         headers['Authorization'] = `Bearer ${token.trim()}`;
@@ -130,33 +142,70 @@ const ModifyScheduleScreen = () => {
       const responseData = await response.json();
       const allSchedules = responseData.data || [];
       
-      // Filter schedules by current user ID
-      const schedulesArray = allSchedules.filter((schedule: any) => {
-        const scheduleUserId = parseInt(schedule.user);
-        return scheduleUserId === userId;
-      });
+      console.log(`[ModifyScheduleScreen] Fetched ${allSchedules.length} total schedule(s) from API`);
       
-      console.log(`[ModifyScheduleScreen] Loaded ${schedulesArray.length} schedule(s) for user ${userId}`);
+      // Check if there's a selected elder (for caregivers)
+      const selectedElderId = await getSelectedElderId();
       
-      // Enrich schedules with medication names
-      const enrichedSchedules = schedulesArray.map((schedule: Schedule) => {
-        const medication = medications.find(med => med.medId === schedule.medication);
+      // Filter schedules based on user role and selected elder (same as MonitorManageScreen)
+      let userSchedules;
+      if (selectedElderId) {
+        // If caregiver has selected an elder, show that elder's schedules
+        userSchedules = allSchedules.filter((schedule: any) => {
+          const scheduleUserIdNum = parseInt(schedule.user);
+          const scheduleUserIdStr = schedule.user?.toString?.() || '';
+          return scheduleUserIdStr === selectedElderId || scheduleUserIdNum === parseInt(selectedElderId);
+        });
+        console.log(`[ModifyScheduleScreen] Filtered to ${userSchedules.length} schedule(s) for elder ${selectedElderId}`);
+      } else {
+        // Otherwise, show current user's schedules
+        userSchedules = allSchedules.filter((schedule: any) => {
+          const scheduleUserIdNum = parseInt(schedule.user);
+          const scheduleUserIdStr = schedule.user?.toString?.() || '';
+          return scheduleUserIdStr === userIdStr || scheduleUserIdNum === userId;
+        });
+        console.log(`[ModifyScheduleScreen] Filtered to ${userSchedules.length} schedule(s) for user ${userId}`);
+      }
+      
+      // Always fetch fresh medications to ensure we have the latest data
+      // This avoids race conditions with state updates
+      const currentMedications = await loadMedications();
+      
+      // Enrich schedules with medication names and normalize container
+      const enrichedSchedules = userSchedules.map((schedule: any) => {
+        const medication = currentMedications.find(med => med.medId === schedule.medication);
+
+        // Normalize container to a number (supports string like "container1" or "1")
+        const rawContainer = schedule.container;
+        const parsedContainer =
+          parseInt(rawContainer) ||
+          parseInt(String(rawContainer).replace(/[^0-9]/g, '')) ||
+          1;
+
         return {
           ...schedule,
-          medicationName: medication?.name || 'Unknown'
-        };
+          container: parsedContainer,
+          medicationName: medication?.name || `Medication ID: ${schedule.medication}`
+        } as Schedule;
       });
       
-      setSchedules(enrichedSchedules);
+      // Filter to only show pending schedules (only pending schedules can be modified)
+      const pendingSchedules = enrichedSchedules.filter((schedule: Schedule) => {
+        const statusLower = (schedule.status || 'Pending').toLowerCase();
+        return statusLower === 'pending';
+      });
+      
+      console.log(`[ModifyScheduleScreen] ✅ Loaded ${enrichedSchedules.length} total schedule(s), ${pendingSchedules.length} pending schedule(s) available for modification`);
+      setSchedules(pendingSchedules);
       
       // Load pill counts from schedules (get max count per container from schedule data)
-      // For now, we'll initialize from a default or load from a separate endpoint if available
+      // Use pending schedules for pill count calculation
       const counts: Record<number, number> = { 1: 0, 2: 0, 3: 0 };
       const locked: Record<number, boolean> = { 1: false, 2: false, 3: false };
-      enrichedSchedules.forEach((schedule: Schedule) => {
+      pendingSchedules.forEach((schedule: Schedule) => {
         // If schedule has a count field, use it; otherwise default to number of schedules
         const containerNum = schedule.container;
-        const scheduleCount = enrichedSchedules.filter(s => s.container === containerNum).length;
+        const scheduleCount = pendingSchedules.filter((s: Schedule) => s.container === containerNum).length;
         if (!counts[containerNum] || counts[containerNum] < scheduleCount) {
           counts[containerNum] = scheduleCount;
         }
@@ -173,7 +222,23 @@ const ModifyScheduleScreen = () => {
     } finally {
       setLoading(false);
     }
-  };
+  }, [loadMedications]);
+
+  useEffect(() => {
+    const loadData = async () => {
+      await loadMedications();
+      await loadSchedules();
+    };
+    loadData();
+  }, [loadSchedules, loadMedications]);
+
+  useEffect(() => {
+    const unsubscribe = navigation.addListener('focus', async () => {
+      await loadMedications();
+      await loadSchedules();
+    });
+    return unsubscribe;
+  }, [navigation, loadSchedules, loadMedications]);
 
   const savePillCount = async (containerNum: number, count: number) => {
     try {
@@ -212,49 +277,109 @@ const ModifyScheduleScreen = () => {
   };
 
   const openEditModal = (schedule: Schedule) => {
-    // Parse time string (HH:MM) to Date
+    // Only allow editing if status is Pending
+    const statusLower = (schedule.status || 'Pending').toLowerCase();
+    if (statusLower !== 'pending') {
+      Alert.alert(
+        'Cannot Edit',
+        `This schedule cannot be edited because it is already marked as "${schedule.status || 'Pending'}". Only pending schedules can be modified.`,
+        [{ text: 'OK' }]
+      );
+      return;
+    }
+    
+    // Parse date (YYYY-MM-DD) and time (HH:MM) to Date
     const [hours, minutes] = schedule.time.split(':').map(Number);
-    const editDate = new Date();
-    editDate.setHours(hours);
-    editDate.setMinutes(minutes);
-    editDate.setSeconds(0);
-    editDate.setMilliseconds(0);
+    const [year, month, day] = schedule.date.split('-').map(Number);
+    const editDate = new Date(year, (month || 1) - 1, day, hours, minutes, 0, 0);
     
     setEditingSchedule(schedule);
-    setEditTime(editDate);
+    setEditDateTime(editDate);
     setShowTimePicker(false);
+    setShowDatePicker(false);
     setEditModalVisible(true);
   };
 
   const handleTimeChange = (event: any, selected?: Date) => {
     if (Platform.OS === 'android') {
       if (event?.type === 'set' && selected) {
-        setEditTime(selected);
-        setShowTimePicker(false);
-      } else if (event?.type === 'dismissed') {
-        setShowTimePicker(false);
+        setEditDateTime(prev => {
+          const updated = new Date(prev);
+          updated.setHours(selected.getHours());
+          updated.setMinutes(selected.getMinutes());
+          updated.setSeconds(0);
+          updated.setMilliseconds(0);
+          return updated;
+        });
       }
-    } else {
-      if (selected) {
-        setEditTime(selected);
+      setShowTimePicker(false);
+    } else if (selected) {
+      setEditDateTime(prev => {
+        const updated = new Date(prev);
+        updated.setHours(selected.getHours());
+        updated.setMinutes(selected.getMinutes());
+        updated.setSeconds(0);
+        updated.setMilliseconds(0);
+        return updated;
+      });
+    }
+  };
+
+  const handleDateChange = (event: any, selected?: Date) => {
+    if (Platform.OS === 'android') {
+      if (event?.type === 'set' && selected) {
+        setEditDateTime(prev => {
+          const updated = new Date(prev);
+          updated.setFullYear(selected.getFullYear());
+          updated.setMonth(selected.getMonth());
+          updated.setDate(selected.getDate());
+          updated.setSeconds(0);
+          updated.setMilliseconds(0);
+          return updated;
+        });
       }
+      setShowDatePicker(false);
+    } else if (selected) {
+      setEditDateTime(prev => {
+        const updated = new Date(prev);
+        updated.setFullYear(selected.getFullYear());
+        updated.setMonth(selected.getMonth());
+        updated.setDate(selected.getDate());
+        updated.setSeconds(0);
+        updated.setMilliseconds(0);
+        return updated;
+      });
     }
   };
 
   const saveEdit = async () => {
     if (!editingSchedule) return;
     
+    // Double-check that schedule is still pending before saving
+    const statusLower = (editingSchedule.status || 'Pending').toLowerCase();
+    if (statusLower !== 'pending') {
+      Alert.alert(
+        'Cannot Save',
+        `This schedule cannot be edited because it is marked as "${editingSchedule.status || 'Pending'}". Only pending schedules can be modified.`,
+        [{ text: 'OK' }]
+      );
+      setEditModalVisible(false);
+      await loadSchedules(); // Reload to get latest status
+      return;
+    }
+    
     try {
       setSaving(true);
       
-      // Update time format
-      const newTime = `${String(editTime.getHours()).padStart(2, '0')}:${String(editTime.getMinutes()).padStart(2, '0')}`;
+      // Update date/time format
+      const newTime = `${String(editDateTime.getHours()).padStart(2, '0')}:${String(editDateTime.getMinutes()).padStart(2, '0')}`;
+      const newDate = `${editDateTime.getFullYear()}-${String(editDateTime.getMonth() + 1).padStart(2, '0')}-${String(editDateTime.getDate()).padStart(2, '0')}`;
       
       // Update schedule in backend
       const updateData = {
         time: newTime,
-        date: editingSchedule.date,
-        status: editingSchedule.status,
+        date: newDate,
+        status: editingSchedule.status, // Keep status as Pending
         alertSent: editingSchedule.alertSent
       };
       
@@ -279,7 +404,7 @@ const ModifyScheduleScreen = () => {
           await new Promise(resolve => setTimeout(resolve, 200));
           
           // Reload all schedules and rebuild Arduino schedule list
-          const userId = await getCurrentUserId();
+          const { idNum: userId } = await getCurrentUserIdentifiers();
           const allSchedulesResponse = await fetch(`https://pillnow-database.onrender.com/api/medication_schedules/user/${userId}`);
           if (allSchedulesResponse.ok) {
             const allSchedulesData = await allSchedulesResponse.json();
@@ -404,6 +529,20 @@ const ModifyScheduleScreen = () => {
   };
 
   const deleteSchedule = async (scheduleId: string) => {
+    // Find the schedule to check its status
+    const schedule = schedules.find(s => s._id === scheduleId);
+    if (schedule) {
+      const statusLower = (schedule.status || 'Pending').toLowerCase();
+      if (statusLower !== 'pending') {
+        Alert.alert(
+          'Cannot Delete',
+          `This schedule cannot be deleted because it is marked as "${schedule.status || 'Pending'}". Only pending schedules can be deleted.`,
+          [{ text: 'OK' }]
+        );
+        return;
+      }
+    }
+    
     Alert.alert(
       'Delete Schedule',
       'Are you sure you want to delete this schedule?',
@@ -439,7 +578,7 @@ const ModifyScheduleScreen = () => {
                   await new Promise(resolve => setTimeout(resolve, 200));
                   
                   // Reload and rebuild Arduino schedule list
-                  const userId = await getCurrentUserId();
+                  const { idNum: userId } = await getCurrentUserIdentifiers();
                   const token = await AsyncStorage.getItem('token');
                   const headers: HeadersInit = {
                     'Content-Type': 'application/json',
@@ -620,19 +759,35 @@ const ModifyScheduleScreen = () => {
               <View style={styles.scheduleList}>
                 {containerSchedules.map((schedule) => {
                   const timeStr = schedule.time;
+                  const dateStr = schedule.date;
+                  const statusLower = (schedule.status || 'Pending').toLowerCase();
+                  const isPending = statusLower === 'pending';
+                  const isEditable = isPending && !saving;
                   return (
                     <View key={schedule._id} style={[styles.scheduleItem, { backgroundColor: theme.background }]}>
                       <Ionicons name="alarm" size={16} color={theme.primary} />
-                      <Text style={[styles.scheduleTime, { color: theme.text }]}>{timeStr}</Text>
+                      <View style={{ flex: 1, marginLeft: 8 }}>
+                        <Text style={[styles.scheduleTime, { color: theme.text }]}>{timeStr}</Text>
+                        {dateStr && (
+                          <Text style={[styles.scheduleDate, { color: theme.textSecondary }]}>
+                            {dateStr}
+                          </Text>
+                        )}
+                      </View>
+                      <View style={[styles.statusBadge, { backgroundColor: isPending ? theme.success : theme.textSecondary }]}>
+                        <Text style={[styles.statusText, { color: theme.card }]}>{schedule.status || 'Pending'}</Text>
+                      </View>
                       <TouchableOpacity 
-                        onPress={() => openEditModal(schedule)}
-                        style={styles.editButton}
+                        onPress={() => isEditable && openEditModal(schedule)}
+                        style={[styles.editButton, { opacity: isEditable ? 1 : 0.4 }]}
+                        disabled={!isEditable}
                       >
                         <Ionicons name="create-outline" size={18} color={theme.primary} />
                       </TouchableOpacity>
                       <TouchableOpacity 
-                        onPress={() => deleteSchedule(schedule._id)}
-                        style={styles.deleteButton}
+                        onPress={() => isEditable && deleteSchedule(schedule._id)}
+                        style={[styles.deleteButton, { opacity: isEditable ? 1 : 0.4 }]}
+                        disabled={!isEditable}
                       >
                         <Ionicons name="trash-outline" size={18} color={theme.error} />
                       </TouchableOpacity>
@@ -666,7 +821,39 @@ const ModifyScheduleScreen = () => {
                 <Text style={[styles.editLabel, { color: theme.text }]}>
                   Medication: {editingSchedule.medicationName || 'Unknown'}
                 </Text>
-                
+                <Text style={[styles.editLabel, { color: theme.text }]}>Date:</Text>
+                {Platform.OS === 'android' ? (
+                  <>
+                    <TouchableOpacity 
+                      onPress={() => setShowDatePicker(true)}
+                      style={[styles.timeButton, { backgroundColor: theme.background, borderColor: theme.primary }]}
+                    >
+                      <Ionicons name="calendar-outline" size={24} color={theme.primary} />
+                      <Text style={[styles.timeButtonText, { color: theme.text }]}>
+                        {editDateTime.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })}
+                      </Text>
+                    </TouchableOpacity>
+                    {showDatePicker && (
+                      <DateTimePicker 
+                        value={editDateTime} 
+                        mode="date" 
+                        display="default" 
+                        onChange={handleDateChange}
+                        minimumDate={new Date()}
+                      />
+                    )}
+                  </>
+                ) : (
+                  <DateTimePicker 
+                    value={editDateTime} 
+                    mode="date" 
+                    display="spinner" 
+                    onChange={handleDateChange}
+                    style={{ width: '100%' }}
+                    minimumDate={new Date()}
+                  />
+                )}
+
                 <Text style={[styles.editLabel, { color: theme.text }]}>Time:</Text>
                 {Platform.OS === 'android' ? (
                   <>
@@ -676,12 +863,12 @@ const ModifyScheduleScreen = () => {
                     >
                       <Ionicons name="time-outline" size={24} color={theme.primary} />
                       <Text style={[styles.timeButtonText, { color: theme.text }]}>
-                        {editTime.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false })}
+                        {editDateTime.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false })}
                       </Text>
                     </TouchableOpacity>
                     {showTimePicker && (
                       <DateTimePicker 
-                        value={editTime} 
+                        value={editDateTime} 
                         mode="time" 
                         display="default" 
                         onChange={handleTimeChange}
@@ -691,7 +878,7 @@ const ModifyScheduleScreen = () => {
                   </>
                 ) : (
                   <DateTimePicker 
-                    value={editTime} 
+                    value={editDateTime} 
                     mode="time" 
                     display="spinner" 
                     onChange={handleTimeChange}
@@ -903,10 +1090,23 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     gap: 10,
   },
+  statusBadge: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 8,
+  },
+  statusText: {
+    fontSize: 11,
+    fontWeight: 'bold',
+  },
   scheduleTime: {
     fontSize: 14,
     fontWeight: '500',
     flex: 1,
+  },
+  scheduleDate: {
+    fontSize: 12,
+    marginTop: 2,
   },
   editButton: {
     padding: 4,

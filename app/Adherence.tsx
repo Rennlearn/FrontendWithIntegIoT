@@ -3,6 +3,7 @@ import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, 
   Modal, FlatList, ActivityIndicator, Alert
 } from 'react-native';
+import DateTimePicker from '@react-native-community/datetimepicker';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import { useTheme } from './context/ThemeContext';
@@ -26,6 +27,15 @@ const Adherence = () => {
   const [medications, setMedications] = useState<MedicationRow[]>([]);
   const [selectedMedication, setSelectedMedication] = useState<MedicationRow | null>(null);
   const [modalVisible, setModalVisible] = useState(false);
+  const [filterMode, setFilterMode] = useState<'7d' | 'all' | 'custom'>('7d');
+  const [customStart, setCustomStart] = useState<Date>(() => {
+    const d = new Date();
+    d.setDate(d.getDate() - 6);
+    return d;
+  });
+  const [customEnd, setCustomEnd] = useState<Date>(new Date());
+  const [showStartPicker, setShowStartPicker] = useState(false);
+  const [showEndPicker, setShowEndPicker] = useState(false);
 
   const fetchAdherenceData = async () => {
     try {
@@ -79,6 +89,20 @@ const Adherence = () => {
     fetchAdherenceData();
   }, []);
 
+  const getFilteredMedications = () => {
+    if (filterMode === 'all') return medications;
+    const now = new Date();
+    const start = filterMode === '7d' ? new Date(now.getFullYear(), now.getMonth(), now.getDate() - 6) : customStart;
+    const end = filterMode === '7d' ? now : customEnd;
+    const startMs = new Date(start.getFullYear(), start.getMonth(), start.getDate(), 0, 0, 0, 0).getTime();
+    const endMs = new Date(end.getFullYear(), end.getMonth(), end.getDate(), 23, 59, 59, 999).getTime();
+    return medications.filter((m) => {
+      const [y, mo, d] = String(m.date).split('-').map(Number);
+      const when = new Date(y, (mo || 1) - 1, d).getTime();
+      return when >= startMs && when <= endMs;
+    });
+  };
+
   const handleMarkAsTaken = async (medication: MedicationRow) => {
     try {
       const token = await AsyncStorage.getItem('token');
@@ -88,20 +112,35 @@ const Adherence = () => {
       if (token) {
         headers['Authorization'] = `Bearer ${token.trim()}`;
       }
+      // Try PATCH first
       const resp = await fetch(`https://pillnow-database.onrender.com/api/medication_schedules/${medication._id}`, {
         method: 'PATCH',
         headers,
-        body: JSON.stringify({ status: 'Taken', alertSent: true })
+        body: JSON.stringify({ status: 'Done', alertSent: true }) // Use 'Done' to match backend/AlarmModal
       });
+      
       if (!resp.ok) {
+        const errorText = await resp.text();
+        console.warn(`[Adherence] PATCH failed (${resp.status}): ${errorText}, trying PUT...`);
+        
+        // Fallback to PUT if PATCH doesn't work
         const putResp = await fetch(`https://pillnow-database.onrender.com/api/medication_schedules/${medication._id}`, {
           method: 'PUT',
           headers,
-          body: JSON.stringify({ status: 'Taken', alertSent: true })
+          body: JSON.stringify({ ...medication, status: 'Done', alertSent: true })
         });
-        if (!putResp.ok) throw new Error('Update failed');
+        
+        if (!putResp.ok) {
+          const putErrorText = await putResp.text();
+          console.error(`[Adherence] ⚠️ PUT also failed (${putResp.status}): ${putErrorText}`);
+          throw new Error(`Update failed: ${putErrorText}`);
+        } else {
+          console.log(`[Adherence] ✅ Schedule ${medication._id} marked as Done (via PUT)`);
+        }
+      } else {
+        console.log(`[Adherence] ✅ Schedule ${medication._id} marked as Done (via PATCH)`);
       }
-      setMedications(prev => prev.map(m => m._id === medication._id ? { ...m, status: 'Taken' } : m));
+      setMedications(prev => prev.map(m => m._id === medication._id ? { ...m, status: 'Done' } : m));
       setModalVisible(false);
       Alert.alert('Updated', 'Marked as Taken');
     } catch (e) {
@@ -110,9 +149,10 @@ const Adherence = () => {
   };
 
   const handleGenerateReport = () => {
+    const filtered = getFilteredMedications();
     router.push({
       pathname: '/Generate',
-      params: { adherenceData: JSON.stringify(medications) }
+      params: { adherenceData: JSON.stringify(filtered) }
     });
   };
 
@@ -181,6 +221,57 @@ const Adherence = () => {
       </View>
 
       <View style={[styles.bottomContainer, { backgroundColor: theme.card, borderTopColor: theme.border }]}>
+        <View style={styles.filterRow}>
+          <Text style={[styles.filterLabel, { color: theme.text }]}>Range:</Text>
+          <TouchableOpacity 
+            style={[
+              styles.filterChip, 
+              { backgroundColor: filterMode === '7d' ? theme.primary : theme.background, borderColor: theme.primary }
+            ]}
+            onPress={() => setFilterMode('7d')}
+          >
+            <Text style={[styles.filterChipText, { color: filterMode === '7d' ? theme.card : theme.primary }]}>Last 7 days</Text>
+          </TouchableOpacity>
+          <TouchableOpacity 
+            style={[
+              styles.filterChip, 
+              { backgroundColor: filterMode === 'all' ? theme.primary : theme.background, borderColor: theme.primary }
+            ]}
+            onPress={() => setFilterMode('all')}
+          >
+            <Text style={[styles.filterChipText, { color: filterMode === 'all' ? theme.card : theme.primary }]}>All</Text>
+          </TouchableOpacity>
+          <TouchableOpacity 
+            style={[
+              styles.filterChip, 
+              { backgroundColor: filterMode === 'custom' ? theme.primary : theme.background, borderColor: theme.primary }
+            ]}
+            onPress={() => setFilterMode('custom')}
+          >
+            <Text style={[styles.filterChipText, { color: filterMode === 'custom' ? theme.card : theme.primary }]}>Custom</Text>
+          </TouchableOpacity>
+        </View>
+
+        {filterMode === 'custom' && (
+          <View style={styles.customRangeRow}>
+            <TouchableOpacity 
+              style={[styles.dateButton, { borderColor: theme.primary }]}
+              onPress={() => setShowStartPicker(true)}
+            >
+              <Ionicons name="calendar-outline" size={16} color={theme.primary} />
+              <Text style={[styles.dateButtonText, { color: theme.text }]}>{customStart.toLocaleDateString()}</Text>
+            </TouchableOpacity>
+            <Text style={[styles.toText, { color: theme.textSecondary }]}>to</Text>
+            <TouchableOpacity 
+              style={[styles.dateButton, { borderColor: theme.primary }]}
+              onPress={() => setShowEndPicker(true)}
+            >
+              <Ionicons name="calendar-outline" size={16} color={theme.primary} />
+              <Text style={[styles.dateButtonText, { color: theme.text }]}>{customEnd.toLocaleDateString()}</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+
         <TouchableOpacity 
           style={[styles.generateButton, { backgroundColor: theme.primary }]}
           onPress={handleGenerateReport}
@@ -189,6 +280,35 @@ const Adherence = () => {
           <Text style={[styles.generateButtonText, { color: theme.card }]}>Generate Report</Text>
         </TouchableOpacity>
       </View>
+
+      {showStartPicker && (
+        <DateTimePicker
+          value={customStart}
+          mode="date"
+          display="default"
+          onChange={(event, selected) => {
+            setShowStartPicker(false);
+            if (event?.type === 'dismissed' || !selected) return;
+            setCustomStart(selected);
+            if (selected > customEnd) setCustomEnd(selected);
+          }}
+          maximumDate={customEnd}
+        />
+      )}
+      {showEndPicker && (
+        <DateTimePicker
+          value={customEnd}
+          mode="date"
+          display="default"
+          onChange={(event, selected) => {
+            setShowEndPicker(false);
+            if (event?.type === 'dismissed' || !selected) return;
+            setCustomEnd(selected);
+            if (selected < customStart) setCustomStart(selected);
+          }}
+          minimumDate={customStart}
+        />
+      )}
 
       <Modal
         visible={modalVisible}
@@ -345,6 +465,47 @@ const styles = StyleSheet.create({
     right: 0,
     padding: 15,
     borderTopWidth: 1,
+  },
+  filterRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 8,
+    flexWrap: 'wrap',
+  },
+  filterLabel: {
+    fontWeight: '600',
+  },
+  filterChip: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 14,
+    borderWidth: 1,
+  },
+  filterChipText: {
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  customRangeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 10,
+  },
+  dateButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    borderRadius: 10,
+    borderWidth: 1,
+  },
+  dateButtonText: {
+    fontSize: 13,
+  },
+  toText: {
+    fontSize: 13,
   },
   generateButton: {
     flexDirection: 'row',

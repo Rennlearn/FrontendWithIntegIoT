@@ -68,6 +68,7 @@ const SetScreen = () => {
   const [addingPill, setAddingPill] = useState<Record<number, boolean>>({ 1: false, 2: false, 3: false });
   const [addingTime, setAddingTime] = useState(false);
   const [continuing, setContinuing] = useState(false);
+  const [saving, setSaving] = useState(false);
 
   // Remove useEffect that resets pill modal/alarm modal etc on mount
   // Only keep fetchMedications and initial setup that doesn't cause a jump or open modals
@@ -206,35 +207,58 @@ const SetScreen = () => {
     setContinuing(false);
   };
 
-  const onChangeDate = (event: any, selected?: Date) => {
+  const onChangeTime = (event: any, selected?: Date) => {
+    // Update only the time portion of selectedDate
     if (Platform.OS === 'android') {
       if (event?.type === 'set' && selected) {
-        // Time picked - update selectedDate and confirm with the selected time
-        const today = new Date();
-        const updated = new Date(today);
+        setSelectedDate(prev => {
+          const updated = new Date(prev);
+          updated.setHours(selected.getHours());
+          updated.setMinutes(selected.getMinutes());
+          updated.setSeconds(0);
+          updated.setMilliseconds(0);
+          return updated;
+        });
+      }
+      // Close picker whether set or dismissed
+      setShowTimePicker(false);
+    } else if (selected) {
+      setSelectedDate(prev => {
+        const updated = new Date(prev);
         updated.setHours(selected.getHours());
         updated.setMinutes(selected.getMinutes());
         updated.setSeconds(0);
         updated.setMilliseconds(0);
-        setSelectedDate(updated);
-        setShowTimePicker(false);
-        // Confirm with the selected time directly (not from state)
-        confirmAlarmWithTime(updated);
-      } else if (event?.type === 'dismissed') {
-        setShowTimePicker(false);
-        setAlarmModalVisible(false);
+        return updated;
+      });
+    }
+  };
+
+  const onChangeDateOnly = (event: any, selected?: Date) => {
+    // Update only the date portion of selectedDate
+    if (Platform.OS === 'android') {
+      if (event?.type === 'set' && selected) {
+        setSelectedDate(prev => {
+          const updated = new Date(prev);
+          updated.setFullYear(selected.getFullYear());
+          updated.setMonth(selected.getMonth());
+          updated.setDate(selected.getDate());
+          updated.setSeconds(0);
+          updated.setMilliseconds(0);
+          return updated;
+        });
       }
-    } else {
-      // iOS
-      if (selected) {
-        const today = new Date();
-        const updated = new Date(today);
-        updated.setHours(selected.getHours());
-        updated.setMinutes(selected.getMinutes());
+      setShowDatePicker(false);
+    } else if (selected) {
+      setSelectedDate(prev => {
+        const updated = new Date(prev);
+        updated.setFullYear(selected.getFullYear());
+        updated.setMonth(selected.getMonth());
+        updated.setDate(selected.getDate());
         updated.setSeconds(0);
         updated.setMilliseconds(0);
-        setSelectedDate(updated);
-      }
+        return updated;
+      });
     }
   };
 
@@ -253,11 +277,8 @@ const SetScreen = () => {
   const confirmAlarm = async () => {
     if (currentPillSlot === null) return;
     setAddingTime(true);
-    // Use the selectedDate that was set
-    const today = new Date();
-    const alarmTime = new Date(today);
-    alarmTime.setHours(selectedDate.getHours());
-    alarmTime.setMinutes(selectedDate.getMinutes());
+    // Use the selected date and time, clamping seconds/ms
+    const alarmTime = new Date(selectedDate);
     alarmTime.setSeconds(0);
     alarmTime.setMilliseconds(0);
     
@@ -295,6 +316,7 @@ const SetScreen = () => {
   // Save schedule data to database
   const saveScheduleData = async () => {
     try {
+      setSaving(true);
       // Validate: Check for duplicate pills across containers
       const pillToContainers: Record<string, number[]> = {};
       for (let containerNum = 1; containerNum <= 3; containerNum++) {
@@ -369,8 +391,7 @@ const SetScreen = () => {
         }
       }
       
-      // First, delete ALL old schedules for containers 1, 2, 3 for this user
-      // This ensures old schedules are removed even if a container has no new schedule
+      // Get token for API requests
       const token = await AsyncStorage.getItem('token');
       const headers: HeadersInit = {
         'Content-Type': 'application/json',
@@ -379,71 +400,10 @@ const SetScreen = () => {
         headers['Authorization'] = `Bearer ${token.trim()}`;
       }
       
-      // Get containers that have new schedules
-      const containersWithNewSchedules = new Set(scheduleRecords.map(r => r.container));
-      
-      // Also get containers that were previously configured but now have no schedules (cleared)
-      const allContainersToCheck = new Set([1, 2, 3]);
-      
-      // Fetch existing schedules to delete old ones
-      try {
-        const existingSchedulesResponse = await fetch('https://pillnow-database.onrender.com/api/medication_schedules', {
-          headers
-        });
-        if (existingSchedulesResponse.ok) {
-          const existingData = await existingSchedulesResponse.json();
-          const allExistingSchedules = existingData.data || [];
-          
-          // Find ALL old schedules for containers 1, 2, 3 for this user
-          // This includes containers that are being cleared (no new schedules)
-          const oldSchedulesToDelete = allExistingSchedules.filter((sched: any) => {
-            const schedContainer = parseInt(sched.container);
-            const schedUser = parseInt(sched.user);
-            return allContainersToCheck.has(schedContainer) && schedUser === currentUserId;
-          });
-          
-          // Delete old schedules
-          if (oldSchedulesToDelete.length > 0) {
-            console.log(`[SetScreen] Deleting ${oldSchedulesToDelete.length} old schedule(s) for all containers (1, 2, 3) for user ${currentUserId}`);
-            
-            // Delete in batches to avoid overwhelming the backend
-            const batchSize = 10;
-            let deletedCount = 0;
-            for (let i = 0; i < oldSchedulesToDelete.length; i += batchSize) {
-              const batch = oldSchedulesToDelete.slice(i, i + batchSize);
-              const deletePromises = batch.map((sched: any) =>
-                fetch(`https://pillnow-database.onrender.com/api/medication_schedules/${sched._id}`, {
-                  method: 'DELETE',
-                  headers
-                }).then(response => {
-                  if (response.ok) {
-                    deletedCount++;
-                    return { success: true, id: sched._id };
-                  } else {
-                    console.warn(`[SetScreen] Failed to delete old schedule ${sched._id}: HTTP ${response.status}`);
-                    return { success: false, id: sched._id };
-                  }
-                }).catch(err => {
-                  console.warn(`[SetScreen] Failed to delete old schedule ${sched._id}:`, err);
-                  return { success: false, id: sched._id };
-                })
-              );
-              await Promise.all(deletePromises);
-              
-              // Small delay between batches
-              if (i + batchSize < oldSchedulesToDelete.length) {
-                await new Promise(resolve => setTimeout(resolve, 200));
-              }
-            }
-            console.log(`[SetScreen] ✅ Deleted ${deletedCount} out of ${oldSchedulesToDelete.length} old schedule(s)`);
-          } else {
-            console.log(`[SetScreen] No old schedules to delete`);
-          }
-        }
-      } catch (deleteErr) {
-        console.warn('[SetScreen] Error deleting old schedules (non-critical):', deleteErr);
-        // Continue even if delete fails - we'll still save new schedules
-      }
+      // NOTE: We no longer delete old schedules when adding new ones
+      // This allows users to have multiple schedules and add new ones without losing existing ones
+      // Old schedules will only be deleted if they are explicitly marked as "Missed" or "Done" and are older than 5 minutes
+      // (handled by MonitorManageScreen auto-deletion logic)
       
       // Now send each new schedule record
       const promises = scheduleRecords.map(record => 
@@ -715,6 +675,8 @@ const SetScreen = () => {
     } catch (err) {
       console.error('Error saving schedule:', err);
       Alert.alert('Error', `Failed to save schedule: ${err instanceof Error ? err.message : 'Unknown error'}`);
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -935,14 +897,16 @@ const SetScreen = () => {
         })
       )}
       <TouchableOpacity 
-        style={[styles.confirmButton, { backgroundColor: theme.primary, opacity: verifying ? 0.6 : 1 }]} 
+        style={[styles.confirmButton, { backgroundColor: theme.primary, opacity: (saving || verifying) ? 0.6 : 1 }]} 
         onPress={saveScheduleData}
-        disabled={verifying}
+        disabled={saving || verifying}
       > 
-        {verifying ? (
-          <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+        {(saving || verifying) ? (
+          <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center' }}>
             <ActivityIndicator size="small" color={theme.card} style={{ marginRight: 10 }} />
-            <Text style={[styles.confirmButtonText, { color: theme.card }]}>VERIFYING...</Text>
+            <Text style={[styles.confirmButtonText, { color: theme.card }]}>
+              {saving ? 'SAVING...' : 'VERIFYING...'}
+            </Text>
           </View>
         ) : (
         <Text style={[styles.confirmButtonText, { color: theme.card }]}>CONFIRM</Text>
@@ -1023,13 +987,31 @@ const SetScreen = () => {
       <Modal visible={alarmModalVisible} transparent animationType="slide">
         <View style={styles.modalOverlay}>
           <View style={[styles.modalContent, { backgroundColor: theme.card }]}>
-            <Text style={[styles.modalTitle, { color: theme.secondary }]}>Set Time for Container {currentPillSlot}</Text>
+            <Text style={[styles.modalTitle, { color: theme.secondary }]}>Set Date & Time for Container {currentPillSlot}</Text>
             <Text style={[styles.modalSubtitle, { color: theme.textSecondary }]}>
-              Select time (24-hour format)
+              Choose the exact date and time (24-hour format)
             </Text>
             
             {Platform.OS === 'android' ? (
               <>
+                <TouchableOpacity 
+                  onPress={() => setShowDatePicker(true)}
+                  style={[styles.timeButton, { backgroundColor: theme.background, borderColor: theme.primary }]}
+                >
+                  <Ionicons name="calendar-outline" size={24} color={theme.primary} />
+                  <Text style={[styles.timeButtonText, { color: theme.text }]}>
+                    {selectedDate.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })}
+                  </Text>
+                </TouchableOpacity>
+                {showDatePicker && (
+                  <DateTimePicker 
+                    value={selectedDate} 
+                    mode="date" 
+                    display="default" 
+                    onChange={onChangeDateOnly}
+                    minimumDate={new Date()}
+                  />
+                )}
                 <TouchableOpacity 
                   onPress={() => setShowTimePicker(true)}
                   style={[styles.timeButton, { backgroundColor: theme.background, borderColor: theme.primary }]}
@@ -1044,20 +1026,30 @@ const SetScreen = () => {
                     value={selectedDate} 
                     mode="time" 
                     display="default" 
-                    onChange={onChangeDate}
+                    onChange={onChangeTime}
                     is24Hour={true}
                   />
                 )}
               </>
             ) : (
-              <DateTimePicker 
-                value={selectedDate} 
-                mode="time" 
-                display="spinner" 
-                onChange={onChangeDate}
-                style={{ width: '100%' }}
-                is24Hour={true}
-              />
+              <>
+                <DateTimePicker 
+                  value={selectedDate} 
+                  mode="date" 
+                  display="spinner" 
+                  onChange={onChangeDateOnly}
+                  style={{ width: '100%' }}
+                  minimumDate={new Date()}
+                />
+                <DateTimePicker 
+                  value={selectedDate} 
+                  mode="time" 
+                  display="spinner" 
+                  onChange={onChangeTime}
+                  style={{ width: '100%' }}
+                  is24Hour={true}
+                />
+              </>
             )}
             
             <View style={styles.modalButtons}>
@@ -1065,6 +1057,7 @@ const SetScreen = () => {
                 onPress={() => {
                   setAlarmModalVisible(false);
                   setShowTimePicker(false);
+                  setShowDatePicker(false);
                 }}
                 style={[styles.modalButton, { backgroundColor: theme.secondary }]}
                 disabled={addingTime}
@@ -1099,7 +1092,8 @@ const styles = StyleSheet.create({
   },
   scrollContent: {
     padding: 12,
-    paddingBottom: 20,
+    paddingBottom: 30,
+    gap: 8,
   },
   header: {
     flexDirection: 'row',
@@ -1141,9 +1135,11 @@ const styles = StyleSheet.create({
   pillContainer: {
     borderRadius: 12,
     padding: 12,
-    marginVertical: 6,
+    marginVertical: 8,
+    marginBottom: 12,
     width: '100%',
     elevation: 2,
+    minHeight: 120,
   },
   rtcTimeContainer: {
     flexDirection: 'row',
@@ -1184,15 +1180,19 @@ const styles = StyleSheet.create({
     minHeight: 20,
   },
   scheduleList: {
-    marginBottom: 8,
-    gap: 4,
+    marginBottom: 10,
+    marginTop: 4,
+    gap: 6,
+    maxHeight: 150,
   },
   scheduleItem: {
     flexDirection: 'row',
     alignItems: 'center',
-    padding: 6,
+    padding: 8,
     borderRadius: 6,
-    gap: 6,
+    gap: 8,
+    marginBottom: 4,
+    minHeight: 36,
   },
   scheduleTime: {
     fontSize: 13,
@@ -1247,12 +1247,15 @@ const styles = StyleSheet.create({
     marginTop: 4,
   },
   confirmButton: {
-    padding: 14,
+    padding: 16,
     borderRadius: 12,
-    marginTop: 12,
+    marginTop: 20,
+    marginBottom: 20,
     width: '100%',
     alignItems: 'center',
+    justifyContent: 'center',
     elevation: 3,
+    minHeight: 50,
   },
   confirmButtonText: {
     fontSize: 16,

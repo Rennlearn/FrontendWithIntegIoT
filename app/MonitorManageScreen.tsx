@@ -1,9 +1,10 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { 
   View, Text, StyleSheet, TouchableOpacity, ScrollView, Alert, ActivityIndicator, Platform 
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useNavigation } from '@react-navigation/native';
+import { useRouter } from 'expo-router';
 import { useTheme } from './context/ThemeContext';
 import { lightTheme, darkTheme } from './styles/theme';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -21,6 +22,7 @@ interface DecodedToken {
 
 const MonitorManageScreen = () => {
   const navigation = useNavigation();
+  const router = useRouter();
   const { isDarkMode } = useTheme();
   const theme = isDarkMode ? darkTheme : lightTheme;
   
@@ -34,6 +36,13 @@ const MonitorManageScreen = () => {
   const [loadingVerifications, setLoadingVerifications] = useState(false);
   const [schedulesExpanded, setSchedulesExpanded] = useState(true); // Dropdown state
   const [lastArduinoSync, setLastArduinoSync] = useState<number>(0); // Track last sync time
+  const lastAlarmShownRef = useRef<number>(0); // prevent rapid successive alarm popups
+  const missedMarkedRef = useRef<Set<string>>(new Set()); // avoid spamming missed updates
+  
+  // Loading states for buttons
+  const [refreshing, setRefreshing] = useState(false);
+  const [deletingAll, setDeletingAll] = useState(false);
+  const [navigating, setNavigating] = useState<string | null>(null);
   
   // Alarm modal state
   const [alarmVisible, setAlarmVisible] = useState(false);
@@ -45,6 +54,7 @@ const MonitorManageScreen = () => {
   useEffect(() => {
     const setupNotifications = async () => {
       try {
+        // @ts-expect-error - Dynamic import for lazy loading (works at runtime)
         const Notifications = await import('expo-notifications');
         // Check if native module is available
         if (Notifications.default && typeof Notifications.default.setNotificationHandler === 'function') {
@@ -57,22 +67,53 @@ const MonitorManageScreen = () => {
           });
         }
       } catch (e) {
-        console.warn('expo-notifications native module not available, using Alert fallback:', e.message);
+        const errorMessage = e instanceof Error ? e.message : String(e);
+        console.warn('expo-notifications native module not available, using Alert fallback:', errorMessage);
       }
     };
     setupNotifications();
   }, []);
 
-  // Load schedule data on component mount and when screen comes into focus
-  // NO auto-deletion, NO auto-sync - user must manually sync or delete
-  useEffect(() => {
-    const loadData = async () => {
-      await loadScheduleData(false, false, true); // NO sync to Arduino, NO auto-delete, show loading on initial load
-      await loadVerifications();
-    };
-    loadData();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []); // Only run once on mount
+  // Get current user ID and role from JWT token
+  // Note: This function allows both Elders and Caregivers to view schedules
+  // Role restrictions are applied at the action level (create/modify), not at viewing level
+  const getCurrentUserId = useCallback(async (): Promise<number> => {
+    try {
+      const token = await AsyncStorage.getItem('token');
+      
+      if (!token) {
+        console.warn('No token found, using default user ID 1');
+        return 1;
+      }
+
+      const decodedToken = jwtDecode<DecodedToken>(token.trim());
+      const rawId = decodedToken.userId ?? decodedToken.id;
+      const userId = parseInt(rawId);
+      
+      if (isNaN(userId)) {
+        console.warn('Invalid user ID in token, using default user ID 1');
+        return 1;
+      }
+
+      // Return userId without role restriction - both Elders and Caregivers can view schedules
+      // Caregivers will use getSelectedElderId() to view their selected elder's schedules
+      return userId;
+    } catch (error) {
+      console.error('Error getting user ID from token:', error);
+      return 1; // Default fallback for other errors
+    }
+  }, []);
+
+  // Get selected elder ID for caregivers
+  const getSelectedElderId = useCallback(async (): Promise<string | null> => {
+    try {
+      const selectedElderId = await AsyncStorage.getItem('selectedElderId');
+      return selectedElderId;
+    } catch (error) {
+      console.error('Error getting selected elder ID:', error);
+      return null;
+    }
+  }, []);
 
   // Load verification results
   const loadVerifications = useCallback(async () => {
@@ -99,11 +140,276 @@ const MonitorManageScreen = () => {
     }
   }, []);
 
+  // Load schedule data
+  const loadScheduleData = useCallback(async (syncToArduino: boolean = true, autoDeleteMissed: boolean = false, showLoading: boolean = true) => {
+    try {
+      if (showLoading) {
+      setLoading(true);
+      }
+      setError(null);
+      
+      // Get current user ID
+      const currentUserId = await getCurrentUserId();
+      
+      // Fetch medications and schedules with cache-busting to ensure fresh data
+      const medicationsResponse = await fetch('https://pillnow-database.onrender.com/api/medications', {
+        headers: {
+          'Cache-Control': 'no-cache',
+          'Pragma': 'no-cache',
+          'If-Modified-Since': '0'
+        }
+      });
+      const medicationsData = await medicationsResponse.json();
+      
+      // Normalize medications to an array regardless of API wrapper shape
+      const medsArray = Array.isArray(medicationsData) ? medicationsData : (medicationsData?.data || []);
+      
+      const token = await AsyncStorage.getItem('token');
+      const scheduleHeaders: HeadersInit = {
+        'Content-Type': 'application/json',
+          'Cache-Control': 'no-cache',
+          'Pragma': 'no-cache',
+          'If-Modified-Since': '0'
+      };
+      if (token) {
+        scheduleHeaders['Authorization'] = `Bearer ${token.trim()}`;
+        }
+      const schedulesResponse = await fetch('https://pillnow-database.onrender.com/api/medication_schedules', {
+        headers: scheduleHeaders
+      });
+      const schedulesData = await schedulesResponse.json();
+      
+      // Get all schedules and filter by current user ID or selected elder ID
+      const allSchedules = schedulesData.data || [];
+      
+      // Check if there's a selected elder (for caregivers)
+      const selectedElderId = await getSelectedElderId();
+      
+      // Filter schedules based on user role and selected elder
+      let userSchedules;
+      if (selectedElderId) {
+        // If caregiver has selected an elder, show that elder's schedules
+        userSchedules = allSchedules.filter((schedule: any) => {
+          const scheduleUserId = parseInt(schedule.user);
+          return scheduleUserId === parseInt(selectedElderId);
+        });
+      } else {
+        // Otherwise, show current user's schedules
+        userSchedules = allSchedules.filter((schedule: any) => {
+          const scheduleUserId = parseInt(schedule.user);
+          return scheduleUserId === currentUserId;
+        });
+      }
+      
+      // Auto-mark past-due schedules as Missed (so they don't stay "Pending" forever)
+      const now = new Date();
+      const oneMinuteAgo = now.getTime() - (1 * 60 * 1000);
+      const schedulesNeedingMissed: any[] = [];
+
+      userSchedules.forEach((schedule: any) => {
+        if (!schedule?.date || !schedule?.time) return;
+        const rawStatus = (schedule.status || 'Pending').toLowerCase();
+        if (rawStatus !== 'pending' && rawStatus !== 'active' && rawStatus !== '') return;
+
+        try {
+          const [y, m, d] = String(schedule.date).split('-').map(Number);
+          const [hh, mm] = String(schedule.time).split(':').map(Number);
+          const when = new Date(y, (m || 1) - 1, d, hh, mm);
+          if (when.getTime() < oneMinuteAgo) {
+            schedulesNeedingMissed.push(schedule);
+          }
+        } catch (err) {
+          console.warn(`[MonitorManageScreen] Failed to parse schedule time for missed check:`, err);
+        }
+      });
+
+      if (schedulesNeedingMissed.length > 0) {
+        console.log(`[MonitorManageScreen] Marking ${schedulesNeedingMissed.length} past-due schedule(s) as Missed`);
+        const updatePromises = schedulesNeedingMissed.map(async (sched: any) => {
+          try {
+            // Try PATCH first
+            const response = await fetch(`https://pillnow-database.onrender.com/api/medication_schedules/${sched._id}`, {
+              method: 'PATCH',
+              headers: scheduleHeaders,
+              body: JSON.stringify({ status: 'Missed' })
+            });
+            
+            if (!response.ok) {
+              const text = await response.text();
+              console.warn(`[MonitorManageScreen] PATCH failed (${response.status}): ${text}, trying PUT...`);
+              
+              // Fallback to PUT if PATCH doesn't work
+              const putResponse = await fetch(`https://pillnow-database.onrender.com/api/medication_schedules/${sched._id}`, {
+                method: 'PUT',
+                headers: scheduleHeaders,
+                body: JSON.stringify({ ...sched, status: 'Missed' })
+              });
+              
+              if (!putResponse.ok) {
+                const putErrorText = await putResponse.text();
+                console.error(`[MonitorManageScreen] ⚠️ PUT also failed (${putResponse.status}): ${putErrorText}`);
+              } else {
+                console.log(`[MonitorManageScreen] ✅ Schedule ${sched._id} marked as Missed (via PUT)`);
+                sched.status = 'Missed';
+              }
+            } else {
+              console.log(`[MonitorManageScreen] ✅ Schedule ${sched._id} marked as Missed (via PATCH)`);
+              sched.status = 'Missed';
+            }
+          } catch (err) {
+            console.error(`[MonitorManageScreen] Error marking Missed for ${sched._id}:`, err);
+          }
+        });
+        await Promise.all(updatePromises);
+      }
+
+      // Group schedules by container - keep ALL schedules for each container
+      const schedulesByContainer: Record<number, any[]> = {};
+      
+      userSchedules.forEach((schedule: any) => {
+        const containerNum = parseInt(schedule.container) || 1;
+        if (!schedulesByContainer[containerNum]) {
+          schedulesByContainer[containerNum] = [];
+        }
+        schedulesByContainer[containerNum].push(schedule);
+      });
+      
+      // Get ALL schedules for each container (not just the latest)
+      // Keep all schedules - no filtering or deletion
+      const allSchedulesByContainer: any[] = [];
+      
+      for (let containerNum = 1; containerNum <= 3; containerNum++) {
+        const containerSchedules = schedulesByContainer[containerNum] || [];
+        if (containerSchedules.length > 0) {
+          // Keep all schedules - no filtering
+          const activeSchedules = containerSchedules;
+          
+          if (activeSchedules.length > 0) {
+            // Pick the nearest upcoming schedule for this container
+            const withTime = activeSchedules.map((s: any) => {
+              try {
+                const [y, m, d] = String(s.date || '').split('-').map(Number);
+                const [hh, mm] = String(s.time || '').split(':').map(Number);
+                const whenMs = new Date(y, (m || 1) - 1, d, hh, mm).getTime();
+                return { sched: s, whenMs };
+              } catch {
+                return { sched: s, whenMs: Number.POSITIVE_INFINITY };
+              }
+            });
+            
+            const validWithTime = withTime.filter(item => Number.isFinite(item.whenMs));
+            const nearest = (validWithTime.length > 0
+              ? validWithTime.sort((a, b) => a.whenMs - b.whenMs)[0].sched
+              : activeSchedules[0]);
+            
+            allSchedulesByContainer.push(nearest);
+          }
+        }
+      }
+      
+      // Sort by container number first, then by earliest time (fallback to scheduleId)
+      const sortedSchedules = allSchedulesByContainer.sort((a: any, b: any) => {
+          const containerA = parseInt(a.container);
+          const containerB = parseInt(b.container);
+        if (containerA !== containerB) {
+          return containerA - containerB;
+        }
+        // If same container, sort by time ascending (nearest first)
+        try {
+          const [ya, ma, da] = String(a.date || '').split('-').map(Number);
+          const [haa, maa] = String(a.time || '').split(':').map(Number);
+          const [yb, mb, db] = String(b.date || '').split('-').map(Number);
+          const [hab, mab] = String(b.time || '').split(':').map(Number);
+          const tA = new Date(ya, (ma || 1) - 1, da, haa, maa).getTime();
+          const tB = new Date(yb, (mb || 1) - 1, db, hab, mab).getTime();
+          if (Number.isFinite(tA) && Number.isFinite(tB) && tA !== tB) {
+            return tA - tB;
+          }
+        } catch {
+          // ignore and fall back
+        }
+        return (b.scheduleId || 0) - (a.scheduleId || 0);
+        });
+      
+      setMedications(medsArray);
+      setSchedules(sortedSchedules);
+      
+      // Log summary of loaded schedules
+      console.log(`[MonitorManageScreen] ✅ Loaded ${sortedSchedules.length} schedule(s) from backend:`);
+      sortedSchedules.forEach((sched, index) => {
+        console.log(`  [${index + 1}] Container ${sched.container} - ${sched.time} (Schedule ID: ${sched.scheduleId || sched._id || 'N/A'})`);
+      });
+
+      // Also sync current schedules to Arduino over Bluetooth if connected
+      // IMPORTANT: Sync happens AFTER deletion, so sortedSchedules only contains remaining (non-deleted) schedules
+      // Only sync if explicitly requested (not during periodic refresh)
+      // Also prevent syncing if we just synced recently (within last 10 seconds)
+      if (syncToArduino) {
+        const now = Date.now();
+        const timeSinceLastSync = now - lastArduinoSync;
+        const MIN_SYNC_INTERVAL = 10000; // 10 seconds minimum between syncs
+        
+        if (timeSinceLastSync < MIN_SYNC_INTERVAL) {
+          console.log(`[MonitorManageScreen] Skipping Arduino sync - last sync was ${Math.round(timeSinceLastSync / 1000)}s ago`);
+        } else {
+      try {
+        const isActive = await BluetoothService.isConnectionActive();
+        if (isActive && sortedSchedules.length > 0) {
+              console.log(`[MonitorManageScreen] Syncing ${sortedSchedules.length} schedule(s) to Arduino...`);
+              setLastArduinoSync(now);
+              
+              // Send each schedule with its container number
+          await BluetoothService.sendCommand('SCHED CLEAR\n');
+              await new Promise(resolve => setTimeout(resolve, 300)); // Increased delay
+              
+              for (const sched of sortedSchedules) {
+                const containerNum = parseInt(sched.container) || 1;
+                console.log(`[MonitorManageScreen] Sending to Arduino: SCHED ADD ${sched.time} ${containerNum}`);
+                await BluetoothService.sendCommand(`SCHED ADD ${sched.time} ${containerNum}\n`);
+                await new Promise(resolve => setTimeout(resolve, 300)); // Increased delay for reliability
+              }
+              console.log(`[MonitorManageScreen] ✅ Successfully synced ${sortedSchedules.length} schedule(s) to Arduino`);
+        } else if (isActive && sortedSchedules.length === 0) {
+          // Clear Arduino if no schedules remain (after deletion)
+          console.log('[MonitorManageScreen] No schedules remaining after deletion, clearing Arduino schedules...');
+          await BluetoothService.sendCommand('SCHED CLEAR\n');
+          await new Promise(resolve => setTimeout(resolve, 300));
+          console.log('[MonitorManageScreen] ✅ Arduino schedules cleared.');
+          setLastArduinoSync(now);
+        }
+      } catch (e) {
+        console.warn('Bluetooth sync skipped:', e);
+          }
+        }
+      }
+      
+    } catch (err) {
+      console.error('Error loading schedule data:', err);
+      const errorMessage = err instanceof Error ? err.message : 'Failed to load schedule data';
+      setError(errorMessage);
+    } finally {
+      if (showLoading) {
+      setLoading(false);
+    }
+    }
+  }, [getCurrentUserId, getSelectedElderId, lastArduinoSync]);
+
+  // Load schedule data on component mount and when screen comes into focus
+  // NO auto-deletion, NO auto-sync - user must manually sync or delete
+  useEffect(() => {
+    const loadData = async () => {
+      await loadScheduleData(false, false, true); // NO sync to Arduino, NO auto-delete, show loading on initial load
+      await loadVerifications();
+    };
+    loadData();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // Only run once on mount
+
   // Refresh data when screen comes into focus
   // Auto-delete missed schedules, then sync remaining schedules to Arduino
   useEffect(() => {
     const unsubscribe = navigation.addListener('focus', async () => {
-      await loadScheduleData(true, true, true); // Sync to Arduino AND auto-delete missed schedules, show loading
+      await loadScheduleData(true, false, true); // Sync to Arduino, NO auto-delete, show loading
       await loadVerifications();
     });
 
@@ -191,6 +497,21 @@ const MonitorManageScreen = () => {
           const timeStr = `${hour}:${minute}`;
           
           console.log(`[MonitorManageScreen] 📊 Parsed alarm: Container ${container} at ${timeStr}`);
+          
+          // If an alarm modal is already showing, wait for it to close before showing another
+          if (alarmVisible) {
+            console.log(`[MonitorManageScreen] ⏳ Alarm modal already visible; ignoring new trigger until dismissed`);
+            return;
+          }
+          
+          // Cooldown: prevent rapid successive popups (3s window)
+          const nowTs = Date.now();
+          if (nowTs - lastAlarmShownRef.current < 3000) {
+            console.log(`[MonitorManageScreen] ⏳ Alarm trigger ignored due to cooldown window`);
+            return;
+          }
+          lastAlarmShownRef.current = nowTs;
+          
           console.log(`[MonitorManageScreen] 🔔 Setting alarm modal visible...`);
           
           // Prevent duplicate modals - only update if modal is not already visible for this container/time
@@ -265,8 +586,19 @@ const MonitorManageScreen = () => {
             }
           }, 500); // Small delay to ensure modal state is set first
           
+          // Play alarm sound
+          try {
+            // @ts-expect-error - Dynamic import for lazy loading (works at runtime)
+            const { soundService } = await import('./services/soundService');
+            await soundService.initialize();
+            await soundService.playAlarmSound('alarm');
+          } catch (soundError) {
+            console.warn('Failed to play alarm sound:', soundError);
+          }
+
           // Show push notification
           try {
+            // @ts-expect-error - Dynamic import for lazy loading (works at runtime)
             const Notifications = await import('expo-notifications');
             // Check if native module is available
             if (Notifications.default && typeof Notifications.default.scheduleNotificationAsync === 'function') {
@@ -274,7 +606,7 @@ const MonitorManageScreen = () => {
                 content: {
                   title: '💊 Medication Reminder',
                   body: `Time to take medication from Container ${container} at ${timeStr}!`,
-                  sound: true,
+                  sound: 'default', // Use default system sound, or specify custom sound file
                   ...(Platform.OS === 'android' && { priority: 'high' as const }),
                   data: { container, time: timeStr },
                 },
@@ -284,7 +616,8 @@ const MonitorManageScreen = () => {
               throw new Error('Native module not available');
             }
           } catch (notificationError) {
-            console.warn('Failed to send notification, using Alert:', notificationError?.message || notificationError);
+            const errorMessage = notificationError instanceof Error ? notificationError.message : String(notificationError);
+            console.warn('Failed to send notification, using Alert:', errorMessage);
             // Fallback to Alert if notification fails
             Alert.alert(
               '💊 Medication Reminder',
@@ -348,6 +681,7 @@ const MonitorManageScreen = () => {
           
           // Send notification that pill was taken
           try {
+            // @ts-expect-error - Dynamic import for lazy loading (works at runtime)
             const Notifications = await import('expo-notifications');
             if (Notifications.default && typeof Notifications.default.scheduleNotificationAsync === 'function') {
               await Notifications.default.scheduleNotificationAsync({
@@ -362,7 +696,8 @@ const MonitorManageScreen = () => {
               });
             }
           } catch (notificationError) {
-            console.warn('Failed to send notification:', notificationError?.message || notificationError);
+            const errorMessage = notificationError instanceof Error ? notificationError.message : String(notificationError);
+            console.warn('Failed to send notification:', errorMessage);
           }
           
           // Create schedule notification for alarm stopped
@@ -431,6 +766,7 @@ const MonitorManageScreen = () => {
                 
                 // Send verification result notification (alarm modal is already dismissed)
                 try {
+                  // @ts-expect-error - Dynamic import for lazy loading (works at runtime)
                   const Notifications = await import('expo-notifications');
                   if (Notifications.default && typeof Notifications.default.scheduleNotificationAsync === 'function') {
                     const verificationStatus = result.success && result.result?.pass_ ? '✅ Verified' : '⚠️ Verification Failed';
@@ -450,7 +786,8 @@ const MonitorManageScreen = () => {
                     throw new Error('Native module not available');
                   }
                 } catch (notificationError) {
-                  console.warn('Failed to send verification notification, using Alert:', notificationError?.message || notificationError);
+                  const errorMessage = notificationError instanceof Error ? notificationError.message : String(notificationError);
+                  console.warn('Failed to send verification notification, using Alert:', errorMessage);
                   // Only show alert if verification passed - don't show failure alert (too intrusive)
                   if (result.success && result.result?.pass_) {
                     Alert.alert(
@@ -505,59 +842,6 @@ const MonitorManageScreen = () => {
     };
   }, [loadVerifications, loadScheduleData]);
 
-  // Get current user ID and role from JWT token
-  const getCurrentUserId = async (): Promise<number> => {
-    try {
-      const token = await AsyncStorage.getItem('token');
-      
-      if (!token) {
-        console.warn('No token found, using default user ID 1');
-        return 1;
-      }
-
-      const decodedToken = jwtDecode<DecodedToken>(token.trim());
-      const rawId = decodedToken.userId ?? decodedToken.id;
-      const userId = parseInt(rawId);
-      
-      if (isNaN(userId)) {
-        console.warn('Invalid user ID in token, using default user ID 1');
-        return 1;
-      }
-
-      // Get user role from AsyncStorage (stored during login)
-      const storedUserRole = await AsyncStorage.getItem('userRole');
-      
-      // Check if user role allows Elder access (role 2 for Elder based on login screen)
-      const userRole = decodedToken.role?.toString() || storedUserRole;
-      
-      // Allow access if role is 2 (Elder) or if no role restriction is set
-      if (userRole && userRole !== "2") {
-        console.warn('User role is not Elder (role != 2):', userRole);
-        Alert.alert('Access Denied', 'Only Elders can set up medication schedules.');
-        throw new Error('Only Elders can set up medication schedules');
-      }
-
-      return userId;
-    } catch (error) {
-      console.error('Error getting user ID from token:', error);
-      if (error instanceof Error && error.message.includes('Only Elders')) {
-        throw error; // Re-throw role-based errors
-      }
-      return 1; // Default fallback for other errors
-    }
-  };
-
-  // Get selected elder ID for caregivers
-  const getSelectedElderId = async (): Promise<string | null> => {
-    try {
-      const selectedElderId = await AsyncStorage.getItem('selectedElderId');
-      return selectedElderId;
-    } catch (error) {
-      console.error('Error getting selected elder ID:', error);
-      return null;
-    }
-  };
-
   // Get latest schedule ID
   const getLatestScheduleId = async (): Promise<number> => {
     try {
@@ -590,335 +874,18 @@ const MonitorManageScreen = () => {
     }
   };
 
-  // Load schedule data
-  const loadScheduleData = useCallback(async (syncToArduino: boolean = true, autoDeleteMissed: boolean = true, showLoading: boolean = true) => {
-    try {
-      if (showLoading) {
-      setLoading(true);
-      }
-      setError(null);
-      
-      // Get current user ID
-      const currentUserId = await getCurrentUserId();
-      
-      // Fetch medications and schedules with cache-busting to ensure fresh data
-      const medicationsResponse = await fetch('https://pillnow-database.onrender.com/api/medications', {
-        headers: {
-          'Cache-Control': 'no-cache',
-          'Pragma': 'no-cache',
-          'If-Modified-Since': '0'
-        }
-      });
-      const medicationsData = await medicationsResponse.json();
-      
-      // Normalize medications to an array regardless of API wrapper shape
-      const medsArray = Array.isArray(medicationsData) ? medicationsData : (medicationsData?.data || []);
-      
-      const token = await AsyncStorage.getItem('token');
-      const scheduleHeaders: HeadersInit = {
-        'Content-Type': 'application/json',
-          'Cache-Control': 'no-cache',
-          'Pragma': 'no-cache',
-          'If-Modified-Since': '0'
-      };
-      if (token) {
-        scheduleHeaders['Authorization'] = `Bearer ${token.trim()}`;
-        }
-      const schedulesResponse = await fetch('https://pillnow-database.onrender.com/api/medication_schedules', {
-        headers: scheduleHeaders
-      });
-      const schedulesData = await schedulesResponse.json();
-      
-      // Get all schedules and filter by current user ID or selected elder ID
-      const allSchedules = schedulesData.data || [];
-      
-      // Check if there's a selected elder (for caregivers)
-      const selectedElderId = await getSelectedElderId();
-      
-      // Filter schedules based on user role and selected elder
-      let userSchedules;
-      if (selectedElderId) {
-        // If caregiver has selected an elder, show that elder's schedules
-        userSchedules = allSchedules.filter((schedule: any) => {
-          const scheduleUserId = parseInt(schedule.user);
-          return scheduleUserId === parseInt(selectedElderId);
-        });
-      } else {
-        // Otherwise, show current user's schedules
-        userSchedules = allSchedules.filter((schedule: any) => {
-          const scheduleUserId = parseInt(schedule.user);
-          return scheduleUserId === currentUserId;
-        });
-      }
-      
-      // Automatically delete schedules that have been missed for more than 5 minutes
-      // Only do this on initial load or manual refresh, not on periodic refresh to avoid constant deletion
-      const now = new Date();
-      const fiveMinutesAgo = now.getTime() - (5 * 60 * 1000); // 5 minutes in milliseconds
-      
-      if (autoDeleteMissed) {
-        const schedulesToDelete: any[] = [];
-        
-        userSchedules.forEach((schedule: any) => {
-          if (!schedule?.date || !schedule?.time) return;
-          
-          try {
-            const [y, m, d] = String(schedule.date).split('-').map(Number);
-            const [hh, mm] = String(schedule.time).split(':').map(Number);
-            const scheduleTime = new Date(y, (m || 1) - 1, d, hh, mm);
-            const scheduleTimeMs = scheduleTime.getTime();
-            
-            // Delete schedules that are:
-            // 1. Missed (time has passed) and missed for more than 5 minutes, OR
-            // 2. Marked as "Done" and the schedule time was more than 5 minutes ago
-            const isMissed = scheduleTimeMs < now.getTime() && scheduleTimeMs < fiveMinutesAgo;
-            const isDone = schedule.status === 'Done' && scheduleTimeMs < fiveMinutesAgo;
-            
-            if (isMissed || isDone) {
-              schedulesToDelete.push(schedule);
-            }
-          } catch (err) {
-            console.warn(`[MonitorManageScreen] Error checking schedule time for deletion:`, err);
-          }
-        });
-        
-        if (schedulesToDelete.length > 0) {
-          const missedCount = schedulesToDelete.filter(s => s.status !== 'Done').length;
-          const doneCount = schedulesToDelete.filter(s => s.status === 'Done').length;
-          console.log(`[MonitorManageScreen] Auto-deleting ${schedulesToDelete.length} schedule(s): ${missedCount} missed, ${doneCount} done (all older than 5 minutes)`);
-          
-          // Delete in batches - try to delete all, gracefully handle failures
-          const batchSize = 10;
-          let deletedCount = 0;
-          let failedCount = 0;
-          const deletedIds = new Set<string>();
-          
-          for (let i = 0; i < schedulesToDelete.length; i += batchSize) {
-            const batch = schedulesToDelete.slice(i, i + batchSize);
-            const deletePromises = batch.map(async (sched: any) => {
-              try {
-                const response = await fetch(`https://pillnow-database.onrender.com/api/medication_schedules/${sched._id}`, {
-                  method: 'DELETE',
-                  headers: scheduleHeaders
-                });
-                
-                if (response.ok) {
-                  deletedCount++;
-                  deletedIds.add(sched._id);
-                  return { success: true, id: sched._id };
-                } else {
-                  const errorText = await response.text();
-                  // If it's a validation error (invalid scheduleId), skip it gracefully
-                  if (response.status === 500 && errorText.includes('scheduleId') && (errorText.includes('NaN') || errorText.includes('Cast to Number'))) {
-                    console.warn(`[MonitorManageScreen] ⚠️ Skipping schedule ${sched._id} - backend validation error (invalid scheduleId). This schedule needs manual cleanup.`);
-                    failedCount++;
-                    return { success: false, id: sched._id, error: 'Invalid scheduleId - skipped', skip: true };
-                  }
-                  console.error(`[MonitorManageScreen] Failed to delete schedule ${sched._id}: HTTP ${response.status} - ${errorText.substring(0, 100)}`);
-                  failedCount++;
-                  return { success: false, id: sched._id, error: `HTTP ${response.status}` };
-                }
-              } catch (err) {
-                console.error(`[MonitorManageScreen] Failed to delete schedule ${sched._id}:`, err);
-                failedCount++;
-                return { success: false, id: sched._id, error: err instanceof Error ? err.message : 'Unknown error' };
-              }
-            });
-            
-            const results = await Promise.all(deletePromises);
-            const successCount = results.filter(r => r.success).length;
-            const failCount = results.filter(r => !r.success).length;
-            console.log(`[MonitorManageScreen] Batch ${Math.floor(i / batchSize) + 1}: ${successCount} deleted, ${failCount} failed`);
-            
-            // Small delay between batches to avoid overwhelming the backend
-            if (i + batchSize < schedulesToDelete.length) {
-              await new Promise(resolve => setTimeout(resolve, 200));
-            }
-          }
-          
-          console.log(`[MonitorManageScreen] ✅ Auto-deletion complete: ${deletedCount} deleted, ${failedCount} failed out of ${schedulesToDelete.length} total`);
-          
-          // If deletion failed, log details (but don't block the process)
-          if (failedCount > 0) {
-            console.warn(`[MonitorManageScreen] ⚠️ ${failedCount} schedule(s) failed to delete (likely due to invalid scheduleId). They won't be synced to Arduino.`);
-          }
-          
-          // Remove successfully deleted schedules from the list
-          // Failed schedules stay in userSchedules but won't be synced (they'll be filtered naturally)
-          userSchedules = userSchedules.filter((s: any) => !deletedIds.has(s._id));
-          
-          // Wait a moment for backend to process deletions before continuing
-          if (deletedCount > 0) {
-            await new Promise(resolve => setTimeout(resolve, 500));
-            console.log(`[MonitorManageScreen] ✅ Deleted ${deletedCount} schedule(s) (missed/done), ${userSchedules.length} valid schedule(s) remaining`);
-          }
-        }
-      }
-      
-      // Group schedules by container - keep ALL schedules for each container
-      // Filter out schedules with invalid scheduleId AND missed schedules that failed to delete
-      const schedulesByContainer: Record<number, any[]> = {};
-      
-      userSchedules.forEach((schedule: any) => {
-        // Only include schedules with valid scheduleId for syncing
-        const scheduleId = schedule.scheduleId;
-        const hasValidScheduleId = scheduleId !== null && scheduleId !== undefined && !isNaN(Number(scheduleId)) && Number(scheduleId) > 0;
-        
-        // If scheduleId is invalid, skip it (it can't be synced anyway)
-        if (!hasValidScheduleId) {
-          console.warn(`[MonitorManageScreen] Skipping schedule ${schedule._id} from sync - invalid scheduleId: ${scheduleId}`);
-          return;
-        }
-        
-        // Also skip missed schedules (even if they have valid scheduleId) - they should have been deleted
-        if (schedule?.date && schedule?.time) {
-          try {
-            const [y, m, d] = String(schedule.date).split('-').map(Number);
-            const [hh, mm] = String(schedule.time).split(':').map(Number);
-            const scheduleTime = new Date(y, (m || 1) - 1, d, hh, mm);
-            const scheduleTimeMs = scheduleTime.getTime();
-            
-            // If schedule is missed for more than 5 minutes, skip it (don't sync to Arduino)
-            if (scheduleTimeMs < now.getTime() && scheduleTimeMs < fiveMinutesAgo) {
-              // Don't log individual warnings - too verbose. These will be deleted on next auto-deletion cycle.
-              return;
-            }
-          } catch (err) {
-            // Silent skip for invalid date/time
-            return;
-          }
-        }
-        
-        const containerNum = parseInt(schedule.container) || 1;
-        if (!schedulesByContainer[containerNum]) {
-          schedulesByContainer[containerNum] = [];
-        }
-        schedulesByContainer[containerNum].push(schedule);
-      });
-      
-      // Get ALL schedules for each container (not just the latest)
-      // IMPORTANT: Filter out missed schedules (>5 minutes old) before syncing to Arduino
-      const allSchedulesByContainer: any[] = [];
-      
-      for (let containerNum = 1; containerNum <= 3; containerNum++) {
-        const containerSchedules = schedulesByContainer[containerNum] || [];
-        if (containerSchedules.length > 0) {
-          // Filter out missed schedules (>5 minutes old) - don't sync them to Arduino
-          let missedCount = 0;
-          const activeSchedules = containerSchedules.filter((schedule: any) => {
-            if (!schedule?.date || !schedule?.time) return true; // Keep schedules without date/time
-            
-            try {
-              const [y, m, d] = String(schedule.date).split('-').map(Number);
-              const [hh, mm] = String(schedule.time).split(':').map(Number);
-              const scheduleTime = new Date(y, (m || 1) - 1, d, hh, mm);
-              const scheduleTimeMs = scheduleTime.getTime();
-              
-              // Skip if missed for more than 5 minutes
-              if (scheduleTimeMs < now.getTime() && scheduleTimeMs < fiveMinutesAgo) {
-                missedCount++;
-                return false;
-              }
-              return true;
-            } catch (err) {
-              return true; // Keep if we can't parse the time
-            }
-          });
-          
-          // Log summary instead of individual warnings
-          if (missedCount > 0) {
-            console.log(`[MonitorManageScreen] ⏭️ Filtered out ${missedCount} missed schedule(s) from Container ${containerNum} (older than 5 minutes, will be deleted on next cycle)`);
-          }
-          
-          if (activeSchedules.length > 0) {
-            // Sort by scheduleId (highest first) to show most recent first
-            const sortedContainerSchedules = activeSchedules
-              .sort((a: any, b: any) => b.scheduleId - a.scheduleId);
-            // Add ALL active (non-missed) schedules for this container
-            allSchedulesByContainer.push(...sortedContainerSchedules);
-          }
-        }
-      }
-      
-      // Sort by container number first, then by scheduleId (highest first)
-      const sortedSchedules = allSchedulesByContainer.sort((a: any, b: any) => {
-          const containerA = parseInt(a.container);
-          const containerB = parseInt(b.container);
-        if (containerA !== containerB) {
-          return containerA - containerB;
-        }
-        // If same container, sort by scheduleId (highest first)
-        return b.scheduleId - a.scheduleId;
-        });
-      
-      setMedications(medsArray);
-      setSchedules(sortedSchedules);
-      
-      // Log summary of loaded schedules
-      console.log(`[MonitorManageScreen] ✅ Loaded ${sortedSchedules.length} active schedule(s) from backend (missed schedules filtered out):`);
-      sortedSchedules.forEach((sched, index) => {
-        console.log(`  [${index + 1}] Container ${sched.container} - ${sched.time} (Schedule ID: ${sched.scheduleId || sched._id || 'N/A'})`);
-      });
-
-      // Also sync current schedules to Arduino over Bluetooth if connected
-      // IMPORTANT: Sync happens AFTER deletion, so sortedSchedules only contains remaining (non-deleted) schedules
-      // Only sync if explicitly requested (not during periodic refresh)
-      // Also prevent syncing if we just synced recently (within last 10 seconds)
-      if (syncToArduino) {
-        const now = Date.now();
-        const timeSinceLastSync = now - lastArduinoSync;
-        const MIN_SYNC_INTERVAL = 10000; // 10 seconds minimum between syncs
-        
-        if (timeSinceLastSync < MIN_SYNC_INTERVAL) {
-          console.log(`[MonitorManageScreen] Skipping Arduino sync - last sync was ${Math.round(timeSinceLastSync / 1000)}s ago`);
-        } else {
-      try {
-        const isActive = await BluetoothService.isConnectionActive();
-        if (isActive && sortedSchedules.length > 0) {
-              console.log(`[MonitorManageScreen] Syncing ${sortedSchedules.length} schedule(s) to Arduino...`);
-              setLastArduinoSync(now);
-              
-              // Send each schedule with its container number
-          await BluetoothService.sendCommand('SCHED CLEAR\n');
-              await new Promise(resolve => setTimeout(resolve, 300)); // Increased delay
-              
-              for (const sched of sortedSchedules) {
-                const containerNum = parseInt(sched.container) || 1;
-                console.log(`[MonitorManageScreen] Sending to Arduino: SCHED ADD ${sched.time} ${containerNum}`);
-                await BluetoothService.sendCommand(`SCHED ADD ${sched.time} ${containerNum}\n`);
-                await new Promise(resolve => setTimeout(resolve, 300)); // Increased delay for reliability
-              }
-              console.log(`[MonitorManageScreen] ✅ Successfully synced ${sortedSchedules.length} schedule(s) to Arduino`);
-        } else if (isActive && sortedSchedules.length === 0) {
-          // Clear Arduino if no schedules remain (after deletion)
-          console.log('[MonitorManageScreen] No schedules remaining after deletion, clearing Arduino schedules...');
-          await BluetoothService.sendCommand('SCHED CLEAR\n');
-          await new Promise(resolve => setTimeout(resolve, 300));
-          console.log('[MonitorManageScreen] ✅ Arduino schedules cleared.');
-          setLastArduinoSync(now);
-        }
-      } catch (e) {
-        console.warn('Bluetooth sync skipped:', e);
-          }
-        }
-      }
-      
-    } catch (err) {
-      console.error('Error loading schedule data:', err);
-      const errorMessage = err instanceof Error ? err.message : 'Failed to load schedule data';
-      setError(errorMessage);
-    } finally {
-      if (showLoading) {
-      setLoading(false);
-    }
-    }
-  }, []);
-
   // Manual refresh function
   // Auto-delete missed schedules, then sync remaining schedules to Arduino
   const handleRefresh = async () => {
-    await loadScheduleData(true, true, true); // Sync to Arduino AND auto-delete missed schedules, show loading
-    await loadVerifications();
+    try {
+      setRefreshing(true);
+      await loadScheduleData(true, false, true); // Sync to Arduino, NO auto-delete, show loading
+      await loadVerifications();
+    } catch (error) {
+      console.error('Error refreshing:', error);
+    } finally {
+      setRefreshing(false);
+    }
   };
 
   // Delete all schedules function
@@ -938,6 +905,7 @@ const MonitorManageScreen = () => {
           style: 'destructive',
           onPress: async () => {
             try {
+              setDeletingAll(true);
               setLoading(true);
               const token = await AsyncStorage.getItem('token');
               const headers: HeadersInit = {
@@ -1015,7 +983,7 @@ const MonitorManageScreen = () => {
                 failedCount += batchFailed;
                 
                 // Collect failed deletion details
-                const batchFailedDetails = results.filter(r => !r.success).map(r => ({ id: r.id, error: r.error }));
+                const batchFailedDetails = results.filter(r => !r.success).map(r => ({ id: r.id, error: r.error || 'Unknown error' }));
                 failedDeletions.push(...batchFailedDetails);
                 
                 console.log(`[MonitorManageScreen] Batch ${Math.floor(i / batchSize) + 1} complete: ${batchSuccess} deleted, ${batchFailed} failed (Total: ${deletedCount} deleted, ${failedCount} failed)`);
@@ -1088,6 +1056,150 @@ const MonitorManageScreen = () => {
     );
   };
 
+  // Navigate back to appropriate dashboard based on user role
+  const handleBack = useCallback(async () => {
+    try {
+      setNavigating('back');
+      // Close alarm modal if open (non-blocking)
+      if (alarmVisible) {
+        setAlarmVisible(false);
+      }
+      
+      // Get user role to determine which dashboard to navigate to
+      const token = await AsyncStorage.getItem('token');
+      if (token) {
+        try {
+          const decodedToken = jwtDecode<DecodedToken>(token.trim());
+          const userRole = decodedToken.role?.toString() || await AsyncStorage.getItem('userRole');
+          
+          // Navigate to appropriate dashboard based on role
+          if (userRole === '3') {
+            router.replace('/CaregiverDashboard');
+          } else if (userRole === '2') {
+            router.replace('/ElderDashboard');
+          } else {
+            // Fallback: try to go back, or navigate to ElderDashboard
+            if (navigation.canGoBack && navigation.canGoBack()) {
+              navigation.goBack();
+            } else {
+              router.replace('/ElderDashboard');
+            }
+          }
+        } catch (error) {
+          // If token decode fails, try to go back normally
+          if (navigation.canGoBack && navigation.canGoBack()) {
+            navigation.goBack();
+          } else {
+            router.replace('/ElderDashboard');
+          }
+        }
+      } else {
+        // No token, try to go back normally
+        if (navigation.canGoBack && navigation.canGoBack()) {
+          navigation.goBack();
+        } else {
+          router.replace('/ElderDashboard');
+        }
+      }
+    } catch (error) {
+      console.error('Error navigating back:', error);
+      // Fallback navigation
+      if (navigation.canGoBack && navigation.canGoBack()) {
+        navigation.goBack();
+      } else {
+        router.replace('/ElderDashboard');
+      }
+    } finally {
+      setTimeout(() => setNavigating(null), 500);
+    }
+  }, [alarmVisible, navigation, router]);
+
+  // Helper to derive status locally without mutating backend
+  // Mark as "Missed" if it's been more than 1 minute past the scheduled time
+  const markAsMissedOnce = useCallback(async (schedule: any) => {
+    const id = schedule?._id;
+    if (!id || missedMarkedRef.current.has(id)) return;
+    missedMarkedRef.current.add(id);
+    try {
+      const token = await AsyncStorage.getItem('token');
+      const headers: HeadersInit = { 'Content-Type': 'application/json' };
+      if (token) headers['Authorization'] = `Bearer ${token.trim()}`;
+      
+      // Try PATCH first
+      const resp = await fetch(`https://pillnow-database.onrender.com/api/medication_schedules/${id}`, {
+        method: 'PATCH',
+        headers,
+        body: JSON.stringify({ status: 'Missed' })
+      });
+      
+      if (!resp.ok) {
+        const errorText = await resp.text();
+        console.warn(`[MonitorManageScreen] PATCH failed (${resp.status}): ${errorText}, trying PUT...`);
+        
+        // Fallback to PUT if PATCH doesn't work
+        const putResp = await fetch(`https://pillnow-database.onrender.com/api/medication_schedules/${id}`, {
+          method: 'PUT',
+          headers,
+          body: JSON.stringify({ ...schedule, status: 'Missed' })
+        });
+        
+        if (!putResp.ok) {
+          const putErrorText = await putResp.text();
+          console.error(`[MonitorManageScreen] ⚠️ PUT also failed (${putResp.status}): ${putErrorText}`);
+        } else {
+          console.log(`[MonitorManageScreen] ✅ Schedule ${id} marked as Missed (via PUT)`);
+          setSchedules(prev => prev.map(s => (s._id === id ? { ...s, status: 'Missed' } : s)));
+        }
+      } else {
+        console.log(`[MonitorManageScreen] ✅ Schedule ${id} marked as Missed (via PATCH)`);
+        setSchedules(prev => prev.map(s => (s._id === id ? { ...s, status: 'Missed' } : s)));
+      }
+    } catch (err) {
+      console.error(`[MonitorManageScreen] Error marking missed for ${id}:`, err);
+    }
+  }, []);
+
+  // Helper to derive status locally without mutating backend
+  // Mark as "Missed" if it's been more than 1 minute past the scheduled time
+  const deriveStatus = useCallback((schedule: any): 'Pending' | 'Missed' | 'Taken' | string => {
+    const rawStatus = (schedule?.status || 'Pending') as string;
+    
+    // If already marked as Done, show as Taken
+    if (rawStatus.toLowerCase() === 'done') {
+      return 'Taken';
+    }
+    
+    // If already marked as Missed, keep it as Missed
+    if (rawStatus.toLowerCase() === 'missed') {
+      return 'Missed';
+    }
+    
+    if (!schedule?.date || !schedule?.time) return rawStatus || 'Pending';
+    
+    try {
+      const [y, m, d] = String(schedule.date).split('-').map(Number);
+      const [hh, mm] = String(schedule.time).split(':').map(Number);
+      const when = new Date(y, (m || 1) - 1, d, hh, mm);
+      const now = new Date();
+      const oneMinuteAgo = now.getTime() - (1 * 60 * 1000); // 1 minute buffer
+      
+      // Mark as "Missed" if:
+      // 1. Status is "Pending" or "Active" (not already Done/Missed)
+      // 2. Current time is past scheduled time
+      // 3. It's been more than 1 minute past (buffer to prevent premature marking)
+      const isPendingOrActive = rawStatus === 'Pending' || rawStatus === 'Active' || !rawStatus;
+      if (isPendingOrActive && when.getTime() < oneMinuteAgo) {
+        // Mark as missed in backend (only once per schedule)
+        markAsMissedOnce(schedule);
+        return 'Missed';
+      }
+      
+      return rawStatus || 'Pending';
+    } catch {
+      return rawStatus || 'Pending';
+    }
+  }, [markAsMissedOnce]);
+
   // Get container schedules
   const getContainerSchedules = (): Record<number, { pill: string | null, alarms: Date[] }> => {
     const containerSchedules: Record<number, { pill: string | null, alarms: Date[] }> = {
@@ -1157,7 +1269,7 @@ const MonitorManageScreen = () => {
           <Text style={[styles.errorText, { color: theme.text }]}>{error}</Text>
           <TouchableOpacity 
             style={[styles.retryButton, { backgroundColor: theme.primary }]}
-            onPress={loadScheduleData}
+            onPress={() => loadScheduleData(true, true, true)}
           >
             <Text style={[styles.retryButtonText, { color: theme.card }]}>Retry</Text>
           </TouchableOpacity>
@@ -1168,45 +1280,6 @@ const MonitorManageScreen = () => {
 
   const containerSchedules = getContainerSchedules();
 
-  // Helper to derive status locally without mutating backend
-  // Mark as "Missed" if it's been more than 1 minute past the scheduled time
-  const deriveStatus = (schedule: any): 'Pending' | 'Missed' | 'Taken' | string => {
-    const rawStatus = (schedule?.status || 'Pending') as string;
-    
-    // If already marked as Done, show as Taken
-    if (rawStatus.toLowerCase() === 'done') {
-      return 'Taken';
-    }
-    
-    // If already marked as Missed, keep it as Missed
-    if (rawStatus.toLowerCase() === 'missed') {
-      return 'Missed';
-    }
-    
-    if (!schedule?.date || !schedule?.time) return rawStatus || 'Pending';
-    
-    try {
-      const [y, m, d] = String(schedule.date).split('-').map(Number);
-      const [hh, mm] = String(schedule.time).split(':').map(Number);
-      const when = new Date(y, (m || 1) - 1, d, hh, mm);
-      const now = new Date();
-      const oneMinuteAgo = now.getTime() - (1 * 60 * 1000); // 1 minute buffer
-      
-      // Mark as "Missed" if:
-      // 1. Status is "Pending" or "Active" (not already Done/Missed)
-      // 2. Current time is past scheduled time
-      // 3. It's been more than 1 minute past (buffer to prevent premature marking)
-      const isPendingOrActive = rawStatus === 'Pending' || rawStatus === 'Active' || !rawStatus;
-      if (isPendingOrActive && when.getTime() < oneMinuteAgo) {
-        return 'Missed';
-      }
-      
-      return rawStatus || 'Pending';
-    } catch {
-      return rawStatus || 'Pending';
-    }
-  };
-
   return (
     <View style={{ flex: 1 }}>
     <ScrollView style={[styles.container, { backgroundColor: theme.background }]}>
@@ -1214,17 +1287,14 @@ const MonitorManageScreen = () => {
       <View style={[styles.header, { backgroundColor: theme.card }]}>
         <TouchableOpacity 
           style={styles.backButton} 
-          onPress={() => {
-            console.log('[MonitorManageScreen] Back button pressed');
-            // Close alarm modal if open (non-blocking)
-            if (alarmVisible) {
-              setAlarmVisible(false);
-            }
-            // Navigate back immediately (don't wait for async operations)
-            navigation.goBack();
-          }}
+          onPress={handleBack}
+          disabled={navigating === 'back'}
         >
-          <Ionicons name="arrow-back" size={24} color={theme.text} />
+          {navigating === 'back' ? (
+            <ActivityIndicator size="small" color={theme.text} />
+          ) : (
+            <Ionicons name="arrow-back" size={24} color={theme.text} />
+          )}
         </TouchableOpacity>
         <Text style={[styles.title, { color: theme.secondary, flex: 1 }]}>
           MONITOR & MANAGE
@@ -1233,15 +1303,25 @@ const MonitorManageScreen = () => {
           <TouchableOpacity 
             style={[styles.deleteAllButton, { backgroundColor: theme.error }]}
             onPress={deleteAllSchedules}
+            disabled={deletingAll || refreshing}
           >
-            <Ionicons name="trash" size={20} color={theme.card} />
+            {deletingAll ? (
+              <ActivityIndicator size="small" color={theme.card} />
+            ) : (
+              <Ionicons name="trash" size={20} color={theme.card} />
+            )}
           </TouchableOpacity>
         )}
         <TouchableOpacity 
           style={[styles.refreshButton, { backgroundColor: theme.primary }]}
           onPress={handleRefresh}
+          disabled={refreshing || deletingAll}
         >
-          <Ionicons name="refresh" size={20} color={theme.card} />
+          {refreshing ? (
+            <ActivityIndicator size="small" color={theme.card} />
+          ) : (
+            <Ionicons name="refresh" size={20} color={theme.card} />
+          )}
         </TouchableOpacity>
       </View>
 
@@ -1285,6 +1365,7 @@ const MonitorManageScreen = () => {
               // Find medication name from ID
               const medication = medications.find(med => med.medId === schedule.medication);
               const medicationName = medication ? medication.name : `ID: ${schedule.medication}`;
+              const verification = verifications[parseInt(schedule.container)];
               
               return (
                 <View key={schedule._id || index} style={[styles.scheduleItem, { borderColor: theme.border }]}>
@@ -1312,26 +1393,26 @@ const MonitorManageScreen = () => {
                     <Text style={[styles.detailText, { color: theme.text }]}>
                       <Text style={styles.label}>Time:</Text> {schedule.time}
                     </Text>
-                          {verifications[parseInt(schedule.container)] && (
+                          {verification && (
                             <View style={styles.verificationBadge}>
                               <Ionicons 
-                                name={verifications[parseInt(schedule.container)].result?.pass_ ? "checkmark-circle" : "alert-circle"} 
+                                name={verification.result?.pass_ ? "checkmark-circle" : "alert-circle"} 
                                 size={16} 
-                                color={verifications[parseInt(schedule.container)].result?.pass_ ? "#4CAF50" : "#F44336"} 
+                                color={verification.result?.pass_ ? "#4CAF50" : "#F44336"} 
                               />
                               <View style={{ flex: 1 }}>
                                 <Text style={[
                                   styles.verificationDetailText, 
-                                  { color: verifications[parseInt(schedule.container)].result?.pass_ ? "#4CAF50" : "#F44336" }
+                                  { color: verification.result?.pass_ ? "#4CAF50" : "#F44336" }
                                 ]}>
-                                  {verifications[parseInt(schedule.container)].result?.pass_ 
-                                    ? `Verified: ${verifications[parseInt(schedule.container)].result?.count || 0} pills (${Math.round((verifications[parseInt(schedule.container)].result?.confidence || 0) * 100)}%)`
+                                  {verification.result?.pass_ 
+                                    ? `Verified: ${verification.result?.count || 0} pills (${Math.round((verification.result?.confidence || 0) * 100)}%)`
                                     : 'Verification failed'}
                                 </Text>
-                                {verifications[parseInt(schedule.container)].result?.classesDetected && 
-                                 verifications[parseInt(schedule.container)].result.classesDetected.length > 0 && (
+                                {verification.result?.classesDetected && 
+                                 verification.result.classesDetected.length > 0 && (
                                   <Text style={[styles.verificationDetailText, { fontSize: 11, marginTop: 2, opacity: 0.8 }]}>
-                                    {verifications[parseInt(schedule.container)].result.classesDetected
+                                    {verification.result.classesDetected
                                       .map((pill: { label: string; n: number }) => `${pill.label} (${pill.n})`)
                                       .join(', ')}
                                   </Text>
@@ -1352,22 +1433,76 @@ const MonitorManageScreen = () => {
       {/* Buttons Container */}
       <View style={styles.buttonsContainer}>
         <TouchableOpacity 
-          style={[styles.button, { backgroundColor: theme.primary }]} 
-            onPress={() => navigation.navigate("SetScreen" as never)}
+          style={[
+            styles.button, 
+            { backgroundColor: theme.primary },
+            navigating === 'setScreen' && styles.buttonDisabled
+          ]} 
+          onPress={async () => {
+            try {
+              setNavigating('setScreen');
+              navigation.navigate("SetScreen" as never);
+            } catch (error) {
+              console.error('Error navigating to SetScreen:', error);
+            } finally {
+              setTimeout(() => setNavigating(null), 500);
+            }
+          }}
+          disabled={navigating !== null || refreshing || deletingAll}
         > 
+          {navigating === 'setScreen' ? (
+            <ActivityIndicator size="small" color={theme.card} />
+          ) : (
             <Text style={[styles.buttonText, { color: theme.card }]}>SET MED SCHED</Text>
+          )}
         </TouchableOpacity>
         <TouchableOpacity 
-          style={[styles.button, { backgroundColor: theme.secondary }]} 
-            onPress={() => navigation.navigate("ModifyScheduleScreen" as never)}
+          style={[
+            styles.button, 
+            { backgroundColor: theme.secondary },
+            navigating === 'modifyScreen' && styles.buttonDisabled
+          ]} 
+          onPress={async () => {
+            try {
+              setNavigating('modifyScreen');
+              navigation.navigate("ModifyScheduleScreen" as never);
+            } catch (error) {
+              console.error('Error navigating to ModifyScheduleScreen:', error);
+            } finally {
+              setTimeout(() => setNavigating(null), 500);
+            }
+          }}
+          disabled={navigating !== null || refreshing || deletingAll}
         > 
+          {navigating === 'modifyScreen' ? (
+            <ActivityIndicator size="small" color={theme.card} />
+          ) : (
             <Text style={[styles.buttonText, { color: theme.card }]}>MODIFY SCHED</Text>
+          )}
         </TouchableOpacity>
         <TouchableOpacity 
-          style={[styles.button, { backgroundColor: theme.secondary }]} 
-          onPress={() => navigation.navigate("Adherence" as never)}
+          style={[
+            styles.button, 
+            { backgroundColor: theme.secondary },
+            navigating === 'adherence' && styles.buttonDisabled
+          ]}
+          onPress={async () => {
+            try {
+              setNavigating('adherence');
+              navigation.navigate("Adherence" as never);
+            } catch (error) {
+              console.error('Error navigating to Adherence:', error);
+            } finally {
+              setTimeout(() => setNavigating(null), 500);
+            }
+          }}
+          disabled={navigating !== null || refreshing || deletingAll}
         > 
-          <Text style={[styles.buttonText, { color: theme.card }]}>VIEW ADHERENCE STATS & LOGS</Text>
+          {navigating === 'adherence' ? (
+            <ActivityIndicator size="small" color={theme.card} />
+          ) : (
+            <Text style={[styles.buttonText, { color: theme.card }]}>VIEW ADHERENCE STATS & LOGS</Text>
+          )}
         </TouchableOpacity>
       </View>
     </ScrollView>
@@ -1465,6 +1600,10 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     elevation: 3,
+    minHeight: 50,
+  },
+  buttonDisabled: {
+    opacity: 0.6,
   },
   buttonText: {
     fontSize: 16,
