@@ -44,6 +44,8 @@ const Adherence = () => {
   const [customEnd, setCustomEnd] = useState<Date>(new Date());
   const [showStartPicker, setShowStartPicker] = useState(false);
   const [showEndPicker, setShowEndPicker] = useState(false);
+  const [isCaregiver, setIsCaregiver] = useState(false);
+  const [monitoringElder, setMonitoringElder] = useState<{ id: string; name: string } | null>(null);
 
   // Get current user ID from JWT token
   const getCurrentUserId = async (): Promise<number> => {
@@ -108,33 +110,103 @@ const Adherence = () => {
       if (token) {
         headers['Authorization'] = `Bearer ${token.trim()}`;
       }
-      const schedulesResp = await fetch('https://pillnow-database.onrender.com/api/medication_schedules', {
-        headers
-      });
-      const schedulesJson = await schedulesResp.json();
-      const allSchedules: any[] = schedulesJson?.data || [];
 
-      // Filter schedules based on user role and selected elder (for caregivers)
       const currentUserId = await getCurrentUserId();
       const userRole = await getUserRole();
       const selectedElderId = await getSelectedElderId();
       
-      let userSchedules: any[];
-      if (userRole === '3' || userRole === 3) {
-        // Caregiver: show selected elder's schedules
-        if (selectedElderId) {
-          userSchedules = allSchedules.filter((schedule: any) => {
-            const scheduleUserId = parseInt(schedule.user);
-            return scheduleUserId === parseInt(selectedElderId);
+      // Strict check: Only role '3' is caregiver, role '2' is elder
+      const roleStr = userRole ? String(userRole) : '';
+      const isCaregiver = roleStr === '3' && roleStr !== '2';
+      const isElder = roleStr === '2';
+      
+      // If user is an elder, clear any selectedElderId (elders don't select other elders)
+      if (isElder) {
+        await AsyncStorage.removeItem('selectedElderId');
+        await AsyncStorage.removeItem('selectedElderName');
+        console.log('[Adherence] Cleared selectedElderId for elder user');
+      }
+
+      let userSchedules: any[] = [];
+      let elderInfo: { id: string; name: string; email?: string; phone?: string; age?: number } | null = null;
+
+      if (isCaregiver && selectedElderId) {
+        // Caregiver: Use new endpoint to get elder's adherence data
+        try {
+          const response = await fetch(`https://pillnow-database.onrender.com/api/monitor/elder-device/${selectedElderId}`, {
+            headers
           });
-          console.log(`[Adherence] Caregiver viewing elder ${selectedElderId}'s adherence: ${userSchedules.length} schedule(s)`);
-        } else {
-          // No elder selected, show empty
-          userSchedules = [];
-          console.log(`[Adherence] Caregiver has no elder selected, showing empty adherence`);
+
+          if (response.status === 401) {
+            Alert.alert(
+              'Authentication Required',
+              'Your session has expired. Please log in again.',
+              [{ text: 'OK', onPress: () => router.replace('/LoginScreen') }]
+            );
+            return;
+          }
+
+          if (response.status === 403) {
+            Alert.alert(
+              'Permission Denied',
+              'You do not have permission to view this elder\'s adherence. Please check your caregiver-elder connection.',
+              [{ text: 'OK' }]
+            );
+            return;
+          }
+
+          if (response.status === 404) {
+            Alert.alert(
+              'No Device Connection',
+              'This elder does not have an active device connection. Please connect a device first.',
+              [{ text: 'OK' }]
+            );
+            return;
+          }
+
+          if (!response.ok) {
+            const errorText = await response.text();
+            console.error(`[Adherence] API error (${response.status}): ${errorText}`);
+            Alert.alert('Error', `Failed to load adherence data: ${response.status}`);
+            return;
+          }
+
+          const responseData = await response.json();
+          if (responseData.success && responseData.data) {
+            elderInfo = responseData.data.elder;
+            // Extract schedules from devices array
+            const devices = responseData.data.devices || [];
+            if (devices.length > 0 && devices[0].monitoring) {
+              // For now, we'll still fetch schedules from the schedules endpoint
+              // The monitoring data provides statistics, but we need individual schedule records
+              const schedulesResp = await fetch('https://pillnow-database.onrender.com/api/medication_schedules', {
+                headers
+              });
+              const schedulesJson = await schedulesResp.json();
+              const allSchedules: any[] = schedulesJson?.data || [];
+              userSchedules = allSchedules.filter((schedule: any) => {
+                const scheduleUserId = parseInt(schedule.user);
+                return scheduleUserId === parseInt(selectedElderId);
+              });
+              console.log(`[Adherence] Caregiver viewing elder ${selectedElderId}'s adherence: ${userSchedules.length} schedule(s)`);
+            }
+          }
+        } catch (error) {
+          console.error('[Adherence] Error fetching elder adherence:', error);
+          Alert.alert('Error', 'Failed to load adherence data. Please try again.');
+          return;
         }
+      } else if (isCaregiver && !selectedElderId) {
+        // Caregiver but no elder selected
+        setMedications([]);
+        return;
       } else {
-        // Elder: show own schedules
+        // Elder: show own schedules using traditional endpoint
+        const schedulesResp = await fetch('https://pillnow-database.onrender.com/api/medication_schedules', {
+          headers
+        });
+        const schedulesJson = await schedulesResp.json();
+        const allSchedules: any[] = schedulesJson?.data || [];
         userSchedules = allSchedules.filter((schedule: any) => {
           const scheduleUserId = parseInt(schedule.user);
           return scheduleUserId === currentUserId;
@@ -165,7 +237,19 @@ const Adherence = () => {
         };
       });
       setMedications(rows);
+      
+      // Store elder info for display
+      if (elderInfo) {
+        await AsyncStorage.setItem('selectedElderName', elderInfo.name);
+        setMonitoringElder({ id: elderInfo.id, name: elderInfo.name });
+      } else {
+        setMonitoringElder(null);
+      }
+      
+      // Update caregiver status
+      setIsCaregiver(isCaregiver);
     } catch (e) {
+      console.error('[Adherence] Error:', e);
       Alert.alert('Error', 'Failed to load adherence data');
     } finally {
       setLoading(false);
@@ -174,7 +258,48 @@ const Adherence = () => {
 
   useEffect(() => {
     fetchAdherenceData();
+    // Check monitoring status on mount
+    checkMonitoringStatusOnMount();
   }, []);
+
+  // Check monitoring status on mount
+  const checkMonitoringStatusOnMount = async () => {
+    try {
+      const userRole = await getUserRole();
+      const selectedElderId = await getSelectedElderId();
+      
+      // Strict check: Only role '3' is caregiver, role '2' is elder
+      const roleStr = userRole ? String(userRole) : '';
+      const isCaregiverUser = roleStr === '3';
+      const isElderUser = roleStr === '2';
+      
+      // Only show as caregiver if user is actually a caregiver (not elder)
+      const shouldShowAsCaregiver = isCaregiverUser && !isElderUser;
+      
+      // If user is an elder, clear any selectedElderId (elders don't select other elders)
+      if (isElderUser) {
+        await AsyncStorage.removeItem('selectedElderId');
+        await AsyncStorage.removeItem('selectedElderName');
+        console.log('[Adherence] Cleared selectedElderId for elder user');
+      }
+      
+      setIsCaregiver(shouldShowAsCaregiver);
+      
+      // Only set monitoring elder if user is actually a caregiver
+      if (shouldShowAsCaregiver && selectedElderId) {
+        const elderName = await AsyncStorage.getItem('selectedElderName');
+        if (elderName) {
+          setMonitoringElder({ id: selectedElderId, name: elderName });
+        } else {
+          setMonitoringElder(null);
+        }
+      } else {
+        setMonitoringElder(null);
+      }
+    } catch (error) {
+      console.error('Error checking monitoring status:', error);
+    }
+  };
 
   const getFilteredMedications = () => {
     if (filterMode === 'all') return medications;
@@ -284,9 +409,23 @@ const Adherence = () => {
           <Ionicons name="arrow-back" size={24} color={theme.text} />
         </TouchableOpacity>
         <View style={styles.headerContent}>
-          <Text style={[styles.title, { color: theme.secondary }]}>
-            MEDICATION <Text style={[styles.highlight, { color: theme.primary }]}>ADHERENCE</Text>
-          </Text>
+          {isCaregiver && monitoringElder ? (
+            <>
+              <Text style={[styles.title, { color: theme.secondary }]}>
+                ELDER <Text style={[styles.elderNameHighlight, { color: theme.primary }]}>{monitoringElder.name.toUpperCase()}</Text> ADHERENCE
+              </Text>
+              <View style={[styles.monitoringBanner, { backgroundColor: theme.primary + '20', borderColor: theme.primary }]}>
+                <Ionicons name="eye" size={16} color={theme.primary} />
+                <Text style={[styles.monitoringText, { color: theme.primary }]}>
+                  Monitoring Active
+                </Text>
+              </View>
+            </>
+          ) : (
+            <Text style={[styles.title, { color: theme.secondary }]}>
+              MEDICATION <Text style={[styles.highlight, { color: theme.primary }]}>ADHERENCE</Text>
+            </Text>
+          )}
         </View>
       </View>
 
@@ -467,6 +606,23 @@ const styles = StyleSheet.create({
   },
   highlight: {
     color: '#4A90E2',
+  },
+  elderNameHighlight: {
+    fontSize: 18,
+    fontWeight: 'bold',
+  },
+  monitoringBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 8,
+    padding: 8,
+    borderRadius: 8,
+    borderWidth: 1,
+    gap: 6,
+  },
+  monitoringText: {
+    fontSize: 12,
+    fontWeight: '600',
   },
   contentContainer: {
     flex: 1,

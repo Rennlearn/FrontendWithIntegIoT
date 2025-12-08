@@ -102,6 +102,21 @@ const ElderDashboard = () => {
   };
 
 
+  // Clear any caregiver-specific data on mount (elders shouldn't have this)
+  useEffect(() => {
+    const clearCaregiverData = async () => {
+      try {
+        // Elders should not have selectedElderId - clear it if it exists
+        await AsyncStorage.removeItem('selectedElderId');
+        await AsyncStorage.removeItem('selectedElderName');
+        console.log('[ElderDashboard] Cleared caregiver-specific data for elder user');
+      } catch (error) {
+        console.error('[ElderDashboard] Error clearing caregiver data:', error);
+      }
+    };
+    clearCaregiverData();
+  }, []);
+
   const handleLogout = () => {
     Alert.alert(
       'Logout',
@@ -117,6 +132,7 @@ const ElderDashboard = () => {
                 'token',
                 'userRole',
                 'selectedElderId',
+                'selectedElderName',
               ]);
               router.replace('/LoginScreen');
             } catch (error) {

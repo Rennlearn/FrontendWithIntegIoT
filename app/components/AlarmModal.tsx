@@ -155,7 +155,12 @@ const AlarmModal: React.FC<AlarmModalProps> = ({ visible, container, time, onDis
 
   // Always render the Modal component, but control visibility with the `visible` prop
   // This ensures React Native can properly show/hide the modal
-  console.log(`[AlarmModal] Rendering modal - visible: ${visible}, container: ${container}, time: ${time}`);
+  // Only log when modal becomes visible to reduce console noise
+  useEffect(() => {
+    if (visible) {
+      console.log(`[AlarmModal] Modal opened - container: ${container}, time: ${time}`);
+    }
+  }, [visible, container, time]);
 
   return (
     <Modal

@@ -137,8 +137,14 @@ class VerificationService {
         }
       }
       
-      // Log other errors
-      console.warn('[VerificationService] Error fetching verification result:', error);
+      // Log other errors (but suppress AbortError spam - it's expected when backend is unavailable)
+      if (error instanceof Error && error.name === 'AbortError') {
+        // Only log AbortError once per container to reduce console noise
+        // This is expected when the ESP32-CAM backend is not running or unreachable
+        console.log(`[VerificationService] Request timed out for ${containerId} (backend may be unavailable)`);
+      } else {
+        console.warn('[VerificationService] Error fetching verification result:', error);
+      }
       
       // Provide helpful error messages but don't throw - return gracefully
       let errorMessage = 'Unable to fetch verification';

@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { View, Text, TouchableOpacity, StyleSheet, Image, Alert, AppState, ScrollView } from 'react-native';
+import { View, Text, TouchableOpacity, StyleSheet, Image, Alert, AppState, ScrollView, FlatList } from 'react-native';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -8,6 +8,7 @@ import { useNotifications } from './hooks/useNotifications';
 import { useTheme } from './context/ThemeContext';
 import { lightTheme, darkTheme } from './styles/theme';
 import BluetoothService from './services/BluetoothService';
+import { jwtDecode } from 'jwt-decode';
 
 const CaregiverDashboard: React.FC = () => {
   const router = useRouter();
@@ -24,16 +25,328 @@ const CaregiverDashboard: React.FC = () => {
   const [isBluetoothConnected, setIsBluetoothConnected] = useState(false);
   const [locateBoxActive, setLocateBoxActive] = useState(false);
   
+  // Connected elders state
+  const [connectedElders, setConnectedElders] = useState<any[]>([]);
+  const [selectedElderId, setSelectedElderId] = useState<string | null>(null);
+  const [selectedElderName, setSelectedElderName] = useState<string | null>(null);
+  const [loadingElders, setLoadingElders] = useState(false);
+  const [hasActiveConnection, setHasActiveConnection] = useState<boolean>(false);
+  
   // Legacy design: no real-time notification center or monitoring dashboard
+
+  // Interface for decoded JWT token
+  interface DecodedToken {
+    id: string;
+    userId?: string;
+    role?: string;
+  }
+
+  // Get current caregiver ID from JWT token
+  const getCurrentCaregiverId = async (): Promise<string> => {
+    try {
+      const token = await AsyncStorage.getItem('token');
+      if (!token) {
+        throw new Error('No token found');
+      }
+      const decodedToken = jwtDecode<DecodedToken>(token.trim());
+      const caregiverId = decodedToken.userId ?? decodedToken.id;
+      if (!caregiverId) {
+        throw new Error('Invalid token structure');
+      }
+      return caregiverId;
+    } catch (error) {
+      console.error('Error getting caregiver ID:', error);
+      throw error;
+    }
+  };
+
+  // Check if caregiver has active connection to selected elder (from database)
+  const checkCaregiverConnection = async (elderId: string): Promise<boolean> => {
+    try {
+      console.log(`[CaregiverDashboard] Checking connection in database for elder ID: ${elderId}`);
+      
+      const token = await AsyncStorage.getItem('token');
+      if (!token) {
+        console.log('[CaregiverDashboard] No token found');
+        return false;
+      }
+
+      const caregiverId = await getCurrentCaregiverId();
+      
+      // Check database for active connection
+      const response = await fetch(`https://pillnow-database.onrender.com/api/caregiver-connections?caregiver=${caregiverId}&elder=${elderId}`, {
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        }
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        const connections = Array.isArray(data) 
+          ? data 
+          : (data.connections || data.data || []);
+        
+        const activeConnection = connections.find((conn: any) => {
+          const connElderId = conn.elder?.userId || conn.elder?._id || conn.elder?.id || conn.elder;
+          const matches = String(connElderId) === String(elderId);
+          const isActive = conn.status === 'active' || conn.status === 'Active' || conn.status === 'ACTIVE';
+          return matches && isActive;
+        });
+
+        if (activeConnection) {
+          console.log('[CaregiverDashboard] ✅ Active connection found in database');
+          return true;
+        } else {
+          console.log('[CaregiverDashboard] ❌ No active connection found in database');
+          return false;
+        }
+      } else if (response.status === 404) {
+        console.log('[CaregiverDashboard] ❌ Connection not found in database');
+        return false;
+      } else {
+        const errorText = await response.text();
+        console.error('[CaregiverDashboard] Error checking connection:', response.status, errorText);
+        return false;
+      }
+    } catch (error) {
+      console.error('[CaregiverDashboard] Error checking caregiver connection:', error);
+      return false;
+    }
+  };
+
+  // Load connected elders from database (not AsyncStorage)
+  const loadConnectedElders = async () => {
+    try {
+      setLoadingElders(true);
+      const token = await AsyncStorage.getItem('token');
+      if (!token) {
+        console.log('[CaregiverDashboard] No token found, cannot load connected elders');
+        setConnectedElders([]);
+        setHasActiveConnection(false);
+        return;
+      }
+
+      const caregiverId = await getCurrentCaregiverId();
+      console.log('[CaregiverDashboard] Loading connected elders from database for caregiver:', caregiverId);
+
+      // Fetch connected elders from database
+      // Try multiple endpoint formats to find the correct one
+      let response: Response | null = null;
+      const endpoints = [
+        `https://pillnow-database.onrender.com/api/caregivers/${caregiverId}/elders`,
+        `https://pillnow-database.onrender.com/api/caregivers/${caregiverId}/connections`,
+        `https://pillnow-database.onrender.com/api/caregivers/connections?caregiverId=${caregiverId}`,
+        `https://pillnow-database.onrender.com/api/caregivers/connections?caregiver=${caregiverId}`,
+        `https://pillnow-database.onrender.com/api/caregiver-connections?caregiverId=${caregiverId}`,
+        `https://pillnow-database.onrender.com/api/caregiver-connections?caregiver=${caregiverId}`,
+      ];
+
+      for (const endpoint of endpoints) {
+        try {
+          console.log('[CaregiverDashboard] Trying endpoint:', endpoint);
+          response = await fetch(endpoint, {
+            headers: {
+              'Authorization': `Bearer ${token}`,
+              'Content-Type': 'application/json',
+            }
+          });
+          
+          if (response.ok) {
+            console.log('[CaregiverDashboard] ✅ Successfully fetched from endpoint:', endpoint);
+            break;
+          } else if (response.status !== 404) {
+            // If it's not 404, it might be a different error, log it
+            console.log(`[CaregiverDashboard] Endpoint returned ${response.status}:`, endpoint);
+          }
+        } catch (error) {
+          console.log('[CaregiverDashboard] Endpoint failed:', endpoint, error);
+          continue;
+        }
+      }
+
+      if (!response || !response.ok) {
+        console.error('[CaregiverDashboard] All endpoints failed. Last response:', response?.status);
+        // Don't clear the list - keep existing local elders
+        console.log('[CaregiverDashboard] Keeping existing local elders list - all endpoints failed');
+        // Only clear hasActiveConnection if we can't verify
+        if (selectedElderId) {
+          // Keep existing connection status, don't reset to false
+        }
+        return;
+      }
+
+      if (response.ok) {
+        const data = await response.json();
+        console.log('[CaregiverDashboard] Connected elders from database (raw response):', JSON.stringify(data, null, 2));
+        
+        // Extract elder information from connections
+        let elders: any[] = [];
+        let connectionsArray: any[] = [];
+        
+        // Normalize response structure
+        if (Array.isArray(data)) {
+          connectionsArray = data;
+        } else if (data.connections && Array.isArray(data.connections)) {
+          connectionsArray = data.connections;
+        } else if (data.data && Array.isArray(data.data)) {
+          connectionsArray = data.data;
+        } else if (data.success && data.data) {
+          connectionsArray = Array.isArray(data.data) ? data.data : [data.data];
+        }
+        
+        console.log('[CaregiverDashboard] Extracted connections array:', connectionsArray.length, 'items');
+        
+        // Extract elder information from each connection
+        elders = connectionsArray.map((conn: any) => {
+          // Try different possible structures for elder data
+          const elder = conn.elder || conn.elderData || conn.elderInfo || {};
+          const elderId = elder.userId || elder._id || elder.id || conn.elderId || conn.elder;
+          
+          console.log('[CaregiverDashboard] Processing connection:', {
+            connectionId: conn.connectionId || conn._id || conn.id,
+            elderId: elderId,
+            elderName: elder.name,
+            status: conn.status
+          });
+          
+          return {
+            userId: String(elderId || ''),
+            name: elder.name || 'Unknown',
+            email: elder.email || '',
+            contactNumber: elder.contactNumber || elder.phone || elder.phoneNumber || '',
+            role: elder.role || 2,
+            profileImage: elder.profileImage
+          };
+        }).filter((elder: any) => elder.userId); // Filter out any with missing IDs
+
+        // Filter only active connections
+        const activeElders = elders.filter((elder: any) => {
+          const conn = connectionsArray.find((c: any) => {
+            const connElderId = (c.elder || c.elderData || c.elderInfo || {}).userId || 
+                                (c.elder || c.elderData || c.elderInfo || {})._id || 
+                                (c.elder || c.elderData || c.elderInfo || {}).id || 
+                                c.elderId || c.elder;
+            return String(connElderId) === String(elder.userId);
+          });
+          const isActive = conn && (conn.status === 'active' || conn.status === 'Active' || conn.status === 'ACTIVE');
+          if (!isActive) {
+            console.log('[CaregiverDashboard] Filtered out inactive connection for elder:', elder.name, 'Status:', conn?.status);
+          }
+          return isActive;
+        });
+
+        console.log('[CaregiverDashboard] ✅ Loaded', activeElders.length, 'active connected elders from database');
+        console.log('[CaregiverDashboard] Elders:', activeElders.map(e => ({ name: e.name, id: e.userId })));
+        
+        // Merge with existing local elders instead of replacing
+        // This preserves elders that were added locally but not yet in database response
+        setConnectedElders((prevElders) => {
+          const merged = [...prevElders];
+          
+          // Add new elders from database that aren't already in local list
+          activeElders.forEach((dbElder) => {
+            const exists = merged.some(e => String(e.userId) === String(dbElder.userId));
+            if (!exists) {
+              merged.push(dbElder);
+              console.log('[CaregiverDashboard] Added elder from database to merged list:', dbElder.name);
+            }
+          });
+          
+          // Update existing elders with database data (in case info changed)
+          merged.forEach((localElder, index) => {
+            const dbElder = activeElders.find(e => String(e.userId) === String(localElder.userId));
+            if (dbElder) {
+              merged[index] = dbElder; // Use database version
+            }
+          });
+          
+          console.log('[CaregiverDashboard] ✅ Merged list has', merged.length, 'elders');
+          return merged;
+        });
+      } else if (response.status === 404) {
+        // No connections found in database - keep existing local list
+        console.log('[CaregiverDashboard] No connected elders found in database, keeping local list');
+        // Don't clear the list - keep what we have locally
+      } else {
+        const errorText = await response.text();
+        console.error('[CaregiverDashboard] Error loading connected elders from database:', response.status, errorText);
+        // Don't clear the list on error - keep existing local elders
+        console.log('[CaregiverDashboard] Keeping existing local elders list due to error');
+      }
+      
+      // Also check if there's a selected elder
+      const selectedId = await AsyncStorage.getItem('selectedElderId');
+      const selectedName = await AsyncStorage.getItem('selectedElderName');
+      setSelectedElderId(selectedId);
+      setSelectedElderName(selectedName);
+      
+      // Check if there's an active connection to the selected elder
+      if (selectedId) {
+        const hasConnection = await checkCaregiverConnection(selectedId);
+        setHasActiveConnection(hasConnection);
+        console.log('[CaregiverDashboard] Selected elder:', selectedName, 'Has active connection:', hasConnection);
+      } else {
+        setHasActiveConnection(false);
+      }
+    } catch (error) {
+      console.error('[CaregiverDashboard] Error loading connected elders from database:', error);
+      setConnectedElders([]);
+      setHasActiveConnection(false);
+    } finally {
+      setLoadingElders(false);
+    }
+  };
+
+  // Select elder for monitoring
+  const selectElder = async (elderId: string, elderName: string) => {
+    try {
+      // Check if there's an active connection first
+      const hasConnection = await checkCaregiverConnection(elderId);
+      
+      if (!hasConnection) {
+        Alert.alert(
+          'No Active Connection',
+          `You don't have an active connection to ${elderName}. Please ensure you have an active caregiver-elder connection before monitoring.`,
+          [{ text: 'OK' }]
+        );
+        setHasActiveConnection(false);
+        return;
+      }
+      
+      await AsyncStorage.setItem('selectedElderId', elderId);
+      await AsyncStorage.setItem('selectedElderName', elderName);
+      setSelectedElderId(elderId);
+      setSelectedElderName(elderName);
+      setHasActiveConnection(true);
+      Alert.alert('Success', `Now monitoring ${elderName}`);
+    } catch (error) {
+      console.error('Error selecting elder:', error);
+      Alert.alert('Error', 'Failed to select elder');
+      setHasActiveConnection(false);
+    }
+  };
 
   // Check Bluetooth connection status on component mount
   useEffect(() => {
     checkBluetoothConnection();
+    loadConnectedElders();
     
     // Check connection status every 3 seconds for faster response
     const interval = setInterval(checkBluetoothConnection, 3000);
     
     return () => clearInterval(interval);
+  }, []);
+
+  // Reload elders when app comes into focus
+  useEffect(() => {
+    const handleAppStateChange = (nextAppState: string) => {
+      if (nextAppState === 'active') {
+        loadConnectedElders();
+      }
+    };
+    const subscription = AppState.addEventListener('change', handleAppStateChange);
+    return () => subscription?.remove();
   }, []);
 
   // Also check when app becomes active (when navigating back)
@@ -169,6 +482,14 @@ const CaregiverDashboard: React.FC = () => {
       <View style={styles.logoContainer}>
         <Image source={require('@/assets/images/pill.png')} style={styles.pillImage} />
         <Text style={[styles.dashboardTitle, { color: theme.secondary }]}>CAREGIVER'S DASHBOARD</Text>
+        {selectedElderName && hasActiveConnection && (
+          <View style={[styles.selectedElderBanner, { backgroundColor: theme.primary + '20', borderColor: theme.primary }]}>
+            <Ionicons name="eye" size={14} color={theme.primary} />
+            <Text style={[styles.selectedElderText, { color: theme.primary }]}>
+              Monitoring: {selectedElderName}
+            </Text>
+          </View>
+        )}
       </View>
 
       {/* Action Buttons - Compact Grid */}
@@ -234,23 +555,117 @@ const CaregiverDashboard: React.FC = () => {
         </TouchableOpacity>
       </View>
 
+      {/* Connected Elders Section */}
+      <View style={[styles.eldersSection, { backgroundColor: theme.card }]}>
+        <View style={styles.sectionHeader}>
+          <Ionicons name="people" size={20} color={theme.primary} />
+          <Text style={[styles.sectionTitle, { color: theme.secondary }]}>CONNECTED ELDERS</Text>
+        </View>
+        
+        {loadingElders ? (
+          <View style={styles.loadingContainer}>
+            <Text style={[styles.loadingText, { color: theme.textSecondary }]}>Loading elders...</Text>
+          </View>
+        ) : connectedElders.length === 0 ? (
+          <View style={styles.emptyContainer}>
+            <Ionicons name="person-outline" size={40} color={theme.textSecondary} />
+            <Text style={[styles.emptyText, { color: theme.textSecondary }]}>No connected elders</Text>
+            <Text style={[styles.emptySubtext, { color: theme.textSecondary }]}>
+              Add an elder profile to get started
+            </Text>
+          </View>
+        ) : (
+          <FlatList
+            data={connectedElders}
+            keyExtractor={(item, index) => item.userId || item._id || item.id || `elder-${index}`}
+            renderItem={({ item }) => {
+              const elderId = item.userId || item._id || item.id;
+              const isSelected = selectedElderId === elderId;
+              return (
+                <View style={[
+                  styles.elderCard, 
+                  { 
+                    backgroundColor: isSelected ? theme.primary + '20' : theme.background,
+                    borderColor: isSelected ? theme.primary : theme.border,
+                    borderWidth: isSelected ? 2 : 1
+                  }
+                ]}>
+                  <View style={styles.elderInfo}>
+                    <Ionicons 
+                      name="person-circle" 
+                      size={32} 
+                      color={isSelected ? theme.primary : theme.textSecondary} 
+                    />
+                    <View style={styles.elderDetails}>
+                      <Text style={[styles.elderName, { color: theme.text }]}>{item.name}</Text>
+                      <Text style={[styles.elderPhone, { color: theme.textSecondary }]}>
+                        {item.contactNumber || item.phone || 'No phone'}
+                      </Text>
+                    </View>
+                  </View>
+                  {isSelected && (
+                    <View style={[styles.selectedBadge, { backgroundColor: theme.primary }]}>
+                      <Ionicons name="checkmark-circle" size={16} color={theme.card} />
+                      <Text style={[styles.selectedText, { color: theme.card }]}>Monitoring</Text>
+                    </View>
+                  )}
+                  {!isSelected && (
+                    <TouchableOpacity
+                      style={[styles.monitorButton, { backgroundColor: theme.primary }]}
+                      onPress={() => selectElder(elderId, item.name)}
+                    >
+                      <Ionicons name="eye" size={16} color={theme.card} />
+                      <Text style={[styles.monitorButtonText, { color: theme.card }]}>Monitor</Text>
+                    </TouchableOpacity>
+                  )}
+                </View>
+              );
+            }}
+            scrollEnabled={false}
+          />
+        )}
+      </View>
+
       {/* Dashboard Buttons - Compact */}
       <View style={styles.buttonContainer}>
         <TouchableOpacity 
           style={[styles.dashboardButton, { backgroundColor: theme.primary }]}
-          onPress={() => router.push('/EldersProf')}
+          onPress={async () => {
+            await router.push('/EldersProf');
+            // Reload elders when returning from EldersProf
+            setTimeout(() => {
+              loadConnectedElders();
+            }, 500);
+          }}
         >
           <Ionicons name="person-add" size={22} color={theme.card} />
           <Text style={[styles.buttonText, { color: theme.card }]}>INPUT ELDER'S PROFILE</Text>
         </TouchableOpacity>
         
-        <TouchableOpacity 
-          style={[styles.dashboardButton, { backgroundColor: theme.secondary }]}
-          onPress={() => router.push('/MonitorManageScreen')}
-        >
-          <Ionicons name="desktop" size={22} color={theme.card} />
-          <Text style={[styles.buttonText, { color: theme.card }]}>MONITOR & MANAGE</Text>
-        </TouchableOpacity>
+        {/* Only show Monitor & Manage button if elder is selected AND has active connection */}
+        {selectedElderId && selectedElderName && hasActiveConnection ? (
+          <TouchableOpacity 
+            style={[styles.dashboardButton, { backgroundColor: theme.secondary }]}
+            onPress={() => router.push('/MonitorManageScreen')}
+          >
+            <Ionicons name="desktop" size={22} color={theme.card} />
+            <Text style={[styles.buttonText, { color: theme.card }]}>MONITOR & MANAGE</Text>
+            <View style={[styles.monitoringBadge, { backgroundColor: theme.primary }]}>
+              <Text style={[styles.monitoringBadgeText, { color: theme.card }]}>
+                {selectedElderName}
+              </Text>
+            </View>
+          </TouchableOpacity>
+        ) : (
+          <View style={[styles.disabledButton, { backgroundColor: theme.background, borderColor: theme.border }]}>
+            <Ionicons name="desktop-outline" size={22} color={theme.textSecondary} />
+            <Text style={[styles.disabledButtonText, { color: theme.textSecondary }]}>
+              {selectedElderId && selectedElderName 
+                ? 'NO ACTIVE CONNECTION TO ELDER' 
+                : 'SELECT AN ELDER TO MONITOR'}
+            </Text>
+          </View>
+        )}
       </View>
     </ScrollView>
   );
@@ -306,6 +721,19 @@ const styles = StyleSheet.create({
   dashboardTitle: {
     fontSize: 16,
     fontWeight: 'bold',
+  },
+  selectedElderBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 8,
+    padding: 8,
+    borderRadius: 8,
+    borderWidth: 1,
+    gap: 6,
+  },
+  selectedElderText: {
+    fontSize: 12,
+    fontWeight: '600',
   },
   actionCard: {
     flexDirection: 'row',
@@ -363,6 +791,125 @@ const styles = StyleSheet.create({
   buttonText: {
     fontSize: 14,
     fontWeight: 'bold',
+  },
+  eldersSection: {
+    marginHorizontal: 16,
+    marginBottom: 16,
+    padding: 16,
+    borderRadius: 16,
+    elevation: 3,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    maxHeight: 300,
+  },
+  sectionHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 12,
+    gap: 8,
+  },
+  sectionTitle: {
+    fontSize: 16,
+    fontWeight: 'bold',
+  },
+  loadingContainer: {
+    padding: 20,
+    alignItems: 'center',
+  },
+  loadingText: {
+    fontSize: 14,
+  },
+  emptyContainer: {
+    padding: 20,
+    alignItems: 'center',
+  },
+  emptyText: {
+    fontSize: 14,
+    fontWeight: '600',
+    marginTop: 8,
+  },
+  emptySubtext: {
+    fontSize: 12,
+    marginTop: 4,
+    textAlign: 'center',
+  },
+  elderCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    padding: 12,
+    borderRadius: 12,
+    marginBottom: 8,
+    borderWidth: 1,
+  },
+  elderInfo: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+    gap: 12,
+  },
+  elderDetails: {
+    flex: 1,
+  },
+  elderName: {
+    fontSize: 16,
+    fontWeight: '600',
+    marginBottom: 2,
+  },
+  elderPhone: {
+    fontSize: 12,
+  },
+  selectedBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 12,
+    gap: 4,
+  },
+  selectedText: {
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  monitorButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 12,
+    gap: 4,
+  },
+  monitorButtonText: {
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  monitoringBadge: {
+    marginLeft: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 8,
+  },
+  monitoringBadgeText: {
+    fontSize: 10,
+    fontWeight: '600',
+  },
+  disabledButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 14,
+    paddingHorizontal: 16,
+    borderRadius: 12,
+    gap: 8,
+    borderWidth: 1,
+    opacity: 0.6,
+  },
+  disabledButtonText: {
+    fontSize: 14,
+    fontWeight: '600',
+    textAlign: 'center',
   },
 });
 

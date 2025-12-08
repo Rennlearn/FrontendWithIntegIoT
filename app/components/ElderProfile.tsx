@@ -78,19 +78,161 @@ export default function ElderProfile({ onElderSelected, onBack }: ElderProfilePr
     loadConnectedElders();
   }, []);
 
-  // Load connected elders from local storage
+  // Load connected elders from database (not AsyncStorage)
   const loadConnectedElders = async () => {
     try {
       setLoading(true);
+      const token = await AsyncStorage.getItem('token');
+      if (!token) {
+        console.log('No token found, cannot load connected elders');
+        setConnectedElders([]);
+        return;
+      }
+
       const caregiverId = await getCurrentCaregiverId();
-      
-      // Get connected elders from local storage
-      const storedConnections = await AsyncStorage.getItem(`caregiver_connections_${caregiverId}`);
-      const connections = storedConnections ? JSON.parse(storedConnections) : [];
-      
-      setConnectedElders(connections);
+      console.log('Loading connected elders from database for caregiver:', caregiverId);
+
+      // Fetch connected elders from database
+      // Try multiple endpoint formats to find the correct one
+      let response: Response | null = null;
+      const endpoints = [
+        `https://pillnow-database.onrender.com/api/caregivers/${caregiverId}/elders`,
+        `https://pillnow-database.onrender.com/api/caregivers/${caregiverId}/connections`,
+        `https://pillnow-database.onrender.com/api/caregivers/connections?caregiverId=${caregiverId}`,
+        `https://pillnow-database.onrender.com/api/caregivers/connections?caregiver=${caregiverId}`,
+        `https://pillnow-database.onrender.com/api/caregiver-connections?caregiverId=${caregiverId}`,
+        `https://pillnow-database.onrender.com/api/caregiver-connections?caregiver=${caregiverId}`,
+      ];
+
+      for (const endpoint of endpoints) {
+        try {
+          console.log('Trying endpoint:', endpoint);
+          response = await fetch(endpoint, {
+            headers: {
+              'Authorization': `Bearer ${token}`,
+              'Content-Type': 'application/json',
+            }
+          });
+          
+          if (response.ok) {
+            console.log('✅ Successfully fetched from endpoint:', endpoint);
+            break;
+          } else if (response.status !== 404) {
+            // If it's not 404, it might be a different error, log it
+            console.log(`Endpoint returned ${response.status}:`, endpoint);
+          }
+        } catch (error) {
+          console.log('Endpoint failed:', endpoint, error);
+          continue;
+        }
+      }
+
+      if (!response || !response.ok) {
+        console.error('All endpoints failed. Last response:', response?.status);
+        setConnectedElders([]);
+        return;
+      }
+
+      if (response.ok) {
+        const data = await response.json();
+        console.log('Connected elders from database (raw response):', JSON.stringify(data, null, 2));
+        
+        // Extract elder information from connections
+        let elders: ElderUser[] = [];
+        let connectionsArray: any[] = [];
+        
+        // Normalize response structure
+        if (Array.isArray(data)) {
+          connectionsArray = data;
+        } else if (data.connections && Array.isArray(data.connections)) {
+          connectionsArray = data.connections;
+        } else if (data.data && Array.isArray(data.data)) {
+          connectionsArray = data.data;
+        } else if (data.success && data.data) {
+          connectionsArray = Array.isArray(data.data) ? data.data : [data.data];
+        }
+        
+        console.log('Extracted connections array:', connectionsArray.length, 'items');
+        
+        // Extract elder information from each connection
+        elders = connectionsArray.map((conn: any) => {
+          // Try different possible structures for elder data
+          const elder = conn.elder || conn.elderData || conn.elderInfo || {};
+          const elderId = elder.userId || elder._id || elder.id || conn.elderId || conn.elder;
+          
+          console.log('Processing connection:', {
+            connectionId: conn.connectionId || conn._id || conn.id,
+            elderId: elderId,
+            elderName: elder.name,
+            status: conn.status
+          });
+          
+          return {
+            userId: String(elderId || ''),
+            name: elder.name || 'Unknown',
+            email: elder.email || '',
+            contactNumber: elder.contactNumber || elder.phone || elder.phoneNumber || '',
+            role: elder.role || 2,
+            profileImage: elder.profileImage
+          };
+        }).filter((elder: ElderUser) => elder.userId); // Filter out any with missing IDs
+
+        // Filter only active connections
+        const activeElders = elders.filter((elder: ElderUser) => {
+          const conn = connectionsArray.find((c: any) => {
+            const connElderId = (c.elder || c.elderData || c.elderInfo || {}).userId || 
+                                (c.elder || c.elderData || c.elderInfo || {})._id || 
+                                (c.elder || c.elderData || c.elderInfo || {}).id || 
+                                c.elderId || c.elder;
+            return String(connElderId) === String(elder.userId);
+          });
+          const isActive = conn && (conn.status === 'active' || conn.status === 'Active' || conn.status === 'ACTIVE');
+          if (!isActive) {
+            console.log('Filtered out inactive connection for elder:', elder.name, 'Status:', conn?.status);
+          }
+          return isActive;
+        });
+
+        console.log('✅ Loaded', activeElders.length, 'active connected elders from database');
+        console.log('Elders:', activeElders.map(e => ({ name: e.name, id: e.userId })));
+        
+        // Merge with existing local elders instead of replacing
+        // This preserves elders that were added locally but not yet in database response
+        setConnectedElders((prevElders) => {
+          const merged = [...prevElders];
+          
+          // Add new elders from database that aren't already in local list
+          activeElders.forEach((dbElder) => {
+            const exists = merged.some(e => String(e.userId) === String(dbElder.userId));
+            if (!exists) {
+              merged.push(dbElder);
+              console.log('Added elder from database to merged list:', dbElder.name);
+            }
+          });
+          
+          // Update existing elders with database data (in case info changed)
+          merged.forEach((localElder, index) => {
+            const dbElder = activeElders.find(e => String(e.userId) === String(localElder.userId));
+            if (dbElder) {
+              merged[index] = dbElder; // Use database version
+            }
+          });
+          
+          console.log('✅ Merged list has', merged.length, 'elders');
+          return merged;
+        });
+      } else if (response.status === 404) {
+        // No connections found in database - keep existing local list
+        console.log('No connected elders found in database, keeping local list');
+        // Don't clear the list - keep what we have locally
+      } else {
+        const errorText = await response.text();
+        console.error('Error loading connected elders from database:', response.status, errorText);
+        // Don't clear the list on error - keep existing local elders
+        console.log('Keeping existing local elders list due to error');
+      }
     } catch (error) {
-      console.error('Error loading connected elders:', error);
+      console.error('Error loading connected elders from database:', error);
       setConnectedElders([]);
     } finally {
       setLoading(false);
@@ -303,50 +445,86 @@ export default function ElderProfile({ onElderSelected, onBack }: ElderProfilePr
               const elderData = await elderResponse.json();
               console.log('Response data:', elderData);
               
+              // Normalize phone number for comparison (remove spaces, dashes, etc.)
+              const normalizePhone = (phone: string): string => {
+                return phone.replace(/[\s\-\(\)]/g, '').trim();
+              };
+              const searchPhone = normalizePhone(elderPhone.trim());
+              
               // Handle different response structures
               let userData = null;
+              let userArray: any[] = [];
               
               if (Array.isArray(elderData)) {
-                // Response is an array of users
-                userData = elderData[0]; // Take first user from array
+                // Response is an array of users - filter by phone number
+                userArray = elderData;
               } else if (elderData.user) {
                 userData = elderData.user;
               } else if (elderData.elders && Array.isArray(elderData.elders)) {
-                userData = elderData.elders[0]; // Take first elder if array
+                userArray = elderData.elders;
               } else if (elderData.users && Array.isArray(elderData.users)) {
-                userData = elderData.users[0]; // Take first user if array
+                userArray = elderData.users;
+              } else if (elderData.data && Array.isArray(elderData.data)) {
+                userArray = elderData.data;
               } else if (elderData.name || elderData.email) {
                 userData = elderData; // Direct user object
               }
               
-              if (userData && userData.role === 2) {
-                elder = userData;
-                console.log('Elder found:', elder!.name);
-                console.log('Elder object:', elder);
-                console.log('Elder object keys:', Object.keys(elder!));
-                console.log('Elder userId:', elder!.userId);
-                console.log('Elder _id:', elder!._id);
-                console.log('Elder id:', elder!.id);
-                console.log('Elder ID field:', elder!.userId);
-                console.log('Elder User ID:', elder!.userId);
-                console.log('Elder details - Name:', elder!.name, 'Email:', elder!.email, 'Phone:', elder!.contactNumber);
-                break; // Found elder, stop trying other endpoints
-              } else if (userData) {
-                // User found but not an elder
-                const userRole = userData.role;
-                console.log('User found but not an elder, role:', userRole);
+              // If we have an array, find the user with matching phone number
+              if (userArray.length > 0) {
+                console.log(`Searching ${userArray.length} users for phone: ${searchPhone}`);
+                userData = userArray.find((user: any) => {
+                  const userPhone = user.contactNumber || user.phone || user.phoneNumber || '';
+                  const normalizedUserPhone = normalizePhone(userPhone);
+                  const matches = normalizedUserPhone === searchPhone;
+                  console.log(`Comparing: "${normalizedUserPhone}" === "${searchPhone}" = ${matches}`);
+                  return matches;
+                });
                 
-                let roleMessage = '';
-                if (userRole === 1) {
-                  roleMessage = 'This phone number belongs to an admin account. Only elder accounts can be connected.';
-                } else if (userRole === 3) {
-                  roleMessage = 'This phone number belongs to a caregiver account. Only elder accounts can be connected.';
-                } else {
-                  roleMessage = 'This phone number belongs to a user who is not registered as an elder. Only elder accounts (role 2) can be connected.';
+                if (!userData) {
+                  console.log('No user found with matching phone number in array');
+                  // Continue to next endpoint instead of returning
+                  continue;
+                }
+              }
+              
+              // Verify phone number matches if we have userData
+              if (userData) {
+                const userPhone = userData.contactNumber || userData.phone || userData.phoneNumber || '';
+                const normalizedUserPhone = normalizePhone(userPhone);
+                
+                if (normalizedUserPhone !== searchPhone) {
+                  console.log(`Phone mismatch: "${normalizedUserPhone}" !== "${searchPhone}"`);
+                  // Phone doesn't match, continue to next endpoint
+                  continue;
                 }
                 
-                Alert.alert('Invalid User Type', roleMessage);
-                return;
+                // Phone matches, now check role
+                if (userData.role === 2) {
+                  elder = userData;
+                  console.log('Elder found with matching phone:', elder!.name);
+                  console.log('Elder phone:', elder!.contactNumber || elder!.phone);
+                  console.log('Elder object:', elder);
+                  console.log('Elder userId:', elder!.userId);
+                  break; // Found elder with matching phone, stop trying other endpoints
+                } else {
+                  // User found with matching phone but not an elder
+                  const userRole = userData.role;
+                  console.log('User found with matching phone but not an elder, role:', userRole);
+                  
+                  let roleMessage = '';
+                  if (userRole === 1) {
+                    roleMessage = 'This phone number belongs to an admin account. Only elder accounts can be connected.';
+                  } else if (userRole === 3) {
+                    roleMessage = 'This phone number belongs to a caregiver account. Only elder accounts can be connected.';
+                  } else {
+                    roleMessage = 'This phone number belongs to a user who is not registered as an elder. Only elder accounts can be connected.';
+                  }
+                  
+                  Alert.alert('Invalid User Type', roleMessage);
+                  setIsConnecting(false);
+                  return;
+                }
               }
             } else if (elderResponse.status === 403) {
               console.log('403 Forbidden - Access denied for endpoint:', endpoint);
@@ -370,20 +548,38 @@ export default function ElderProfile({ onElderSelected, onBack }: ElderProfilePr
         console.log('No elder found after trying all endpoints');
         Alert.alert(
           'Elder Not Found', 
-          'No elder account found with this phone number. Please check the number and try again.\n\nNote: Only registered elders (role 2) can be connected.'
+          'No elder account found with this phone number. Please check the number and try again.\n\nNote: Only registered elders can be connected.'
         );
         return;
       }
 
-      // Check if already in the list
-      const existingElder = connectedElders.find(conn => 
-        (conn.userId === elder!.userId)
-      );
-      
-      if (existingElder) {
-        console.log('Elder already connected:', elder!.name);
-        Alert.alert('Already Connected', `${elder!.name} is already in your list.`);
-        return;
+      // Check if already connected in database
+      try {
+        const caregiverId = await getCurrentCaregiverId();
+        const checkResponse = await fetch(`https://pillnow-database.onrender.com/api/caregiver-connections?caregiver=${caregiverId}&elder=${elderId}`, {
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'Content-Type': 'application/json',
+          }
+        });
+
+        if (checkResponse.ok) {
+          const checkData = await checkResponse.json();
+          const existingConnection = Array.isArray(checkData) 
+            ? checkData.find((c: any) => (c.elder === elderId || (c.elder?.userId || c.elder?._id || c.elder?.id) === elderId))
+            : (checkData.connections || checkData.data || []).find((c: any) => (c.elder === elderId || (c.elder?.userId || c.elder?._id || c.elder?.id) === elderId));
+          
+          if (existingConnection) {
+            console.log('Elder already connected in database:', elder!.name);
+            Alert.alert('Already Connected', `${elder!.name} is already connected in the database.`);
+            // Reload to show updated list
+            await loadConnectedElders();
+            return;
+          }
+        }
+      } catch (checkError) {
+        console.error('Error checking existing connection:', checkError);
+        // Continue anyway - will be caught by POST request
       }
 
       // Validate that we have the elder's ID
@@ -394,10 +590,118 @@ export default function ElderProfile({ onElderSelected, onBack }: ElderProfilePr
         return;
       }
 
-      // Add to connected elders list
-      const updatedElders = [...connectedElders, elder!];
-      await saveConnectedElders(updatedElders);
-      setConnectedElders(updatedElders);
+      // Get caregiver ID from token
+      const decodedToken = jwtDecode<{ userId?: string; id?: string }>(token);
+      const caregiverId = decodedToken.userId || decodedToken.id;
+      
+      if (!caregiverId) {
+        console.error('Caregiver ID not found in token');
+        Alert.alert('Error', 'Unable to identify caregiver. Please log in again.');
+        return;
+      }
+
+      // Create CaregiverConnection record in database using new endpoint (no device required)
+      try {
+        console.log('Creating CaregiverConnection record in database...');
+        console.log('Caregiver ID:', caregiverId, 'Elder ID:', elderId);
+        
+        // Use new endpoint: POST /api/caregivers/connect
+        const connectionResponse = await fetch('https://pillnow-database.onrender.com/api/caregivers/connect', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            caregiverId: parseInt(caregiverId) || caregiverId,
+            elderId: parseInt(elderId) || elderId,
+            relationship: 'family',
+            permissions: {
+              viewMedications: true,
+              viewAdherence: true,
+              receiveAlerts: true
+            }
+          })
+        });
+
+        if (connectionResponse.ok) {
+          const connectionData = await connectionResponse.json();
+          console.log('✅ CaregiverConnection created successfully in database:', connectionData);
+          if (connectionData.success) {
+            console.log('Connection ID:', connectionData.data?.connectionId);
+            console.log('Status:', connectionData.data?.status);
+          }
+          
+          // After successful connection, add elder to local list immediately
+          // This ensures the elder appears even if the GET endpoint doesn't work yet
+          const elderToAdd: ElderUser = {
+            userId: elderId,
+            name: elder!.name,
+            email: elder!.email || '',
+            contactNumber: elder!.contactNumber || elder!.phone || '',
+            role: 2,
+            profileImage: elder!.profileImage
+          };
+          
+          // Check if already in list
+          const existingIndex = connectedElders.findIndex(e => 
+            String(e.userId) === String(elderId)
+          );
+          
+          if (existingIndex === -1) {
+            // Add to list
+            const updatedElders = [...connectedElders, elderToAdd];
+            setConnectedElders(updatedElders);
+            console.log('✅ Elder added to local list:', elderToAdd.name);
+          } else {
+            console.log('ℹ️ Elder already in local list');
+          }
+          
+        } else if (connectionResponse.status === 409) {
+          // Connection already exists - this is OK
+          console.log('ℹ️ CaregiverConnection already exists in database');
+          
+          // Still add to local list if not already there
+          const existingIndex = connectedElders.findIndex(e => 
+            String(e.userId) === String(elderId)
+          );
+          
+          if (existingIndex === -1) {
+            const elderToAdd: ElderUser = {
+              userId: elderId,
+              name: elder!.name,
+              email: elder!.email || '',
+              contactNumber: elder!.contactNumber || elder!.phone || '',
+              role: 2,
+              profileImage: elder!.profileImage
+            };
+            const updatedElders = [...connectedElders, elderToAdd];
+            setConnectedElders(updatedElders);
+            console.log('✅ Elder added to local list (connection already existed):', elderToAdd.name);
+          }
+        } else {
+          const errorText = await connectionResponse.text();
+          console.error('❌ Failed to create CaregiverConnection in database:', connectionResponse.status, errorText);
+          Alert.alert(
+            'Connection Failed',
+            `Failed to create connection in database: ${errorText}\n\nPlease try again.`,
+            [{ text: 'OK' }]
+          );
+          return; // Don't continue if database connection fails
+        }
+      } catch (connectionError) {
+        console.error('❌ Error creating CaregiverConnection in database:', connectionError);
+        Alert.alert(
+          'Connection Error',
+          'Failed to create connection in database. Please check your internet connection and try again.',
+          [{ text: 'OK' }]
+        );
+        return; // Don't continue if database connection fails
+      }
+
+      // Reload connected elders from database (this will sync with server)
+      // But we've already added to local list above, so it will show immediately
+      await loadConnectedElders();
 
       console.log('Successfully connected to elder:', elder!.name);
       console.log('Elder User ID stored:', elderId);

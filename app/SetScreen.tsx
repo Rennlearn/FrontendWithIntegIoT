@@ -69,6 +69,8 @@ const SetScreen = () => {
   const [addingTime, setAddingTime] = useState(false);
   const [continuing, setContinuing] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [isCaregiver, setIsCaregiver] = useState(false);
+  const [monitoringElder, setMonitoringElder] = useState<{ id: string; name: string } | null>(null);
 
   // Remove useEffect that resets pill modal/alarm modal etc on mount
   // Only keep fetchMedications and initial setup that doesn't cause a jump or open modals
@@ -85,6 +87,8 @@ const SetScreen = () => {
     setAddingPill({ 1: false, 2: false, 3: false });
     setAddingTime(false);
     setContinuing(false);
+    // Check monitoring status for caregivers
+    checkMonitoringStatus();
     // do NOT open any modals
   }, []);
 
@@ -107,6 +111,8 @@ const SetScreen = () => {
       setAddingPill({ 1: false, 2: false, 3: false });
       setAddingTime(false);
       setContinuing(false);
+      // Check monitoring status when screen comes into focus
+      checkMonitoringStatus();
     });
 
     return unsubscribe;
@@ -338,14 +344,62 @@ const SetScreen = () => {
     }
   };
 
+  // Check monitoring status for caregivers
+  const checkMonitoringStatus = async () => {
+    try {
+      const userRole = await getUserRole();
+      const selectedElderId = await getSelectedElderId();
+      
+      // Strict check: Only role '3' or 3 is caregiver, role '2' or 2 is elder
+      const roleStr = userRole ? String(userRole) : '';
+      const isCaregiverUser = roleStr === '3';
+      const isElderUser = roleStr === '2';
+      
+      // Only show as caregiver if user is actually a caregiver (not elder)
+      const shouldShowAsCaregiver = isCaregiverUser && !isElderUser;
+      
+      // If user is an elder, clear any selectedElderId (elders don't select other elders)
+      if (isElderUser) {
+        await AsyncStorage.removeItem('selectedElderId');
+        await AsyncStorage.removeItem('selectedElderName');
+        console.log('[SetScreen] Cleared selectedElderId for elder user');
+      }
+      
+      console.log('[SetScreen] User role:', userRole, 'Is caregiver:', isCaregiverUser, 'Is elder:', isElderUser, 'Has selected elder:', selectedElderId !== null, 'Should show as caregiver:', shouldShowAsCaregiver);
+      setIsCaregiver(shouldShowAsCaregiver);
+      
+      // Only set monitoring elder if user is actually a caregiver
+      if (shouldShowAsCaregiver && selectedElderId) {
+        const elderName = await AsyncStorage.getItem('selectedElderName');
+        console.log('[SetScreen] Selected elder ID:', selectedElderId, 'Elder name:', elderName);
+        if (elderName) {
+          setMonitoringElder({ id: selectedElderId, name: elderName });
+          console.log('[SetScreen] ✅ Monitoring status set:', { id: selectedElderId, name: elderName });
+        } else {
+          setMonitoringElder(null);
+          console.log('[SetScreen] ⚠️ No elder selected or name missing');
+        }
+      } else {
+        setMonitoringElder(null);
+        if (!shouldShowAsCaregiver) {
+          console.log('[SetScreen] User is not a caregiver and no elder selected');
+        }
+      }
+    } catch (error) {
+      console.error('[SetScreen] Error checking monitoring status:', error);
+    }
+  };
+
   // Save schedule data to database
   const saveScheduleData = async () => {
     try {
       setSaving(true);
       
-      // For Caregivers: Validate that they have selected an elder and are connected to device
+      // For Caregivers: Validate that they have selected an elder and have active connection
+      // Elders should NOT go through this validation - they use their own userId
       const userRole = await getUserRole();
-      const isCaregiver = userRole === '3' || userRole === 3;
+      const isCaregiver = (userRole === '3' || userRole === 3 || String(userRole) === '3') && 
+                          !(userRole === '2' || userRole === 2 || String(userRole) === '2');
       
       if (isCaregiver) {
         // Check if elder is selected
@@ -358,6 +412,66 @@ const SetScreen = () => {
           );
           setSaving(false);
           return;
+        }
+        
+        // Check if caregiver has active connection to elder (ignore device requirement for testing)
+        const token = await AsyncStorage.getItem('token');
+        if (token) {
+          // Check caregiver-elder connection directly (ignore device)
+          try {
+            const decodedToken = jwtDecode<{ userId?: string; id?: string }>(token.trim());
+            const caregiverId = decodedToken.userId || decodedToken.id;
+            
+            if (caregiverId) {
+              const headers: HeadersInit = {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${token.trim()}`
+              };
+              
+              const connectionCheck = await fetch(`https://pillnow-database.onrender.com/api/caregiver-connections?caregiver=${caregiverId}&elder=${selectedElderId}`, {
+                headers
+              });
+              
+              if (connectionCheck.ok) {
+                const connData = await connectionCheck.json();
+                const connections = Array.isArray(connData) ? connData : (connData.connections || connData.data || []);
+                const activeConn = connections.find((c: any) => {
+                  const connElderId = c.elder?.userId || c.elder?._id || c.elder?.id || c.elder;
+                  return String(connElderId) === String(selectedElderId) && 
+                         (c.status === 'active' || c.status === 'Active' || c.status === 'ACTIVE');
+                });
+                
+                if (!activeConn) {
+                  Alert.alert(
+                    'No Active Connection',
+                    'You do not have an active caregiver-elder connection. Please connect to the elder first.',
+                    [{ text: 'OK' }]
+                  );
+                  setSaving(false);
+                  return;
+                }
+                
+                // Connection exists - continue (device check ignored for testing)
+                console.log('[SetScreen] ✅ Caregiver-elder connection verified (device check ignored)');
+              } else {
+                Alert.alert(
+                  'No Active Connection',
+                  'You do not have an active caregiver-elder connection. Please connect to the elder first.',
+                  [{ text: 'OK' }]
+                );
+                setSaving(false);
+                return;
+              }
+            }
+          } catch (error) {
+            Alert.alert(
+              'Connection Check Failed',
+              'Unable to verify your connection to this elder. Please check your internet connection and try again.',
+              [{ text: 'OK' }]
+            );
+            setSaving(false);
+            return;
+          }
         }
         
         // Check if Bluetooth is connected
@@ -401,11 +515,16 @@ const SetScreen = () => {
         return;
       }
       
-      // Get current user ID or selected elder ID (for caregivers)
+      // Get current user ID or selected elder ID (for caregivers only)
       let currentUserId = await getCurrentUserId();
       
-      // If caregiver, use selected elder's ID instead of caregiver's ID
-      if (isCaregiver) {
+      // Only if user is actually a caregiver (not elder), use selected elder's ID
+      const userRoleForSchedule = await getUserRole();
+      const roleStrForSchedule = userRoleForSchedule ? String(userRoleForSchedule) : '';
+      const isCaregiverUser = roleStrForSchedule === '3' && roleStrForSchedule !== '2';
+      
+      if (isCaregiverUser) {
+        // Caregiver: use selected elder's ID
         const selectedElderId = await getSelectedElderId();
         if (selectedElderId) {
           const elderIdNum = parseInt(selectedElderId);
@@ -414,6 +533,9 @@ const SetScreen = () => {
             console.log(`[SetScreen] Caregiver setting schedule for elder ID: ${currentUserId}`);
           }
         }
+      } else {
+        // Elder: use their own user ID (already set above)
+        console.log(`[SetScreen] Elder setting schedule for their own ID: ${currentUserId}`);
       }
       
       // Create schedule records for each pill and alarm combination
@@ -774,9 +896,15 @@ const SetScreen = () => {
         >
           <Ionicons name="arrow-back" size={24} color={theme.text} />
         </TouchableOpacity>
-        <Text style={[styles.headerTitle, { color: theme.secondary }]}>
-          SET-UP <Text style={[styles.headerHighlight, { color: theme.primary }]}>SCHEDULE</Text>
-        </Text>
+        {isCaregiver && monitoringElder ? (
+          <Text style={[styles.headerTitle, { color: theme.secondary }]}>
+            ELDER <Text style={[styles.elderNameHighlight, { color: theme.primary }]}>{monitoringElder.name.toUpperCase()}</Text> SCHEDULE
+          </Text>
+        ) : (
+          <Text style={[styles.headerTitle, { color: theme.secondary }]}>
+            SET-UP <Text style={[styles.headerHighlight, { color: theme.primary }]}>SCHEDULE</Text>
+          </Text>
+        )}
       </View>
 
       {/* RTC Time Display */}
@@ -1186,6 +1314,10 @@ const styles = StyleSheet.create({
   },
   headerHighlight: {
     color: '#4A90E2',
+  },
+  elderNameHighlight: {
+    fontSize: 18,
+    fontWeight: 'bold',
   },
   pillImage: {
     width: 150,

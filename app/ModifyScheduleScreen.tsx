@@ -56,6 +56,8 @@ const ModifyScheduleScreen = () => {
   const [editPillCount, setEditPillCount] = useState<Record<number, number>>({ 1: 0, 2: 0, 3: 0 });
   const [pillCountsLocked, setPillCountsLocked] = useState<Record<number, boolean>>({ 1: false, 2: false, 3: false });
   const [saving, setSaving] = useState(false);
+  const [isCaregiver, setIsCaregiver] = useState(false);
+  const [monitoringElder, setMonitoringElder] = useState<{ id: string; name: string } | null>(null);
 
   // Get current user ID from JWT token
   const getCurrentUserIdentifiers = async (): Promise<{ idNum: number; idStr: string }> => {
@@ -88,6 +90,122 @@ const ModifyScheduleScreen = () => {
     } catch (error) {
       console.error('Error getting selected elder ID:', error);
       return null;
+    }
+  };
+
+  // Get user role from JWT token
+  const getUserRole = async (): Promise<string | null> => {
+    try {
+      const token = await AsyncStorage.getItem('token');
+      if (!token) return null;
+      
+      const decodedToken = jwtDecode<DecodedToken>(token.trim());
+      return decodedToken.role || null;
+    } catch (error) {
+      console.error('Error getting user role from token:', error);
+      return null;
+    }
+  };
+
+  // Check if caregiver has active connection to selected elder (ignore device requirement for testing)
+  const checkCaregiverConnection = async (elderId: string): Promise<boolean> => {
+    try {
+      const token = await AsyncStorage.getItem('token');
+      if (!token) {
+        return false;
+      }
+
+      const headers: HeadersInit = {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token.trim()}`
+      };
+
+      // Check caregiver-elder connection directly (ignore device)
+      try {
+        const decodedToken = jwtDecode<{ userId?: string; id?: string }>(token.trim());
+        const caregiverId = decodedToken.userId || decodedToken.id;
+        
+        if (caregiverId) {
+          const connectionCheck = await fetch(`https://pillnow-database.onrender.com/api/caregiver-connections?caregiver=${caregiverId}&elder=${elderId}`, {
+            headers
+          });
+          
+          if (connectionCheck.ok) {
+            const connData = await connectionCheck.json();
+            const connections = Array.isArray(connData) ? connData : (connData.connections || connData.data || []);
+            const activeConn = connections.find((c: any) => {
+              const connElderId = c.elder?.userId || c.elder?._id || c.elder?.id || c.elder;
+              return String(connElderId) === String(elderId) && 
+                     (c.status === 'active' || c.status === 'Active' || c.status === 'ACTIVE');
+            });
+            
+            if (activeConn) {
+              console.log('[ModifyScheduleScreen] ✅ Caregiver-elder connection verified (device check ignored)');
+              return true;
+            }
+          }
+        }
+      } catch (connError) {
+        console.error('[ModifyScheduleScreen] Error checking caregiver-elder connection:', connError);
+      }
+
+      // Fallback: Try the original endpoint (but ignore 404 for device)
+      const response = await fetch(`https://pillnow-database.onrender.com/api/monitor/elder-device/${elderId}`, {
+        headers
+      });
+
+      if (response.status === 401 || response.status === 403) {
+        return false;
+      }
+
+      // Ignore 404 (device not connected) for testing
+      if (response.status === 404) {
+        console.log('[ModifyScheduleScreen] ⚠️ Device not connected (ignored for testing)');
+        // Still return false, but we already checked caregiver-elder connection above
+        return false;
+      }
+
+      if (response.ok) {
+        const data = await response.json();
+        if (data.success && data.data) {
+          const connection = data.data.connection || data.data;
+          const isActive = connection?.status === 'active' || connection?.status === 'Active';
+          const hasPermission = connection?.permissions?.viewAdherence !== false;
+          return isActive && hasPermission;
+        }
+      }
+      return false;
+    } catch (error) {
+      console.error('[ModifyScheduleScreen] Error checking caregiver connection:', error);
+      return false;
+    }
+  };
+
+  // Check monitoring status for caregivers
+  const checkMonitoringStatus = async () => {
+    try {
+      const userRole = await getUserRole();
+      const selectedElderId = await getSelectedElderId();
+      const isCaregiverUser = userRole === '3' || userRole === '3' || String(userRole) === '3';
+      
+      // Fallback: If an elder is selected but role is null, assume they're a caregiver
+      const hasSelectedElder = selectedElderId !== null;
+      const shouldShowAsCaregiver = isCaregiverUser || (hasSelectedElder && userRole === null);
+      
+      setIsCaregiver(shouldShowAsCaregiver);
+      
+      if (shouldShowAsCaregiver && selectedElderId) {
+        const elderName = await AsyncStorage.getItem('selectedElderName');
+        if (elderName) {
+          setMonitoringElder({ id: selectedElderId, name: elderName });
+        } else {
+          setMonitoringElder(null);
+        }
+      } else {
+        setMonitoringElder(null);
+      }
+    } catch (error) {
+      console.error('Error checking monitoring status:', error);
     }
   };
 
@@ -228,6 +346,7 @@ const ModifyScheduleScreen = () => {
     const loadData = async () => {
       await loadMedications();
       await loadSchedules();
+      await checkMonitoringStatus();
     };
     loadData();
   }, [loadSchedules, loadMedications]);
@@ -366,6 +485,27 @@ const ModifyScheduleScreen = () => {
       setEditModalVisible(false);
       await loadSchedules(); // Reload to get latest status
       return;
+    }
+    
+    // For caregivers only: Check if they have active connection to elder
+    // Elders should NOT go through this validation - they can modify their own schedules
+    const userRole = await getUserRole();
+    const roleStr = userRole ? String(userRole) : '';
+    const isCaregiverUser = roleStr === '3';
+    if (isCaregiverUser) {
+      const selectedElderId = await getSelectedElderId();
+      if (selectedElderId) {
+        const hasConnection = await checkCaregiverConnection(selectedElderId);
+        if (!hasConnection) {
+          Alert.alert(
+            'No Active Connection',
+            'You must have an active connection to this elder to modify schedules. Please check your caregiver-elder connection status.',
+            [{ text: 'OK' }]
+          );
+          setEditModalVisible(false);
+          return;
+        }
+      }
     }
     
     try {
@@ -543,6 +683,24 @@ const ModifyScheduleScreen = () => {
       }
     }
     
+    // For caregivers: Check if they have active connection to elder
+    const userRole = await getUserRole();
+    const isCaregiverUser = userRole === '3' || userRole === '3' || String(userRole) === '3';
+    if (isCaregiverUser) {
+      const selectedElderId = await getSelectedElderId();
+      if (selectedElderId) {
+        const hasConnection = await checkCaregiverConnection(selectedElderId);
+        if (!hasConnection) {
+          Alert.alert(
+            'No Active Connection',
+            'You must have an active connection to this elder to delete schedules. Please check your caregiver-elder connection status.',
+            [{ text: 'OK' }]
+          );
+          return;
+        }
+      }
+    }
+    
     Alert.alert(
       'Delete Schedule',
       'Are you sure you want to delete this schedule?',
@@ -640,9 +798,15 @@ const ModifyScheduleScreen = () => {
         >
           <Ionicons name="arrow-back" size={30} color={theme.text} />
         </TouchableOpacity>
-        <Text style={[styles.headerTitle, { color: theme.secondary }]}>
-          MODIFY <Text style={[styles.headerHighlight, { color: theme.primary }]}>SCHEDULE</Text>
-        </Text>
+        {isCaregiver && monitoringElder ? (
+          <Text style={[styles.headerTitle, { color: theme.secondary }]}>
+            ELDER <Text style={[styles.elderNameHighlight, { color: theme.primary }]}>{monitoringElder.name.toUpperCase()}</Text> SCHEDULE
+          </Text>
+        ) : (
+          <Text style={[styles.headerTitle, { color: theme.secondary }]}>
+            MODIFY <Text style={[styles.headerHighlight, { color: theme.primary }]}>SCHEDULE</Text>
+          </Text>
+        )}
         {schedules.length > 0 && (
           <TouchableOpacity 
             style={[styles.deleteAllButton, { backgroundColor: theme.error }]}
@@ -946,6 +1110,10 @@ const styles = StyleSheet.create({
   },
   headerHighlight: {
     color: '#4A90E2',
+  },
+  elderNameHighlight: {
+    fontSize: 22,
+    fontWeight: 'bold',
   },
   loadingContainer: {
     alignItems: 'center',

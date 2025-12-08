@@ -48,6 +48,11 @@ const MonitorManageScreen = () => {
   const [alarmVisible, setAlarmVisible] = useState(false);
   const [alarmContainer, setAlarmContainer] = useState(1);
   const [alarmTime, setAlarmTime] = useState('');
+  
+  // Monitoring status for caregivers
+  const [isCaregiver, setIsCaregiver] = useState(false);
+  const [monitoringElder, setMonitoringElder] = useState<{ id: string; name: string } | null>(null);
+  const [hasActiveConnection, setHasActiveConnection] = useState<boolean>(true); // Default to true for elders
 
   // Configure notification handler (lazy load)
   // Note: expo-notifications requires a development build, not Expo Go
@@ -112,6 +117,144 @@ const MonitorManageScreen = () => {
     } catch (error) {
       console.error('Error getting selected elder ID:', error);
       return null;
+    }
+  }, []);
+
+  // Get user role from JWT token
+  const getUserRole = useCallback(async (): Promise<string | null> => {
+    try {
+      const token = await AsyncStorage.getItem('token');
+      if (!token) {
+        console.log('[MonitorManageScreen] No token found');
+        return null;
+      }
+      
+      const decodedToken = jwtDecode<DecodedToken>(token.trim());
+      console.log('[MonitorManageScreen] Decoded token:', JSON.stringify(decodedToken, null, 2));
+      
+      // Try different possible field names for role
+      const role = decodedToken.role || (decodedToken as any).userRole || (decodedToken as any).roleId || null;
+      console.log('[MonitorManageScreen] Extracted role:', role);
+      return role;
+    } catch (error) {
+      console.error('[MonitorManageScreen] Error getting user role from token:', error);
+      return null;
+    }
+  }, []);
+
+  // Check if caregiver has active connection to selected elder
+  // Requirements:
+  // 1. Valid JWT token (caregiver's own token)
+  // 2. Active CaregiverConnection record with status: 'active'
+  // 3. For adherence: permissions.viewAdherence: true
+  const checkCaregiverConnection = useCallback(async (elderId: string) => {
+    try {
+      const token = await AsyncStorage.getItem('token');
+      if (!token) {
+        console.log('[MonitorManageScreen] ⚠️ No token found');
+        setHasActiveConnection(false);
+        return;
+      }
+
+      const headers: HeadersInit = {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token.trim()}`
+      };
+
+      // Use the adherence endpoint to verify connection
+      // This endpoint requires:
+      // - Valid caregiver JWT token
+      // - Active caregiver-elder connection (status: 'active')
+      // - permissions.viewAdherence: true
+      const response = await fetch(`https://pillnow-database.onrender.com/api/monitor/elder-device/${elderId}`, {
+        headers
+      });
+
+      if (response.status === 401) {
+        console.log('[MonitorManageScreen] ⚠️ Authentication failed - invalid or expired token');
+        setHasActiveConnection(false);
+        return;
+      }
+
+      if (response.status === 403) {
+        console.log('[MonitorManageScreen] ⚠️ Permission denied - no active connection or missing viewAdherence permission');
+        setHasActiveConnection(false);
+        return;
+      }
+
+      if (response.status === 404) {
+        // 404 could mean no device OR no caregiver-elder connection
+        // For testing, we'll check if caregiver-elder connection exists separately
+        console.log('[MonitorManageScreen] ⚠️ 404 response - checking caregiver-elder connection separately');
+        
+        // Check if caregiver-elder connection exists (ignore device requirement)
+        try {
+          const tokenForId = await AsyncStorage.getItem('token');
+          if (!tokenForId) {
+            setHasActiveConnection(false);
+            return;
+          }
+          const decodedToken = jwtDecode<{ userId?: string; id?: string }>(tokenForId.trim());
+          const caregiverId = decodedToken.userId || decodedToken.id;
+          if (!caregiverId) {
+            setHasActiveConnection(false);
+            return;
+          }
+          const connectionCheck = await fetch(`https://pillnow-database.onrender.com/api/caregiver-connections?caregiver=${caregiverId}&elder=${elderId}`, {
+            headers
+          });
+          
+          if (connectionCheck.ok) {
+            const connData = await connectionCheck.json();
+            const connections = Array.isArray(connData) ? connData : (connData.connections || connData.data || []);
+            const activeConn = connections.find((c: any) => {
+              const connElderId = c.elder?.userId || c.elder?._id || c.elder?.id || c.elder;
+              return String(connElderId) === String(elderId) && 
+                     (c.status === 'active' || c.status === 'Active' || c.status === 'ACTIVE');
+            });
+            
+            if (activeConn) {
+              console.log('[MonitorManageScreen] ✅ Caregiver-elder connection exists (device connection ignored for testing)');
+              setHasActiveConnection(true);
+              return;
+            }
+          }
+        } catch (checkError) {
+          console.error('[MonitorManageScreen] Error checking caregiver-elder connection:', checkError);
+        }
+        
+        console.log('[MonitorManageScreen] ⚠️ No active caregiver-elder connection found');
+        setHasActiveConnection(false);
+        return;
+      }
+
+      if (response.ok) {
+        const data = await response.json();
+        if (data.success && data.data) {
+          // Verify connection exists and is active
+          const connection = data.data.connection || data.data;
+          const isActive = connection?.status === 'active' || connection?.status === 'Active';
+          const hasPermission = connection?.permissions?.viewAdherence !== false; // Default to true if not specified
+          
+          if (isActive && hasPermission) {
+            console.log('[MonitorManageScreen] ✅ Active connection verified with viewAdherence permission');
+            setHasActiveConnection(true);
+          } else {
+            console.log('[MonitorManageScreen] ⚠️ Connection exists but not active or missing permission');
+            setHasActiveConnection(false);
+          }
+        } else {
+          console.log('[MonitorManageScreen] ⚠️ Connection check returned false');
+          setHasActiveConnection(false);
+        }
+      } else {
+        const errorText = await response.text();
+        console.log(`[MonitorManageScreen] ⚠️ Connection check failed (${response.status}): ${errorText}`);
+        setHasActiveConnection(false);
+      }
+    } catch (error) {
+      console.error('[MonitorManageScreen] Error checking caregiver connection:', error);
+      setHasActiveConnection(false);
     }
   }, []);
 
@@ -184,17 +327,60 @@ const MonitorManageScreen = () => {
       
       // Check if there's a selected elder (for caregivers)
       const selectedElderId = await getSelectedElderId();
+      const userRole = await getUserRole();
+      // Strict check: Only role '3' is caregiver, role '2' is elder
+      const roleStr = userRole ? String(userRole) : '';
+      const isCaregiverUser = roleStr === '3';
+      const isElderUser = roleStr === '2';
+      
+      // If user is an elder, clear any selectedElderId (elders don't select other elders)
+      if (isElderUser) {
+        await AsyncStorage.removeItem('selectedElderId');
+        await AsyncStorage.removeItem('selectedElderName');
+        console.log('[MonitorManageScreen] Cleared selectedElderId for elder user');
+      }
+      
+      // Only show as caregiver if user is actually a caregiver (not elder)
+      const shouldShowAsCaregiver = isCaregiverUser && !isElderUser;
+      
+      // Update monitoring status
+      setIsCaregiver(shouldShowAsCaregiver);
+      console.log('[MonitorManageScreen] User role:', userRole, 'Is caregiver:', isCaregiverUser, 'Is elder:', isElderUser, 'Has selected elder:', selectedElderId !== null, 'Should show as caregiver:', shouldShowAsCaregiver, 'Selected elder ID:', selectedElderId);
+      
+      // Only set monitoring elder if user is actually a caregiver
+      if (shouldShowAsCaregiver && selectedElderId) {
+        const elderName = await AsyncStorage.getItem('selectedElderName');
+        console.log('[MonitorManageScreen] Elder name from storage:', elderName);
+        if (elderName) {
+          setMonitoringElder({ id: selectedElderId, name: elderName });
+          console.log('[MonitorManageScreen] ✅ Monitoring status set:', { id: selectedElderId, name: elderName });
+          // Check if caregiver has active connection to elder
+          await checkCaregiverConnection(selectedElderId);
+        } else {
+          setMonitoringElder(null);
+          setHasActiveConnection(false);
+          console.log('[MonitorManageScreen] ⚠️ Elder name not found in storage');
+        }
+      } else {
+        setMonitoringElder(null);
+        setHasActiveConnection(true); // Elders always have access
+        if (!shouldShowAsCaregiver) {
+          console.log('[MonitorManageScreen] User is not a caregiver and no elder selected');
+        } else {
+          console.log('[MonitorManageScreen] ⚠️ No elder selected');
+        }
+      }
       
       // Filter schedules based on user role and selected elder
       let userSchedules;
-      if (selectedElderId) {
+      if (shouldShowAsCaregiver && selectedElderId) {
         // If caregiver has selected an elder, show that elder's schedules
         userSchedules = allSchedules.filter((schedule: any) => {
           const scheduleUserId = parseInt(schedule.user);
           return scheduleUserId === parseInt(selectedElderId);
         });
       } else {
-        // Otherwise, show current user's schedules
+        // Elder or caregiver without selected elder: show current user's schedules
         userSchedules = allSchedules.filter((schedule: any) => {
           const scheduleUserId = parseInt(schedule.user);
           return scheduleUserId === currentUserId;
@@ -1296,9 +1482,25 @@ const MonitorManageScreen = () => {
             <Ionicons name="arrow-back" size={24} color={theme.text} />
           )}
         </TouchableOpacity>
-        <Text style={[styles.title, { color: theme.secondary, flex: 1 }]}>
-          MONITOR & MANAGE
-        </Text>
+        <View style={{ flex: 1 }}>
+          {isCaregiver && monitoringElder ? (
+            <>
+              <Text style={[styles.title, { color: theme.secondary }]}>
+                ELDER <Text style={[styles.elderNameHighlight, { color: theme.primary }]}>{monitoringElder.name.toUpperCase()}</Text> DASHBOARD
+              </Text>
+              <View style={[styles.monitoringBanner, { backgroundColor: theme.primary + '20', borderColor: theme.primary }]}>
+                <Ionicons name="eye" size={14} color={theme.primary} />
+                <Text style={[styles.monitoringText, { color: theme.primary }]}>
+                  Monitoring Active
+                </Text>
+              </View>
+            </>
+          ) : (
+            <Text style={[styles.title, { color: theme.secondary }]}>
+              MONITOR & MANAGE
+            </Text>
+          )}
+        </View>
         {schedules.length > 0 && (
           <TouchableOpacity 
             style={[styles.deleteAllButton, { backgroundColor: theme.error }]}
@@ -1432,54 +1634,66 @@ const MonitorManageScreen = () => {
 
       {/* Buttons Container */}
       <View style={styles.buttonsContainer}>
-        <TouchableOpacity 
-          style={[
-            styles.button, 
-            { backgroundColor: theme.primary },
-            navigating === 'setScreen' && styles.buttonDisabled
-          ]} 
-          onPress={async () => {
-            try {
-              setNavigating('setScreen');
-              navigation.navigate("SetScreen" as never);
-            } catch (error) {
-              console.error('Error navigating to SetScreen:', error);
-            } finally {
-              setTimeout(() => setNavigating(null), 500);
-            }
-          }}
-          disabled={navigating !== null || refreshing || deletingAll}
-        > 
-          {navigating === 'setScreen' ? (
-            <ActivityIndicator size="small" color={theme.card} />
-          ) : (
-            <Text style={[styles.buttonText, { color: theme.card }]}>SET MED SCHED</Text>
-          )}
-        </TouchableOpacity>
-        <TouchableOpacity 
-          style={[
-            styles.button, 
-            { backgroundColor: theme.secondary },
-            navigating === 'modifyScreen' && styles.buttonDisabled
-          ]} 
-          onPress={async () => {
-            try {
-              setNavigating('modifyScreen');
-              navigation.navigate("ModifyScheduleScreen" as never);
-            } catch (error) {
-              console.error('Error navigating to ModifyScheduleScreen:', error);
-            } finally {
-              setTimeout(() => setNavigating(null), 500);
-            }
-          }}
-          disabled={navigating !== null || refreshing || deletingAll}
-        > 
-          {navigating === 'modifyScreen' ? (
-            <ActivityIndicator size="small" color={theme.card} />
-          ) : (
-            <Text style={[styles.buttonText, { color: theme.card }]}>MODIFY SCHED</Text>
-          )}
-        </TouchableOpacity>
+        {/* Hide buttons if caregiver is not connected to selected elder */}
+        {isCaregiver && monitoringElder && !hasActiveConnection ? (
+          <View style={[styles.connectionWarning, { backgroundColor: theme.warning + '20', borderColor: theme.warning }]}>
+            <Ionicons name="warning" size={20} color={theme.warning} />
+            <Text style={[styles.connectionWarningText, { color: theme.warning }]}>
+              You must have an active connection to {monitoringElder.name} to set or modify schedules.
+            </Text>
+          </View>
+        ) : (
+          <>
+            <TouchableOpacity 
+              style={[
+                styles.button, 
+                { backgroundColor: theme.primary },
+                navigating === 'setScreen' && styles.buttonDisabled
+              ]} 
+              onPress={async () => {
+                try {
+                  setNavigating('setScreen');
+                  navigation.navigate("SetScreen" as never);
+                } catch (error) {
+                  console.error('Error navigating to SetScreen:', error);
+                } finally {
+                  setTimeout(() => setNavigating(null), 500);
+                }
+              }}
+              disabled={navigating !== null || refreshing || deletingAll}
+            > 
+              {navigating === 'setScreen' ? (
+                <ActivityIndicator size="small" color={theme.card} />
+              ) : (
+                <Text style={[styles.buttonText, { color: theme.card }]}>SET MED SCHED</Text>
+              )}
+            </TouchableOpacity>
+            <TouchableOpacity 
+              style={[
+                styles.button, 
+                { backgroundColor: theme.secondary },
+                navigating === 'modifyScreen' && styles.buttonDisabled
+              ]} 
+              onPress={async () => {
+                try {
+                  setNavigating('modifyScreen');
+                  navigation.navigate("ModifyScheduleScreen" as never);
+                } catch (error) {
+                  console.error('Error navigating to ModifyScheduleScreen:', error);
+                } finally {
+                  setTimeout(() => setNavigating(null), 500);
+                }
+              }}
+              disabled={navigating !== null || refreshing || deletingAll}
+            > 
+              {navigating === 'modifyScreen' ? (
+                <ActivityIndicator size="small" color={theme.card} />
+              ) : (
+                <Text style={[styles.buttonText, { color: theme.card }]}>MODIFY SCHED</Text>
+              )}
+            </TouchableOpacity>
+          </>
+        )}
         <TouchableOpacity 
           style={[
             styles.button, 
@@ -1540,6 +1754,10 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
     marginLeft: 10,
   },
+  elderNameHighlight: {
+    fontSize: 24,
+    fontWeight: 'bold',
+  },
   refreshButton: {
     padding: 8,
     borderRadius: 20,
@@ -1592,6 +1810,22 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginBottom: 20,
   },
+  connectionWarning: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 15,
+    borderRadius: 12,
+    borderWidth: 1,
+    marginVertical: 10,
+    width: '90%',
+    gap: 10,
+  },
+  connectionWarningText: {
+    flex: 1,
+    fontSize: 14,
+    fontWeight: '600',
+    textAlign: 'center',
+  },
   button: {
     width: '90%',
     padding: 15,
@@ -1643,6 +1877,19 @@ const styles = StyleSheet.create({
   scheduleCountText: {
     fontSize: 12,
     fontWeight: 'bold',
+  },
+  monitoringBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 4,
+    padding: 6,
+    borderRadius: 6,
+    borderWidth: 1,
+    gap: 4,
+  },
+  monitoringText: {
+    fontSize: 11,
+    fontWeight: '600',
   },
   schedulesList: {
     // No specific styles needed here, items will be styled individually
