@@ -313,10 +313,66 @@ const SetScreen = () => {
     }
   };
 
+  // Get user role from JWT token
+  const getUserRole = async (): Promise<string | null> => {
+    try {
+      const token = await AsyncStorage.getItem('token');
+      if (!token) return null;
+      
+      const decodedToken = jwtDecode<DecodedToken>(token.trim());
+      return decodedToken.role || null;
+    } catch (error) {
+      console.error('Error getting user role from token:', error);
+      return null;
+    }
+  };
+
+  // Get selected elder ID for caregivers
+  const getSelectedElderId = async (): Promise<string | null> => {
+    try {
+      const selectedElderId = await AsyncStorage.getItem('selectedElderId');
+      return selectedElderId;
+    } catch (error) {
+      console.error('Error getting selected elder ID:', error);
+      return null;
+    }
+  };
+
   // Save schedule data to database
   const saveScheduleData = async () => {
     try {
       setSaving(true);
+      
+      // For Caregivers: Validate that they have selected an elder and are connected to device
+      const userRole = await getUserRole();
+      const isCaregiver = userRole === '3' || userRole === 3;
+      
+      if (isCaregiver) {
+        // Check if elder is selected
+        const selectedElderId = await getSelectedElderId();
+        if (!selectedElderId) {
+          Alert.alert(
+            'Elder Not Selected',
+            'As a caregiver, you must select an elder to monitor before setting up a schedule. Please go to the dashboard and select an elder first.',
+            [{ text: 'OK' }]
+          );
+          setSaving(false);
+          return;
+        }
+        
+        // Check if Bluetooth is connected
+        const isBluetoothConnected = await BluetoothService.isConnectionActive();
+        if (!isBluetoothConnected) {
+          Alert.alert(
+            'Device Not Connected',
+            'As a caregiver, you must be connected to the device via Bluetooth before setting up a schedule. Please connect to the device first.',
+            [{ text: 'OK' }]
+          );
+          setSaving(false);
+          return;
+        }
+      }
+      
       // Validate: Check for duplicate pills across containers
       const pillToContainers: Record<string, number[]> = {};
       for (let containerNum = 1; containerNum <= 3; containerNum++) {
@@ -345,8 +401,20 @@ const SetScreen = () => {
         return;
       }
       
-      // Get current user ID
-      const currentUserId = await getCurrentUserId();
+      // Get current user ID or selected elder ID (for caregivers)
+      let currentUserId = await getCurrentUserId();
+      
+      // If caregiver, use selected elder's ID instead of caregiver's ID
+      if (isCaregiver) {
+        const selectedElderId = await getSelectedElderId();
+        if (selectedElderId) {
+          const elderIdNum = parseInt(selectedElderId);
+          if (!isNaN(elderIdNum)) {
+            currentUserId = elderIdNum;
+            console.log(`[SetScreen] Caregiver setting schedule for elder ID: ${currentUserId}`);
+          }
+        }
+      }
       
       // Create schedule records for each pill and alarm combination
       const scheduleRecords: Array<{

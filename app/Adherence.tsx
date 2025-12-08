@@ -9,6 +9,14 @@ import { useRouter } from 'expo-router';
 import { useTheme } from './context/ThemeContext';
 import { lightTheme, darkTheme } from './styles/theme';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { jwtDecode } from 'jwt-decode';
+
+// Interface for decoded JWT token
+interface DecodedToken {
+  id: string;
+  userId?: string;
+  role?: string;
+}
 
 interface MedicationRow {
   _id: string;
@@ -37,6 +45,56 @@ const Adherence = () => {
   const [showStartPicker, setShowStartPicker] = useState(false);
   const [showEndPicker, setShowEndPicker] = useState(false);
 
+  // Get current user ID from JWT token
+  const getCurrentUserId = async (): Promise<number> => {
+    try {
+      const token = await AsyncStorage.getItem('token');
+      if (!token) {
+        console.warn('No token found, using default user ID 1');
+        return 1;
+      }
+
+      const decodedToken = jwtDecode<DecodedToken>(token.trim());
+      const rawId = decodedToken.userId ?? decodedToken.id;
+      const userId = parseInt(rawId);
+      
+      if (isNaN(userId)) {
+        console.warn('Invalid user ID in token, using default user ID 1');
+        return 1;
+      }
+
+      return userId;
+    } catch (error) {
+      console.error('Error getting user ID from token:', error);
+      return 1; // Default fallback
+    }
+  };
+
+  // Get user role from JWT token
+  const getUserRole = async (): Promise<string | null> => {
+    try {
+      const token = await AsyncStorage.getItem('token');
+      if (!token) return null;
+      
+      const decodedToken = jwtDecode<DecodedToken>(token.trim());
+      return decodedToken.role || null;
+    } catch (error) {
+      console.error('Error getting user role from token:', error);
+      return null;
+    }
+  };
+
+  // Get selected elder ID for caregivers
+  const getSelectedElderId = async (): Promise<string | null> => {
+    try {
+      const selectedElderId = await AsyncStorage.getItem('selectedElderId');
+      return selectedElderId;
+    } catch (error) {
+      console.error('Error getting selected elder ID:', error);
+      return null;
+    }
+  };
+
   const fetchAdherenceData = async () => {
     try {
       setLoading(true);
@@ -54,19 +112,48 @@ const Adherence = () => {
         headers
       });
       const schedulesJson = await schedulesResp.json();
-      const schedules: any[] = schedulesJson?.data || [];
+      const allSchedules: any[] = schedulesJson?.data || [];
+
+      // Filter schedules based on user role and selected elder (for caregivers)
+      const currentUserId = await getCurrentUserId();
+      const userRole = await getUserRole();
+      const selectedElderId = await getSelectedElderId();
+      
+      let userSchedules: any[];
+      if (userRole === '3' || userRole === 3) {
+        // Caregiver: show selected elder's schedules
+        if (selectedElderId) {
+          userSchedules = allSchedules.filter((schedule: any) => {
+            const scheduleUserId = parseInt(schedule.user);
+            return scheduleUserId === parseInt(selectedElderId);
+          });
+          console.log(`[Adherence] Caregiver viewing elder ${selectedElderId}'s adherence: ${userSchedules.length} schedule(s)`);
+        } else {
+          // No elder selected, show empty
+          userSchedules = [];
+          console.log(`[Adherence] Caregiver has no elder selected, showing empty adherence`);
+        }
+      } else {
+        // Elder: show own schedules
+        userSchedules = allSchedules.filter((schedule: any) => {
+          const scheduleUserId = parseInt(schedule.user);
+          return scheduleUserId === currentUserId;
+        });
+        console.log(`[Adherence] Elder viewing own adherence: ${userSchedules.length} schedule(s)`);
+      }
 
       const medsResp = await fetch('https://pillnow-database.onrender.com/api/medications');
       const medsJson = await medsResp.json();
       const medsArray: any[] = Array.isArray(medsJson) ? medsJson : (medsJson?.data || []);
 
       const now = new Date();
-      const rows: MedicationRow[] = schedules.map((s) => {
+      const rows: MedicationRow[] = userSchedules.map((s) => {
         const med = medsArray.find(m => m.medId === s.medication);
         const [y, m, d] = String(s.date).split('-').map(Number);
         const [hh, mm] = String(s.time).split(':').map(Number);
         const when = new Date(y, (m || 1) - 1, d, hh, mm);
-        let status: 'Taken' | 'Pending' | 'Missed' = s.status === 'Taken' ? 'Taken' : 'Pending';
+        // Map backend status 'Done' to display status 'Taken'
+        let status: 'Taken' | 'Pending' | 'Missed' = (s.status === 'Done' || s.status === 'Taken') ? 'Taken' : 'Pending';
         if (status === 'Pending' && now.getTime() > when.getTime()) status = 'Missed';
         return {
           _id: s._id,
@@ -140,7 +227,7 @@ const Adherence = () => {
       } else {
         console.log(`[Adherence] ✅ Schedule ${medication._id} marked as Done (via PATCH)`);
       }
-      setMedications(prev => prev.map(m => m._id === medication._id ? { ...m, status: 'Done' } : m));
+      setMedications(prev => prev.map(m => m._id === medication._id ? { ...m, status: 'Taken' } : m));
       setModalVisible(false);
       Alert.alert('Updated', 'Marked as Taken');
     } catch (e) {
