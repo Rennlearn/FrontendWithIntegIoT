@@ -15,13 +15,28 @@ import axios from "axios";
 import { useTheme } from "./context/ThemeContext";
 import { lightTheme, darkTheme } from "./styles/theme";
 
+/**
+ * ResetPassword Screen
+ * 
+ * Flow:
+ * 1. Requires OTP verification (from ForgotPassword screen)
+ * 2. User enters new password
+ * 3. Backend resets password using phone number to find account
+ * 
+ * Backend API Endpoints:
+ * - POST /api/users/reset-password { phone: string, newPassword: string } → Resets password
+ * 
+ * Note: Phone number is used to find the account, not a reset token
+ */
+
 const ResetPassword = () => {
   const router = useRouter();
   const params = useLocalSearchParams();
   const { isDarkMode } = useTheme();
   const theme = isDarkMode ? darkTheme : lightTheme;
 
-  const [resetToken, setResetToken] = useState(params.resetToken as string || "");
+  const [phone, setPhone] = useState((params.phone as string) || "");
+  const [otpVerified, setOtpVerified] = useState(params.otpVerified === "true");
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
@@ -29,14 +44,53 @@ const ResetPassword = () => {
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    if (!resetToken && params.resetToken) {
-      setResetToken(params.resetToken as string);
+    // If phone and OTP verification status are passed, use them
+    if (params.phone) {
+      setPhone(params.phone as string);
     }
-  }, [params.resetToken]);
+    if (params.otpVerified === "true") {
+      setOtpVerified(true);
+    }
+
+    // If OTP is not verified, redirect back to forgot password
+    if (!params.otpVerified || params.otpVerified !== "true") {
+      Alert.alert(
+        "Verification Required",
+        "Please verify your phone number first before resetting your password.",
+        [
+          {
+            text: "OK",
+            onPress: () => {
+              router.replace("/ForgotPassword");
+            },
+          },
+        ]
+      );
+    }
+  }, [params]);
 
   const handleSubmit = async () => {
-    if (!resetToken.trim()) {
-      Alert.alert("Error", "Reset token is missing. Please request a new password reset.");
+    // Validate phone number
+    if (!phone.trim()) {
+      Alert.alert("Error", "Phone number is missing. Please start over.");
+      router.replace("/ForgotPassword");
+      return;
+    }
+
+    // Validate OTP verification
+    if (!otpVerified) {
+      Alert.alert(
+        "Verification Required",
+        "Please verify your phone number first before resetting your password.",
+        [
+          {
+            text: "OK",
+            onPress: () => {
+              router.replace("/ForgotPassword");
+            },
+          },
+        ]
+      );
       return;
     }
 
@@ -57,37 +111,78 @@ const ResetPassword = () => {
 
     setLoading(true);
     try {
+      // Use phone number to find and reset the account password
       const response = await axios.post(
         "https://pillnow-database.onrender.com/api/users/reset-password",
         {
-          resetToken: resetToken.trim(),
+          phone: phone.trim(),
           newPassword: newPassword.trim(),
         }
       );
 
-      Alert.alert(
-        "Success",
-        "Your password has been reset successfully. You can now login with your new password.",
-        [
-          {
-            text: "OK",
-            onPress: () => {
-              router.replace("/LoginScreen");
+      if (response.data && response.data.success) {
+        Alert.alert(
+          "Success",
+          "Your password has been reset successfully. You can now login with your new password.",
+          [
+            {
+              text: "OK",
+              onPress: () => {
+                router.replace("/LoginScreen");
+              },
             },
-          },
-        ]
-      );
+          ]
+        );
+      } else {
+        Alert.alert(
+          "Error",
+          response.data?.message || "Failed to reset password. Please try again."
+        );
+      }
     } catch (error: any) {
       console.error("Reset password error:", error);
       const errorMessage =
         error.response?.data?.message ||
         error.message ||
-        "Failed to reset password. The reset token may be invalid or expired. Please request a new one.";
+        "Failed to reset password. The phone number may be invalid or the account may not exist. Please try again.";
       Alert.alert("Error", errorMessage);
     } finally {
       setLoading(false);
     }
   };
+
+  // If OTP is not verified, show message
+  if (!otpVerified) {
+    return (
+      <ScrollView
+        style={[styles.container, { backgroundColor: theme.background }]}
+        contentContainerStyle={styles.contentContainer}
+      >
+        <View style={[styles.card, { backgroundColor: theme.card }]}>
+          <Ionicons
+            name="alert-circle-outline"
+            size={64}
+            color={theme.warning}
+            style={styles.icon}
+          />
+          <Text style={[styles.title, { color: theme.text }]}>
+            Verification Required
+          </Text>
+          <Text style={[styles.subtitle, { color: theme.textSecondary }]}>
+            Please verify your phone number first before resetting your password.
+          </Text>
+          <TouchableOpacity
+            style={[styles.submitButton, { backgroundColor: theme.primary }]}
+            onPress={() => router.replace("/ForgotPassword")}
+          >
+            <Text style={[styles.submitButtonText, { color: theme.card }]}>
+              Go to Verification
+            </Text>
+          </TouchableOpacity>
+        </View>
+      </ScrollView>
+    );
+  }
 
   return (
     <ScrollView
@@ -122,26 +217,24 @@ const ResetPassword = () => {
           Enter your new password below. Make sure it's at least 6 characters long.
         </Text>
 
-        {/* Reset Token Input (if not passed via params) */}
-        {!params.resetToken && (
-          <View style={styles.inputContainer}>
-            <Ionicons
-              name="key-outline"
-              size={20}
-              color={theme.textSecondary}
-              style={styles.inputIcon}
-            />
-            <TextInput
-              style={[styles.input, { color: theme.text, borderColor: theme.border }]}
-              placeholder="Enter reset token"
-              placeholderTextColor={theme.textSecondary}
-              value={resetToken}
-              onChangeText={setResetToken}
-              autoCapitalize="none"
-              autoCorrect={false}
-            />
-          </View>
-        )}
+        {/* Phone Number Display (read-only) */}
+        <View style={[styles.inputContainer, { backgroundColor: theme.background }]}>
+          <Ionicons
+            name="call-outline"
+            size={20}
+            color={theme.textSecondary}
+            style={styles.inputIcon}
+          />
+          <Text style={[styles.phoneDisplay, { color: theme.textSecondary }]}>
+            {phone || "Phone number"}
+          </Text>
+          <Ionicons
+            name="checkmark-circle"
+            size={20}
+            color={theme.success}
+            style={styles.verifiedIcon}
+          />
+        </View>
 
         {/* New Password Input */}
         <View style={styles.inputContainer}>
@@ -347,6 +440,13 @@ const styles = StyleSheet.create({
     flex: 1,
     fontSize: 16,
   },
+  phoneDisplay: {
+    flex: 1,
+    fontSize: 16,
+  },
+  verifiedIcon: {
+    marginLeft: 10,
+  },
   eyeIcon: {
     padding: 5,
   },
@@ -395,5 +495,3 @@ const styles = StyleSheet.create({
 });
 
 export default ResetPassword;
-
-

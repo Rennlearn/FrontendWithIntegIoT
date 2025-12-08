@@ -15,50 +15,131 @@ import axios from "axios";
 import { useTheme } from "./context/ThemeContext";
 import { lightTheme, darkTheme } from "./styles/theme";
 
+/**
+ * ForgotPassword Screen
+ * 
+ * Flow:
+ * 1. User enters phone number
+ * 2. Backend sends OTP via SMS (using configured SMS service: HTTP/Serial/Queue)
+ * 3. User enters OTP
+ * 4. Backend verifies OTP
+ * 5. User navigates to ResetPassword screen
+ * 
+ * Backend API Endpoints:
+ * - POST /api/users/forgot-password { phone: string } → Sends OTP via SMS
+ * - POST /api/users/verify-otp { phone: string, otp: string } → Verifies OTP
+ */
+
 const ForgotPassword = () => {
   const router = useRouter();
   const { isDarkMode } = useTheme();
   const theme = isDarkMode ? darkTheme : lightTheme;
 
-  const [email, setEmail] = useState("");
   const [phone, setPhone] = useState("");
-  const [useEmail, setUseEmail] = useState(true);
+  const [otp, setOtp] = useState("");
   const [loading, setLoading] = useState(false);
-  const [resetToken, setResetToken] = useState<string | null>(null);
+  const [sendingOTP, setSendingOTP] = useState(false);
+  const [verifyingOTP, setVerifyingOTP] = useState(false);
+  const [otpSent, setOtpSent] = useState(false);
+  const [otpVerified, setOtpVerified] = useState(false);
+  const [resendCooldown, setResendCooldown] = useState(0);
 
-  const handleSubmit = async () => {
-    if (useEmail && !email.trim()) {
-      Alert.alert("Error", "Please enter your email address.");
-      return;
-    }
-
-    if (!useEmail && !phone.trim()) {
+  // Send OTP to phone number
+  const handleSendOTP = async () => {
+    if (!phone.trim()) {
       Alert.alert("Error", "Please enter your phone number.");
       return;
     }
 
-    setLoading(true);
+    // Basic phone number validation
+    const phoneRegex = /^[+]?[(]?[0-9]{1,4}[)]?[-\s.]?[(]?[0-9]{1,4}[)]?[-\s.]?[0-9]{1,9}$/;
+    if (!phoneRegex.test(phone.trim())) {
+      Alert.alert("Error", "Please enter a valid phone number.");
+      return;
+    }
+
+    setSendingOTP(true);
     try {
-      const payload = useEmail ? { email: email.trim() } : { phone: phone.trim() };
-      
       const response = await axios.post(
         "https://pillnow-database.onrender.com/api/users/forgot-password",
-        payload
+        { phone: phone.trim() }
       );
 
-      if (response.data && response.data.resetToken) {
-        // Store the reset token and navigate to reset password screen
-        setResetToken(response.data.resetToken);
+      if (response.data && response.data.success) {
+        setOtpSent(true);
+        setResendCooldown(60); // 60 second cooldown
+        
+        // Start countdown timer
+        const countdown = setInterval(() => {
+          setResendCooldown((prev) => {
+            if (prev <= 1) {
+              clearInterval(countdown);
+              return 0;
+            }
+            return prev - 1;
+          });
+        }, 1000);
+
         Alert.alert(
-          "Reset Code Generated",
-          "A password reset code has been generated. You will be redirected to reset your password.",
+          "OTP Sent",
+          `A verification code has been sent to ${phone.trim()}. Please check your messages and enter the code below.`
+        );
+      } else {
+        Alert.alert(
+          "Error",
+          response.data?.message || "Failed to send OTP. Please try again."
+        );
+      }
+    } catch (error: any) {
+      console.error("Send OTP error:", error);
+      const errorMessage =
+        error.response?.data?.message ||
+        error.message ||
+        "Failed to send OTP. Please check your phone number and try again.";
+      Alert.alert("Error", errorMessage);
+    } finally {
+      setSendingOTP(false);
+    }
+  };
+
+  // Verify OTP
+  const handleVerifyOTP = async () => {
+    if (!otp.trim()) {
+      Alert.alert("Error", "Please enter the verification code.");
+      return;
+    }
+
+    if (otp.trim().length < 4) {
+      Alert.alert("Error", "Please enter a valid verification code.");
+      return;
+    }
+
+    setVerifyingOTP(true);
+    try {
+      const response = await axios.post(
+        "https://pillnow-database.onrender.com/api/users/verify-otp",
+        {
+          phone: phone.trim(),
+          otp: otp.trim(),
+        }
+      );
+
+      if (response.data && response.data.success) {
+        setOtpVerified(true);
+        Alert.alert(
+          "Verification Successful",
+          "Your phone number has been verified. You can now reset your password.",
           [
             {
               text: "OK",
               onPress: () => {
+                // Navigate to reset password screen with phone number
                 router.push({
                   pathname: "/ResetPassword",
-                  params: { resetToken: response.data.resetToken },
+                  params: { 
+                    phone: phone.trim(),
+                    otpVerified: "true"
+                  },
                 });
               },
             },
@@ -66,20 +147,34 @@ const ForgotPassword = () => {
         );
       } else {
         Alert.alert(
-          "Success",
-          "If an account exists with this information, a password reset code has been sent."
+          "Invalid Code",
+          response.data?.message || "The verification code is incorrect. Please try again."
         );
+        setOtp("");
       }
     } catch (error: any) {
-      console.error("Forgot password error:", error);
+      console.error("Verify OTP error:", error);
       const errorMessage =
         error.response?.data?.message ||
         error.message ||
-        "Failed to process request. Please try again.";
+        "Failed to verify code. Please try again.";
       Alert.alert("Error", errorMessage);
+      setOtp("");
     } finally {
-      setLoading(false);
+      setVerifyingOTP(false);
     }
+  };
+
+  // Resend OTP
+  const handleResendOTP = async () => {
+    if (resendCooldown > 0) {
+      Alert.alert(
+        "Please Wait",
+        `Please wait ${resendCooldown} seconds before requesting a new code.`
+      );
+      return;
+    }
+    await handleSendOTP();
   };
 
   return (
@@ -112,104 +207,124 @@ const ForgotPassword = () => {
           Reset Your Password
         </Text>
         <Text style={[styles.subtitle, { color: theme.textSecondary }]}>
-          Enter your email or phone number to receive a password reset code.
+          {!otpSent
+            ? "Enter your phone number to receive a verification code."
+            : otpVerified
+            ? "Phone number verified. You can now reset your password."
+            : "Enter the verification code sent to your phone number."}
         </Text>
 
-        {/* Toggle between Email and Phone */}
-        <View style={styles.toggleContainer}>
-          <TouchableOpacity
-            style={[
-              styles.toggleButton,
-              useEmail && { backgroundColor: theme.primary },
-            ]}
-            onPress={() => setUseEmail(true)}
-          >
-            <Text
-              style={[
-                styles.toggleText,
-                { color: useEmail ? theme.card : theme.text },
-              ]}
-            >
-              Email
-            </Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[
-              styles.toggleButton,
-              !useEmail && { backgroundColor: theme.primary },
-            ]}
-            onPress={() => setUseEmail(false)}
-          >
-            <Text
-              style={[
-                styles.toggleText,
-                { color: !useEmail ? theme.card : theme.text },
-              ]}
-            >
-              Phone
-            </Text>
-          </TouchableOpacity>
+        {/* Phone Number Input */}
+        <View style={styles.inputContainer}>
+          <Ionicons
+            name="call-outline"
+            size={20}
+            color={theme.textSecondary}
+            style={styles.inputIcon}
+          />
+          <TextInput
+            style={[styles.input, { color: theme.text, borderColor: theme.border }]}
+            placeholder="Enter your phone number"
+            placeholderTextColor={theme.textSecondary}
+            value={phone}
+            onChangeText={(text) => {
+              setPhone(text);
+              // Reset OTP state if phone number changes
+              if (otpSent) {
+                setOtpSent(false);
+                setOtpVerified(false);
+                setOtp("");
+              }
+            }}
+            keyboardType="phone-pad"
+            autoCapitalize="none"
+            autoCorrect={false}
+            editable={!otpSent || otpVerified}
+          />
         </View>
 
-        {/* Email Input */}
-        {useEmail ? (
-          <View style={styles.inputContainer}>
-            <Ionicons
-              name="mail-outline"
-              size={20}
-              color={theme.textSecondary}
-              style={styles.inputIcon}
-            />
-            <TextInput
-              style={[styles.input, { color: theme.text, borderColor: theme.border }]}
-              placeholder="Enter your email"
-              placeholderTextColor={theme.textSecondary}
-              value={email}
-              onChangeText={setEmail}
-              keyboardType="email-address"
-              autoCapitalize="none"
-              autoCorrect={false}
-            />
-          </View>
-        ) : (
-          <View style={styles.inputContainer}>
-            <Ionicons
-              name="call-outline"
-              size={20}
-              color={theme.textSecondary}
-              style={styles.inputIcon}
-            />
-            <TextInput
-              style={[styles.input, { color: theme.text, borderColor: theme.border }]}
-              placeholder="Enter your phone number"
-              placeholderTextColor={theme.textSecondary}
-              value={phone}
-              onChangeText={setPhone}
-              keyboardType="phone-pad"
-              autoCapitalize="none"
-              autoCorrect={false}
-            />
-          </View>
+        {/* Send OTP Button */}
+        {!otpSent && (
+          <TouchableOpacity
+            style={[
+              styles.submitButton,
+              { backgroundColor: theme.primary },
+              (sendingOTP || !phone.trim()) && styles.submitButtonDisabled,
+            ]}
+            onPress={handleSendOTP}
+            disabled={sendingOTP || !phone.trim()}
+          >
+            {sendingOTP ? (
+              <ActivityIndicator size="small" color={theme.card} />
+            ) : (
+              <Text style={[styles.submitButtonText, { color: theme.card }]}>
+                Send Verification Code
+              </Text>
+            )}
+          </TouchableOpacity>
         )}
 
-        {/* Submit Button */}
-        <TouchableOpacity
-          style={[
-            styles.submitButton,
-            { backgroundColor: theme.primary },
-            loading && styles.submitButtonDisabled,
-          ]}
-          onPress={handleSubmit}
-          disabled={loading}
-        >
-          {loading ? (
-            <ActivityIndicator size="small" color={theme.card} />
-          ) : (
-            <Text style={[styles.submitButtonText, { color: theme.card }]}>
-              Send Reset Code
-            </Text>
-          )}
-        </TouchableOpacity>
+        {/* OTP Input (shown after OTP is sent) */}
+        {otpSent && !otpVerified && (
+          <>
+            <View style={styles.inputContainer}>
+              <Ionicons
+                name="keypad-outline"
+                size={20}
+                color={theme.textSecondary}
+                style={styles.inputIcon}
+              />
+              <TextInput
+                style={[styles.input, { color: theme.text, borderColor: theme.border }]}
+                placeholder="Enter verification code"
+                placeholderTextColor={theme.textSecondary}
+                value={otp}
+                onChangeText={setOtp}
+                keyboardType="number-pad"
+                autoCapitalize="none"
+                autoCorrect={false}
+                maxLength={6}
+              />
+            </View>
+
+            {/* Resend OTP */}
+            <TouchableOpacity
+              style={styles.resendButton}
+              onPress={handleResendOTP}
+              disabled={resendCooldown > 0}
+            >
+              <Text
+                style={[
+                  styles.resendText,
+                  { color: resendCooldown > 0 ? theme.textSecondary : theme.primary },
+                ]}
+              >
+                {resendCooldown > 0
+                  ? `Resend code in ${resendCooldown}s`
+                  : "Resend verification code"}
+              </Text>
+            </TouchableOpacity>
+
+            {/* Verify OTP Button */}
+            <TouchableOpacity
+              style={[
+                styles.submitButton,
+                { backgroundColor: theme.primary },
+                (verifyingOTP || !otp.trim()) && styles.submitButtonDisabled,
+              ]}
+              onPress={handleVerifyOTP}
+              disabled={verifyingOTP || !otp.trim()}
+            >
+              {verifyingOTP ? (
+                <ActivityIndicator size="small" color={theme.card} />
+              ) : (
+                <Text style={[styles.submitButtonText, { color: theme.card }]}>
+                  Verify Code
+                </Text>
+              )}
+            </TouchableOpacity>
+          </>
+        )}
 
         {/* Back to Login */}
         <TouchableOpacity
@@ -271,24 +386,6 @@ const styles = StyleSheet.create({
     marginBottom: 30,
     lineHeight: 20,
   },
-  toggleContainer: {
-    flexDirection: "row",
-    marginBottom: 20,
-    borderRadius: 10,
-    backgroundColor: "rgba(0,0,0,0.05)",
-    padding: 4,
-  },
-  toggleButton: {
-    flex: 1,
-    paddingVertical: 10,
-    paddingHorizontal: 20,
-    borderRadius: 8,
-    alignItems: "center",
-  },
-  toggleText: {
-    fontSize: 14,
-    fontWeight: "600",
-  },
   inputContainer: {
     flexDirection: "row",
     alignItems: "center",
@@ -319,6 +416,15 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: "bold",
   },
+  resendButton: {
+    alignItems: "center",
+    padding: 10,
+    marginBottom: 10,
+  },
+  resendText: {
+    fontSize: 14,
+    fontWeight: "600",
+  },
   backToLoginButton: {
     alignItems: "center",
     padding: 10,
@@ -330,5 +436,3 @@ const styles = StyleSheet.create({
 });
 
 export default ForgotPassword;
-
-
