@@ -1,10 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet, Animated, Alert } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { useTheme } from '../context/ThemeContext';
-import { lightTheme, darkTheme } from '../styles/theme';
-import iotService from '../services/IoTService';
-import { soundService } from '../services/soundService';
+import { useTheme } from '@/context/ThemeContext';
+import { lightTheme, darkTheme } from '@/styles/theme';
+import iotService from '@/services/IoTService';
+import { soundService } from '@/services/soundService';
 
 interface MedicationNotificationProps {
   medicineName: string;

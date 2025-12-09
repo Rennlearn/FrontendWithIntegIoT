@@ -1,5 +1,5 @@
 import { useState, useCallback } from 'react';
-import { notificationService, NotificationData, TestAlarmData } from '../services/notificationService';
+import { notificationService, NotificationData, TestAlarmData } from '@/services/notificationService';
 
 export const useNotifications = () => {
   const [notifications, setNotifications] = useState<NotificationData[]>([]);

@@ -1,10 +1,9 @@
 import React, { useEffect, useState } from 'react';
 import { View, Text, TouchableOpacity, Modal, StyleSheet, Animated, Alert } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { useTheme } from '../context/ThemeContext';
-import { lightTheme, darkTheme } from '../styles/theme';
-import BluetoothService from '../services/BluetoothService';
-import verificationService from '../services/verificationService';
+import { useTheme } from '@/context/ThemeContext';
+import { lightTheme, darkTheme } from '@/styles/theme';
+import BluetoothService from '@/services/BluetoothService';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 interface AlarmModalProps {
@@ -12,47 +11,13 @@ interface AlarmModalProps {
   container: number;
   time: string;
   onDismiss: () => void;
+  onStopAlarm?: (container: number) => Promise<void>;
 }
 
-const AlarmModal: React.FC<AlarmModalProps> = ({ visible, container, time, onDismiss }) => {
+const AlarmModal: React.FC<AlarmModalProps> = ({ visible, container, time, onDismiss, onStopAlarm }) => {
   const { isDarkMode } = useTheme();
   const theme = isDarkMode ? darkTheme : lightTheme;
   const [pulseAnim] = useState(new Animated.Value(1));
-
-  const triggerCameraCapture = async () => {
-    try {
-      const containerId = verificationService.getContainerId(container);
-      console.log(`[AlarmModal] Triggering camera capture for ${containerId} from modal...`);
-
-      // Best-effort pill count fetch to include expected count with capture
-      let pillCount = 0;
-      try {
-        const configResponse = await fetch(`http://10.56.196.91:5001/get-pill-config/${containerId}`, {
-          method: 'GET',
-          headers: { 'Content-Type': 'application/json' },
-          signal: AbortSignal.timeout(5000),
-        });
-        if (configResponse.ok) {
-          const configData = await configResponse.json();
-          pillCount = configData.pill_config?.count || 0;
-          console.log(`[AlarmModal] Pill count fetched for ${containerId}: ${pillCount}`);
-        } else {
-          console.warn(`[AlarmModal] Pill config fetch failed (${configResponse.status}) for ${containerId}`);
-        }
-      } catch (configError) {
-        console.warn('[AlarmModal] Pill config fetch error (continuing with count=0):', configError);
-      }
-
-      const captureResult = await verificationService.triggerCapture(containerId, { count: pillCount });
-      if (captureResult.ok) {
-        console.log(`[AlarmModal] ✅ Camera capture triggered for ${containerId} (count=${pillCount})`);
-      } else {
-        console.warn(`[AlarmModal] ⚠️ Camera capture failed for ${containerId}: ${captureResult.message}`);
-      }
-    } catch (cameraError) {
-      console.error('[AlarmModal] ❌ Error triggering camera capture from modal:', cameraError);
-    }
-  };
 
   useEffect(() => {
     if (visible) {
@@ -162,9 +127,13 @@ const AlarmModal: React.FC<AlarmModalProps> = ({ visible, container, time, onDis
         // Dismiss modal first
         onDismiss();
         
-        // Kick off camera capture as soon as user stops the alarm
-        triggerCameraCapture();
-
+        // Trigger camera capture / verification if provided (non-blocking)
+        if (onStopAlarm) {
+          onStopAlarm(container).catch((err) => {
+            console.warn('[AlarmModal] onStopAlarm callback failed:', err);
+          });
+        }
+        
         // Show success message that schedule is marked as Done
         setTimeout(() => {
           Alert.alert(
@@ -176,8 +145,6 @@ const AlarmModal: React.FC<AlarmModalProps> = ({ visible, container, time, onDis
       } else {
         onDismiss();
         Alert.alert('Not Connected', 'Bluetooth is not connected. Alarm will stop automatically after 60 seconds.');
-        // Even without Bluetooth, try to trigger camera capture via WiFi backend
-        triggerCameraCapture();
       }
     } catch (error) {
       console.error('Error stopping alarm:', error);

@@ -3,11 +3,11 @@ import { View, Text, TouchableOpacity, StyleSheet, Image, Alert, AppState, Scrol
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import NotificationManager from './components/NotificationManager';
-import { useNotifications } from './hooks/useNotifications';
-import { useTheme } from './context/ThemeContext';
-import { lightTheme, darkTheme } from './styles/theme';
-import BluetoothService from './services/BluetoothService';
+import NotificationManager from '@/components/NotificationManager';
+import { useNotifications } from '@/hooks/useNotifications';
+import { useTheme } from '@/context/ThemeContext';
+import { lightTheme, darkTheme } from '@/styles/theme';
+import BluetoothService from '@/services/BluetoothService';
 import { jwtDecode } from 'jwt-decode';
 
 const CaregiverDashboard: React.FC = () => {
@@ -72,8 +72,47 @@ const CaregiverDashboard: React.FC = () => {
       }
 
       const caregiverId = await getCurrentCaregiverId();
-      
-      // Check database for active connection
+
+      // --- New format: /api/caregivers/:id/elders (elders array with nested connections) ---
+      try {
+        const resp = await fetch(`https://pillnow-database.onrender.com/api/caregivers/${caregiverId}/elders`, {
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'Content-Type': 'application/json',
+          }
+        });
+
+        if (resp.ok) {
+          const data = await resp.json();
+          console.log('[CaregiverDashboard] Connected elders response (new format):', JSON.stringify(data, null, 2));
+
+          const eldersData = data?.data && Array.isArray(data.data) ? data.data : Array.isArray(data) ? data : [];
+          const found = eldersData.find((elderItem: any) => {
+            const itemId = elderItem.id || elderItem.userId || elderItem._id;
+            const matches = String(itemId) === String(elderId);
+            if (!matches) return false;
+            if (elderItem.connections && Array.isArray(elderItem.connections)) {
+              const activeConn = elderItem.connections.find((c: any) => {
+                const status = String(c.status || '').toLowerCase();
+                return status === 'active' || status === 'connected' || status === 'enabled';
+              });
+              return !!activeConn;
+            }
+            return false;
+          });
+
+          if (found) {
+            console.log('[CaregiverDashboard] ✅ Active connection found via new endpoint');
+            return true;
+          }
+        } else if (resp.status !== 404) {
+          console.log('[CaregiverDashboard] New endpoint returned', resp.status);
+        }
+      } catch (err) {
+        console.log('[CaregiverDashboard] New endpoint check failed:', err);
+      }
+
+      // --- Fallback: old endpoint /api/caregiver-connections ---
       const response = await fetch(`https://pillnow-database.onrender.com/api/caregiver-connections?caregiver=${caregiverId}&elder=${elderId}`, {
         headers: {
           'Authorization': `Bearer ${token}`,
@@ -90,19 +129,20 @@ const CaregiverDashboard: React.FC = () => {
         const activeConnection = connections.find((conn: any) => {
           const connElderId = conn.elder?.userId || conn.elder?._id || conn.elder?.id || conn.elder;
           const matches = String(connElderId) === String(elderId);
-          const isActive = conn.status === 'active' || conn.status === 'Active' || conn.status === 'ACTIVE';
+          const status = String(conn.status || '').toLowerCase();
+          const isActive = status === 'active' || status === 'connected' || status === 'enabled';
           return matches && isActive;
         });
 
         if (activeConnection) {
-          console.log('[CaregiverDashboard] ✅ Active connection found in database');
+          console.log('[CaregiverDashboard] ✅ Active connection found in database (fallback)');
           return true;
         } else {
-          console.log('[CaregiverDashboard] ❌ No active connection found in database');
+          console.log('[CaregiverDashboard] ❌ No active connection found in database (fallback)');
           return false;
         }
       } else if (response.status === 404) {
-        console.log('[CaregiverDashboard] ❌ Connection not found in database');
+        console.log('[CaregiverDashboard] ❌ Connection not found in database (fallback 404)');
         return false;
       } else {
         const errorText = await response.text();
@@ -124,6 +164,7 @@ const CaregiverDashboard: React.FC = () => {
         console.log('[CaregiverDashboard] No token found, cannot load connected elders');
         setConnectedElders([]);
         setHasActiveConnection(false);
+        setLoadingElders(false);
         return;
       }
 
@@ -169,10 +210,7 @@ const CaregiverDashboard: React.FC = () => {
         console.error('[CaregiverDashboard] All endpoints failed. Last response:', response?.status);
         // Don't clear the list - keep existing local elders
         console.log('[CaregiverDashboard] Keeping existing local elders list - all endpoints failed');
-        // Only clear hasActiveConnection if we can't verify
-        if (selectedElderId) {
-          // Keep existing connection status, don't reset to false
-        }
+        setLoadingElders(false);
         return;
       }
 
@@ -180,34 +218,58 @@ const CaregiverDashboard: React.FC = () => {
         const data = await response.json();
         console.log('[CaregiverDashboard] Connected elders from database (raw response):', JSON.stringify(data, null, 2));
         
-        // Extract elder information from connections
+        // Extract elder information (support new API format: elders with nested connections)
         let elders: any[] = [];
-        let connectionsArray: any[] = [];
+        let eldersData: any[] = [];
         
-        // Normalize response structure
-        if (Array.isArray(data)) {
-          connectionsArray = data;
-        } else if (data.connections && Array.isArray(data.connections)) {
-          connectionsArray = data.connections;
+        if (data.success && data.data && Array.isArray(data.data)) {
+          eldersData = data.data; // new format
+        } else if (Array.isArray(data)) {
+          eldersData = data;
         } else if (data.data && Array.isArray(data.data)) {
-          connectionsArray = data.data;
-        } else if (data.success && data.data) {
-          connectionsArray = Array.isArray(data.data) ? data.data : [data.data];
+          eldersData = data.data;
+        } else if (data.connections && Array.isArray(data.connections)) {
+          eldersData = data.connections; // old format
         }
         
-        console.log('[CaregiverDashboard] Extracted connections array:', connectionsArray.length, 'items');
+        console.log('[CaregiverDashboard] Extracted elders data array:', eldersData.length, 'items');
         
-        // Extract elder information from each connection
-        elders = connectionsArray.map((conn: any) => {
-          // Try different possible structures for elder data
-          const elder = conn.elder || conn.elderData || conn.elderInfo || {};
-          const elderId = elder.userId || elder._id || elder.id || conn.elderId || conn.elder;
+        elders = eldersData.map((item: any) => {
+          // New format: elder info at top level, connections nested
+          if (item.connections && Array.isArray(item.connections)) {
+            const elderId = item.id || item.userId || item._id;
+            const activeConn = item.connections.find((conn: any) => {
+              const status = String(conn.status || '').toLowerCase();
+              return status === 'active' || status === 'connected' || status === 'enabled';
+            });
+            if (activeConn) {
+              console.log('[CaregiverDashboard] Processing elder (new format):', {
+                elderId,
+                elderName: item.name,
+                connectionId: activeConn.connectionId,
+                status: activeConn.status
+              });
+              return {
+                userId: String(elderId || ''),
+                name: item.name || 'Unknown',
+                email: item.email || '',
+                contactNumber: item.phone || item.contactNumber || item.phoneNumber || '',
+                role: item.role || 2,
+                profileImage: item.profileImage
+              };
+            }
+            return null;
+          }
           
-          console.log('[CaregiverDashboard] Processing connection:', {
-            connectionId: conn.connectionId || conn._id || conn.id,
-            elderId: elderId,
+          // Old format: connection object with nested elder
+          const elder = item.elder || item.elderData || item.elderInfo || {};
+          const elderId = elder.userId || elder._id || elder.id || item.elderId || item.elder;
+          
+          console.log('[CaregiverDashboard] Processing connection (old format):', {
+            connectionId: item.connectionId || item._id || item.id,
+            elderId,
             elderName: elder.name,
-            status: conn.status
+            status: item.status
           });
           
           return {
@@ -218,22 +280,27 @@ const CaregiverDashboard: React.FC = () => {
             role: elder.role || 2,
             profileImage: elder.profileImage
           };
-        }).filter((elder: any) => elder.userId); // Filter out any with missing IDs
+        }).filter((elder: any) => elder && elder.userId);
 
-        // Filter only active connections
+        // Filter only active connections (for old format; new format already filtered)
         const activeElders = elders.filter((elder: any) => {
-          const conn = connectionsArray.find((c: any) => {
-            const connElderId = (c.elder || c.elderData || c.elderInfo || {}).userId || 
-                                (c.elder || c.elderData || c.elderInfo || {})._id || 
-                                (c.elder || c.elderData || c.elderInfo || {}).id || 
-                                c.elderId || c.elder;
-            return String(connElderId) === String(elder.userId);
+          const item = eldersData.find((i: any) => {
+            const idCandidate = i.id || i.userId || i._id || (i.elder || {}).userId || (i.elder || {})._id || (i.elder || {}).id || i.elderId || i.elder;
+            return String(idCandidate) === String(elder.userId);
           });
-          const isActive = conn && (conn.status === 'active' || conn.status === 'Active' || conn.status === 'ACTIVE');
-          if (!isActive) {
-            console.log('[CaregiverDashboard] Filtered out inactive connection for elder:', elder.name, 'Status:', conn?.status);
+
+          if (item && item.connections) {
+            // new format already active
+            return true;
+          } else if (item) {
+            const status = String(item.status || '').toLowerCase();
+            const isActive = status === 'active' || status === 'connected' || status === 'enabled';
+            if (!isActive) {
+              console.log('[CaregiverDashboard] Filtered out inactive connection for elder:', elder.name, 'Status:', item.status);
+            }
+            return isActive;
           }
-          return isActive;
+          return false;
         });
 
         console.log('[CaregiverDashboard] ✅ Loaded', activeElders.length, 'active connected elders from database');

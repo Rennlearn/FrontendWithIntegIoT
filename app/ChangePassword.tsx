@@ -13,8 +13,8 @@ import { useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import axios from "axios";
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { useTheme } from "./context/ThemeContext";
-import { lightTheme, darkTheme } from "./styles/theme";
+import { useTheme } from "@/context/ThemeContext";
+import { lightTheme, darkTheme } from "@/styles/theme";
 
 const ChangePassword = () => {
   const router = useRouter();

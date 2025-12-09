@@ -1,8 +1,8 @@
 import React, { useEffect } from 'react';
 import { View, Text, StyleSheet, Animated, Easing } from 'react-native';
 import { useRouter } from 'expo-router';
-import { useTheme } from './context/ThemeContext';
-import { lightTheme, darkTheme } from './styles/theme';
+import { useTheme } from '@/context/ThemeContext';
+import { lightTheme, darkTheme } from '@/styles/theme';
 
 const FlashScreen = () => {
   const router = useRouter();

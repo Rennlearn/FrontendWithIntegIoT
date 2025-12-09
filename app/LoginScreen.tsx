@@ -5,8 +5,8 @@ import {
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import axios from "axios";
 import { useRouter, useFocusEffect } from "expo-router";
-import { useTheme } from "./context/ThemeContext";
-import { lightTheme, darkTheme } from "./styles/theme";
+import { useTheme } from "@/context/ThemeContext";
+import { lightTheme, darkTheme } from "@/styles/theme";
 import * as SMS from "expo-sms";
 
 const LoginScreen = () => {

@@ -3,10 +3,10 @@ import { View, Text, TouchableOpacity, Image, StyleSheet, Modal, Alert, AppState
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import MedicationNotification from './components/MedicationNotification';
-import { useTheme } from './context/ThemeContext';
-import { lightTheme, darkTheme } from './styles/theme';
-import BluetoothService from './services/BluetoothService';
+import MedicationNotification from '@/components/MedicationNotification';
+import { useTheme } from '@/context/ThemeContext';
+import { lightTheme, darkTheme } from '@/styles/theme';
+import BluetoothService from '@/services/BluetoothService';
 
 const ElderDashboard = () => {
   const router = useRouter();

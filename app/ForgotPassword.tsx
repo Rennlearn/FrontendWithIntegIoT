@@ -12,8 +12,8 @@ import {
 import { useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import axios from "axios";
-import { useTheme } from "./context/ThemeContext";
-import { lightTheme, darkTheme } from "./styles/theme";
+import { useTheme } from "@/context/ThemeContext";
+import { lightTheme, darkTheme } from "@/styles/theme";
 
 /**
  * ForgotPassword Screen

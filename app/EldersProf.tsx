@@ -1,7 +1,7 @@
 import React, { useEffect } from 'react';
 import { BackHandler } from 'react-native';
 import { useRouter } from 'expo-router';
-import ElderProfile from './components/ElderProfile';
+import ElderProfile from '@/components/ElderProfile';
 
 export default function EldersProf() {
   const router = useRouter();

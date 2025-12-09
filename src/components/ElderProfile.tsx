@@ -4,8 +4,8 @@ import {
   Alert, ActivityIndicator, FlatList 
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { useTheme } from '../context/ThemeContext';
-import { lightTheme, darkTheme } from '../styles/theme';
+import { useTheme } from '@/context/ThemeContext';
+import { lightTheme, darkTheme } from '@/styles/theme';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { jwtDecode } from 'jwt-decode';
 
@@ -139,58 +139,100 @@ export default function ElderProfile({ onElderSelected, onBack }: ElderProfilePr
         
         // Extract elder information from connections
         let elders: ElderUser[] = [];
-        let connectionsArray: any[] = [];
+        let eldersData: any[] = [];
         
         // Normalize response structure
-        if (Array.isArray(data)) {
-          connectionsArray = data;
-        } else if (data.connections && Array.isArray(data.connections)) {
-          connectionsArray = data.connections;
+        if (data.success && data.data && Array.isArray(data.data)) {
+          // New API format: data array contains elders with nested connections
+          eldersData = data.data;
+        } else if (Array.isArray(data)) {
+          // Response is directly an array
+          eldersData = data;
         } else if (data.data && Array.isArray(data.data)) {
-          connectionsArray = data.data;
-        } else if (data.success && data.data) {
-          connectionsArray = Array.isArray(data.data) ? data.data : [data.data];
+          eldersData = data.data;
+        } else if (data.connections && Array.isArray(data.connections)) {
+          // Old format: connections array
+          eldersData = data.connections;
         }
         
-        console.log('Extracted connections array:', connectionsArray.length, 'items');
+        console.log('Extracted elders data array:', eldersData.length, 'items');
         
-        // Extract elder information from each connection
-        elders = connectionsArray.map((conn: any) => {
-          // Try different possible structures for elder data
-          const elder = conn.elder || conn.elderData || conn.elderInfo || {};
-          const elderId = elder.userId || elder._id || elder.id || conn.elderId || conn.elder;
-          
-          console.log('Processing connection:', {
-            connectionId: conn.connectionId || conn._id || conn.id,
-            elderId: elderId,
-            elderName: elder.name,
-            status: conn.status
-          });
-          
-          return {
-            userId: String(elderId || ''),
-            name: elder.name || 'Unknown',
-            email: elder.email || '',
-            contactNumber: elder.contactNumber || elder.phone || elder.phoneNumber || '',
-            role: elder.role || 2,
-            profileImage: elder.profileImage
-          };
-        }).filter((elder: ElderUser) => elder.userId); // Filter out any with missing IDs
-
-        // Filter only active connections
-        const activeElders = elders.filter((elder: ElderUser) => {
-          const conn = connectionsArray.find((c: any) => {
-            const connElderId = (c.elder || c.elderData || c.elderInfo || {}).userId || 
-                                (c.elder || c.elderData || c.elderInfo || {})._id || 
-                                (c.elder || c.elderData || c.elderInfo || {}).id || 
-                                c.elderId || c.elder;
-            return String(connElderId) === String(elder.userId);
-          });
-          const isActive = conn && (conn.status === 'active' || conn.status === 'Active' || conn.status === 'ACTIVE');
-          if (!isActive) {
-            console.log('Filtered out inactive connection for elder:', elder.name, 'Status:', conn?.status);
+        // Process each elder (new format has elder info at top level with nested connections)
+        elders = eldersData.map((elderItem: any) => {
+          // Check if this is the new format (elder with nested connections array)
+          if (elderItem.connections && Array.isArray(elderItem.connections)) {
+            // New format: elder info at top level, connections nested
+            const elderId = elderItem.id || elderItem.userId || elderItem._id;
+            const activeConnection = elderItem.connections.find((conn: any) => 
+              conn.status === 'active' || conn.status === 'Active' || conn.status === 'ACTIVE'
+            );
+            
+            if (activeConnection) {
+              console.log('Processing elder (new format):', {
+                elderId: elderId,
+                elderName: elderItem.name,
+                connectionId: activeConnection.connectionId,
+                status: activeConnection.status
+              });
+              
+              return {
+                userId: String(elderId || ''),
+                name: elderItem.name || 'Unknown',
+                email: elderItem.email || '',
+                contactNumber: elderItem.phone || elderItem.contactNumber || elderItem.phoneNumber || '',
+                role: elderItem.role || 2,
+                profileImage: elderItem.profileImage
+              };
+            } else {
+              console.log('Elder has no active connection:', elderItem.name);
+              return null;
+            }
+          } else {
+            // Old format: connection object with nested elder
+            const elder = elderItem.elder || elderItem.elderData || elderItem.elderInfo || {};
+            const elderId = elder.userId || elder._id || elder.id || elderItem.elderId || elderItem.elder;
+            
+            console.log('Processing connection (old format):', {
+              connectionId: elderItem.connectionId || elderItem._id || elderItem.id,
+              elderId: elderId,
+              elderName: elder.name,
+              status: elderItem.status
+            });
+            
+            return {
+              userId: String(elderId || ''),
+              name: elder.name || 'Unknown',
+              email: elder.email || '',
+              contactNumber: elder.contactNumber || elder.phone || elder.phoneNumber || '',
+              role: elder.role || 2,
+              profileImage: elder.profileImage
+            };
           }
-          return isActive;
+        }).filter((elder: ElderUser | null): elder is ElderUser => elder !== null && !!elder.userId);
+
+        // Filter only active connections (for old format)
+        const activeElders = elders.filter((elder: ElderUser) => {
+          // For new format, we already filtered above
+          // For old format, check status
+          const elderItem = eldersData.find((item: any) => {
+            const itemElderId = item.id || item.userId || item._id || 
+                               (item.elder || {}).userId || (item.elder || {})._id || (item.elder || {}).id ||
+                               item.elderId || item.elder;
+            return String(itemElderId) === String(elder.userId);
+          });
+          
+          if (elderItem && elderItem.connections) {
+            // New format - already filtered
+            return true;
+          } else if (elderItem) {
+            // Old format - check status
+            const isActive = elderItem.status === 'active' || elderItem.status === 'Active' || elderItem.status === 'ACTIVE';
+            if (!isActive) {
+              console.log('Filtered out inactive connection for elder:', elder.name, 'Status:', elderItem.status);
+            }
+            return isActive;
+          }
+          return false;
         });
 
         console.log('✅ Loaded', activeElders.length, 'active connected elders from database');
@@ -553,10 +595,21 @@ export default function ElderProfile({ onElderSelected, onBack }: ElderProfilePr
         return;
       }
 
+      // Validate that we have the elder's ID
+      const elderId = elder.userId || elder._id || elder.id;
+      if (!elderId) {
+        console.error('Elder found but missing ID:', elder);
+        Alert.alert('Error', 'Elder found but missing user ID. Please try again.');
+        return;
+      }
+
       // Check if already connected in database
       try {
         const caregiverId = await getCurrentCaregiverId();
-        const checkResponse = await fetch(`https://pillnow-database.onrender.com/api/caregiver-connections?caregiver=${caregiverId}&elder=${elderId}`, {
+        console.log(`Checking for existing connection: caregiver=${caregiverId}, elder=${elderId}`);
+        
+        // Try the new endpoint format first
+        const checkResponse = await fetch(`https://pillnow-database.onrender.com/api/caregivers/${caregiverId}/elders`, {
           headers: {
             'Authorization': `Bearer ${token}`,
             'Content-Type': 'application/json',
@@ -565,29 +618,52 @@ export default function ElderProfile({ onElderSelected, onBack }: ElderProfilePr
 
         if (checkResponse.ok) {
           const checkData = await checkResponse.json();
-          const existingConnection = Array.isArray(checkData) 
-            ? checkData.find((c: any) => (c.elder === elderId || (c.elder?.userId || c.elder?._id || c.elder?.id) === elderId))
-            : (checkData.connections || checkData.data || []).find((c: any) => (c.elder === elderId || (c.elder?.userId || c.elder?._id || c.elder?.id) === elderId));
+          console.log('Connection check response:', JSON.stringify(checkData, null, 2));
           
-          if (existingConnection) {
-            console.log('Elder already connected in database:', elder!.name);
-            Alert.alert('Already Connected', `${elder!.name} is already connected in the database.`);
+          // Handle new format: data array with elders containing nested connections
+          let eldersData: any[] = [];
+          if (checkData.success && checkData.data && Array.isArray(checkData.data)) {
+            eldersData = checkData.data;
+          } else if (Array.isArray(checkData)) {
+            eldersData = checkData;
+          } else if (checkData.data && Array.isArray(checkData.data)) {
+            eldersData = checkData.data;
+          }
+          
+          // Check if this elder is in the list with an active connection
+          const existingElder = eldersData.find((elderItem: any) => {
+            const itemElderId = elderItem.id || elderItem.userId || elderItem._id;
+            const matches = String(itemElderId) === String(elderId);
+            
+            if (matches && elderItem.connections && Array.isArray(elderItem.connections)) {
+              // Check if there's an active connection
+              const activeConn = elderItem.connections.find((conn: any) => 
+                conn.status === 'active' || conn.status === 'Active' || conn.status === 'ACTIVE'
+              );
+              return !!activeConn;
+            }
+            return false;
+          });
+          
+          if (existingElder) {
+            console.log('Elder already connected in database:', elder.name);
+            Alert.alert('Already Connected', `${elder.name} is already connected in the database.`);
             // Reload to show updated list
             await loadConnectedElders();
+            setIsConnecting(false);
             return;
           }
+        } else if (checkResponse.status === 404) {
+          console.log('No existing connection found (404) - will create new connection');
+          // 404 means no connection exists, continue to create
+        } else {
+          console.log(`Connection check returned ${checkResponse.status} - will try to create anyway`);
+          // Continue to create connection
         }
       } catch (checkError) {
         console.error('Error checking existing connection:', checkError);
-        // Continue anyway - will be caught by POST request
-      }
-
-      // Validate that we have the elder's ID
-      const elderId = elder!.userId;
-      if (!elderId) {
-        console.error('Elder found but missing ID:', elder);
-        Alert.alert('Error', 'Elder found but missing user ID. Please try again.');
-        return;
+        // Continue anyway - will try to create connection
+        console.log('Continuing to create connection despite check error');
       }
 
       // Get caregiver ID from token
@@ -682,21 +758,86 @@ export default function ElderProfile({ onElderSelected, onBack }: ElderProfilePr
         } else {
           const errorText = await connectionResponse.text();
           console.error('❌ Failed to create CaregiverConnection in database:', connectionResponse.status, errorText);
-          Alert.alert(
-            'Connection Failed',
-            `Failed to create connection in database: ${errorText}\n\nPlease try again.`,
-            [{ text: 'OK' }]
-          );
-          return; // Don't continue if database connection fails
+          console.error('Response details:', {
+            status: connectionResponse.status,
+            statusText: connectionResponse.statusText,
+            errorText: errorText
+          });
+          
+          // Try fallback endpoint if main endpoint fails
+          if (connectionResponse.status !== 409) { // Don't retry if already exists
+            console.log('🔄 Trying fallback endpoint to create connection...');
+            try {
+              const fallbackResponse = await fetch('https://pillnow-database.onrender.com/api/caregiver-connections', {
+                method: 'POST',
+                headers: {
+                  'Authorization': `Bearer ${token}`,
+                  'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                  caregiver: parseInt(caregiverId) || caregiverId,
+                  elder: parseInt(elderId) || elderId,
+                  status: 'active',
+                  permissions: {
+                    viewAdherence: true
+                  }
+                })
+              });
+              
+              if (fallbackResponse.ok || fallbackResponse.status === 409) {
+                console.log('✅ Connection created via fallback endpoint');
+                // Add to local list
+                const elderToAdd: ElderUser = {
+                  userId: elderId,
+                  name: elder!.name,
+                  email: elder!.email || '',
+                  contactNumber: elder!.contactNumber || elder!.phone || '',
+                  role: 2,
+                  profileImage: elder!.profileImage
+                };
+                const existingIndex = connectedElders.findIndex(e => String(e.userId) === String(elderId));
+                if (existingIndex === -1) {
+                  setConnectedElders([...connectedElders, elderToAdd]);
+                  console.log('✅ Elder added to local list via fallback');
+                }
+              } else {
+                const fallbackError = await fallbackResponse.text();
+                console.error('❌ Fallback endpoint also failed:', fallbackResponse.status, fallbackError);
+                Alert.alert(
+                  'Connection Failed',
+                  `Failed to create connection: ${connectionResponse.status}\n\nError: ${errorText.substring(0, 100)}\n\nPlease try again or contact support.`,
+                  [{ text: 'OK' }]
+                );
+                setIsConnecting(false);
+                return;
+              }
+            } catch (fallbackErr) {
+              console.error('❌ Fallback endpoint error:', fallbackErr);
+              Alert.alert(
+                'Connection Failed',
+                `Failed to create connection: ${errorText.substring(0, 100)}\n\nPlease try again.`,
+                [{ text: 'OK' }]
+              );
+              setIsConnecting(false);
+              return;
+            }
+          } else {
+            // 409 means already exists, treat as success
+            console.log('ℹ️ Connection already exists (409)');
+          }
         }
       } catch (connectionError) {
-        console.error('❌ Error creating CaregiverConnection in database:', connectionError);
+        console.error('❌ Exception creating CaregiverConnection:', connectionError);
+        if (connectionError instanceof Error) {
+          console.error('Error details:', connectionError.message, connectionError.stack);
+        }
         Alert.alert(
           'Connection Error',
-          'Failed to create connection in database. Please check your internet connection and try again.',
+          `Failed to create connection: ${connectionError instanceof Error ? connectionError.message : 'Unknown error'}\n\nPlease check your internet connection and try again.`,
           [{ text: 'OK' }]
         );
-        return; // Don't continue if database connection fails
+        setIsConnecting(false);
+        return;
       }
 
       // Reload connected elders from database (this will sync with server)

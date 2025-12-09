@@ -5,13 +5,13 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import { useNavigation } from '@react-navigation/native';
 import { useRouter } from 'expo-router';
-import { useTheme } from './context/ThemeContext';
-import { lightTheme, darkTheme } from './styles/theme';
+import { useTheme } from '@/context/ThemeContext';
+import { lightTheme, darkTheme } from '@/styles/theme';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { jwtDecode } from 'jwt-decode';
-import BluetoothService from './services/BluetoothService';
-import verificationService, { VerificationResult } from './services/verificationService';
-import AlarmModal from './components/AlarmModal';
+import BluetoothService from '@/services/BluetoothService';
+import verificationService, { VerificationResult } from '@/services/verificationService';
+import AlarmModal from '@/components/AlarmModal';
 
 // Interface for decoded JWT token
 interface DecodedToken {
@@ -37,6 +37,7 @@ const MonitorManageScreen = () => {
   const [schedulesExpanded, setSchedulesExpanded] = useState(true); // Dropdown state
   const [lastArduinoSync, setLastArduinoSync] = useState<number>(0); // Track last sync time
   const lastAlarmShownRef = useRef<number>(0); // prevent rapid successive alarm popups
+  const lastAlarmStoppedRef = useRef<{ container: number; timestamp: number }>({ container: 0, timestamp: 0 }); // dedupe post-alarm captures
   const missedMarkedRef = useRef<Set<string>>(new Set()); // avoid spamming missed updates
   
   // Loading states for buttons
@@ -142,121 +143,344 @@ const MonitorManageScreen = () => {
     }
   }, []);
 
-  // Check if caregiver has active connection to selected elder
-  // Requirements:
-  // 1. Valid JWT token (caregiver's own token)
-  // 2. Active CaregiverConnection record with status: 'active'
-  // 3. For adherence: permissions.viewAdherence: true
-  const checkCaregiverConnection = useCallback(async (elderId: string) => {
+  // Get current caregiver ID from JWT token
+  const getCurrentCaregiverId = useCallback(async (): Promise<string | null> => {
     try {
       const token = await AsyncStorage.getItem('token');
       if (!token) {
+        return null;
+      }
+      const decodedToken = jwtDecode<DecodedToken>(token.trim());
+      const caregiverId = decodedToken.userId ?? decodedToken.id;
+      return caregiverId || null;
+    } catch (error) {
+      console.error('[MonitorManageScreen] Error getting caregiver ID:', error);
+      return null;
+    }
+  }, []);
+
+  // Create caregiver-elder connection if it doesn't exist
+  const createCaregiverConnection = useCallback(async (elderId: string): Promise<boolean> => {
+    try {
+      console.log(`[MonitorManageScreen] 🔧 Creating connection for elder ID: ${elderId}`);
+      
+      const token = await AsyncStorage.getItem('token');
+      if (!token) {
         console.log('[MonitorManageScreen] ⚠️ No token found');
-        setHasActiveConnection(false);
-        return;
+        return false;
       }
 
-      const headers: HeadersInit = {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${token.trim()}`
-      };
+      const caregiverId = await getCurrentCaregiverId();
+      if (!caregiverId) {
+        console.log('[MonitorManageScreen] ⚠️ Could not get caregiver ID');
+        return false;
+      }
 
-      // Use the adherence endpoint to verify connection
-      // This endpoint requires:
-      // - Valid caregiver JWT token
-      // - Active caregiver-elder connection (status: 'active')
-      // - permissions.viewAdherence: true
-      const response = await fetch(`https://pillnow-database.onrender.com/api/monitor/elder-device/${elderId}`, {
-        headers
+      // Try the new endpoint first
+      const response = await fetch('https://pillnow-database.onrender.com/api/caregivers/connect', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token.trim()}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          caregiverId: parseInt(caregiverId) || caregiverId,
+          elderId: parseInt(elderId) || elderId,
+          relationship: 'family',
+          permissions: {
+            viewMedications: true,
+            viewAdherence: true,
+            receiveAlerts: true
+          }
+        })
       });
-
-      if (response.status === 401) {
-        console.log('[MonitorManageScreen] ⚠️ Authentication failed - invalid or expired token');
-        setHasActiveConnection(false);
-        return;
-      }
-
-      if (response.status === 403) {
-        console.log('[MonitorManageScreen] ⚠️ Permission denied - no active connection or missing viewAdherence permission');
-        setHasActiveConnection(false);
-        return;
-      }
-
-      if (response.status === 404) {
-        // 404 could mean no device OR no caregiver-elder connection
-        // For testing, we'll check if caregiver-elder connection exists separately
-        console.log('[MonitorManageScreen] ⚠️ 404 response - checking caregiver-elder connection separately');
-        
-        // Check if caregiver-elder connection exists (ignore device requirement)
-        try {
-          const tokenForId = await AsyncStorage.getItem('token');
-          if (!tokenForId) {
-            setHasActiveConnection(false);
-            return;
-          }
-          const decodedToken = jwtDecode<{ userId?: string; id?: string }>(tokenForId.trim());
-          const caregiverId = decodedToken.userId || decodedToken.id;
-          if (!caregiverId) {
-            setHasActiveConnection(false);
-            return;
-          }
-          const connectionCheck = await fetch(`https://pillnow-database.onrender.com/api/caregiver-connections?caregiver=${caregiverId}&elder=${elderId}`, {
-            headers
-          });
-          
-          if (connectionCheck.ok) {
-            const connData = await connectionCheck.json();
-            const connections = Array.isArray(connData) ? connData : (connData.connections || connData.data || []);
-            const activeConn = connections.find((c: any) => {
-              const connElderId = c.elder?.userId || c.elder?._id || c.elder?.id || c.elder;
-              return String(connElderId) === String(elderId) && 
-                     (c.status === 'active' || c.status === 'Active' || c.status === 'ACTIVE');
-            });
-            
-            if (activeConn) {
-              console.log('[MonitorManageScreen] ✅ Caregiver-elder connection exists (device connection ignored for testing)');
-              setHasActiveConnection(true);
-              return;
-            }
-          }
-        } catch (checkError) {
-          console.error('[MonitorManageScreen] Error checking caregiver-elder connection:', checkError);
-        }
-        
-        console.log('[MonitorManageScreen] ⚠️ No active caregiver-elder connection found');
-        setHasActiveConnection(false);
-        return;
-      }
 
       if (response.ok) {
         const data = await response.json();
-        if (data.success && data.data) {
-          // Verify connection exists and is active
-          const connection = data.data.connection || data.data;
-          const isActive = connection?.status === 'active' || connection?.status === 'Active';
-          const hasPermission = connection?.permissions?.viewAdherence !== false; // Default to true if not specified
-          
-          if (isActive && hasPermission) {
-            console.log('[MonitorManageScreen] ✅ Active connection verified with viewAdherence permission');
-            setHasActiveConnection(true);
-          } else {
-            console.log('[MonitorManageScreen] ⚠️ Connection exists but not active or missing permission');
-            setHasActiveConnection(false);
-          }
+        console.log('[MonitorManageScreen] ✅ Connection created successfully:', data);
+        
+        // Wait a moment for database to update, then verify
+        await new Promise(resolve => setTimeout(resolve, 500));
+        
+        // Verify the connection was created by checking it
+        const verified = await checkCaregiverConnection(elderId, false, false);
+        if (verified) {
+          console.log('[MonitorManageScreen] ✅ Connection verified after creation');
         } else {
-          console.log('[MonitorManageScreen] ⚠️ Connection check returned false');
-          setHasActiveConnection(false);
+          console.log('[MonitorManageScreen] ⚠️ Connection created but not yet visible (may need refresh)');
         }
+        
+        return true;
       } else {
         const errorText = await response.text();
-        console.log(`[MonitorManageScreen] ⚠️ Connection check failed (${response.status}): ${errorText}`);
-        setHasActiveConnection(false);
+        console.error(`[MonitorManageScreen] Failed to create connection (${response.status}): ${errorText}`);
+        
+        // Try fallback endpoint
+        const fallbackResponse = await fetch('https://pillnow-database.onrender.com/api/caregiver-connections', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${token.trim()}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            caregiver: parseInt(caregiverId) || caregiverId,
+            elder: parseInt(elderId) || elderId,
+            status: 'active',
+            permissions: {
+              viewAdherence: true
+            }
+          })
+        });
+
+        if (fallbackResponse.ok) {
+          console.log('[MonitorManageScreen] ✅ Connection created via fallback endpoint');
+          return true;
+        } else {
+          const fallbackError = await fallbackResponse.text();
+          console.error(`[MonitorManageScreen] Fallback also failed (${fallbackResponse.status}): ${fallbackError}`);
+          return false;
+        }
       }
     } catch (error) {
-      console.error('[MonitorManageScreen] Error checking caregiver connection:', error);
-      setHasActiveConnection(false);
+      console.error('[MonitorManageScreen] Error creating connection:', error);
+      return false;
     }
-  }, []);
+  }, [getCurrentCaregiverId]);
+
+  // Check if caregiver has active connection to selected elder
+  // Uses the same reliable method as CaregiverDashboard
+  // Returns boolean and optionally shows alert
+  const checkCaregiverConnection = useCallback(async (elderId: string, showAlert: boolean = false, autoCreate: boolean = false): Promise<boolean> => {
+    try {
+      console.log(`[MonitorManageScreen] 🔍 Checking connection for elder ID: ${elderId}`);
+      
+      const token = await AsyncStorage.getItem('token');
+      if (!token) {
+        console.log('[MonitorManageScreen] ⚠️ No token found');
+        if (showAlert) Alert.alert('Error', 'No authentication token. Please log in again.');
+        setHasActiveConnection(false);
+        return false;
+      }
+
+      const caregiverId = await getCurrentCaregiverId();
+      if (!caregiverId) {
+        console.log('[MonitorManageScreen] ⚠️ Could not get caregiver ID from token');
+        if (showAlert) Alert.alert('Error', 'Could not identify caregiver. Please log in again.');
+        setHasActiveConnection(false);
+        return false;
+      }
+
+      console.log(`[MonitorManageScreen] Caregiver ID: ${caregiverId}, Elder ID: ${elderId}`);
+
+      // Check database for active connection
+      const url = `https://pillnow-database.onrender.com/api/caregiver-connections?caregiver=${caregiverId}&elder=${elderId}`;
+      console.log(`[MonitorManageScreen] Checking URL: ${url}`);
+      
+      const response = await fetch(url, {
+        headers: {
+          'Authorization': `Bearer ${token.trim()}`,
+          'Content-Type': 'application/json',
+        }
+      });
+
+      console.log(`[MonitorManageScreen] Response status: ${response.status}`);
+
+      if (response.ok) {
+        const data = await response.json();
+        console.log(`[MonitorManageScreen] 📦 Raw response data:`, JSON.stringify(data, null, 2));
+        
+        // Handle different response formats
+        let connections: any[] = [];
+        
+        // Check for new API format (elder with nested connections)
+        if (data.success && data.data && Array.isArray(data.data)) {
+          // New format: array of elders, each with nested connections
+          const eldersWithConnections = data.data;
+          // Flatten: extract connections from each elder
+          eldersWithConnections.forEach((elderItem: any) => {
+            if (elderItem.connections && Array.isArray(elderItem.connections)) {
+              // Add elder info to each connection for easier processing
+              elderItem.connections.forEach((conn: any) => {
+                connections.push({
+                  ...conn,
+                  elder: {
+                    id: elderItem.id,
+                    userId: elderItem.id,
+                    _id: elderItem.id,
+                    name: elderItem.name,
+                    email: elderItem.email,
+                    phone: elderItem.phone,
+                    contactNumber: elderItem.phone
+                  }
+                });
+              });
+            }
+          });
+        } else if (Array.isArray(data)) {
+          // Response is directly an array
+          connections = data;
+        } else if (data.connections && Array.isArray(data.connections)) {
+          // Response has connections array
+          connections = data.connections;
+        } else if (data.data) {
+          // Response has data field
+          if (Array.isArray(data.data)) {
+            connections = data.data;
+          } else {
+            // Single connection object
+            connections = [data.data];
+          }
+        } else if (data.connection) {
+          // Single connection object with connection field
+          connections = [data.connection];
+        } else if (data.elder || data.caregiver || data.status) {
+          // Response is a single connection object
+          connections = [data];
+        }
+        
+        console.log(`[MonitorManageScreen] 📊 Extracted ${connections.length} connection(s) from response`);
+        
+        // Check each connection
+        const activeConnection = connections.find((conn: any) => {
+          // Try multiple ways to extract elder ID
+          let connElderId: string | number | undefined;
+          
+          // Method 1: Elder as object
+          if (conn.elder) {
+            if (typeof conn.elder === 'object') {
+              connElderId = conn.elder.userId || conn.elder._id || conn.elder.id;
+            } else {
+              // Elder is just an ID
+              connElderId = conn.elder;
+            }
+          }
+          
+          // Method 2: Direct elderId field
+          if (!connElderId) {
+            connElderId = conn.elderId || conn.elder_id;
+          }
+          
+          // Method 3: Check if elder field is just a number/string
+          if (!connElderId && (conn.elder === parseInt(elderId) || conn.elder === elderId)) {
+            connElderId = conn.elder;
+          }
+          
+          // Normalize IDs for comparison (handle both string and number)
+          const elderIdNum = parseInt(elderId);
+          const elderIdStr = String(elderId);
+          const connElderIdNum = connElderId ? parseInt(String(connElderId)) : null;
+          const connElderIdStr = connElderId ? String(connElderId) : null;
+          
+          const matches = 
+            (connElderIdNum !== null && connElderIdNum === elderIdNum) ||
+            (connElderIdStr !== null && connElderIdStr === elderIdStr) ||
+            (connElderIdNum !== null && String(connElderIdNum) === elderIdStr) ||
+            (connElderIdStr !== null && parseInt(connElderIdStr) === elderIdNum);
+          
+          // Check status (case-insensitive, also check for variations)
+          const status = String(conn.status || '').toLowerCase().trim();
+          const isActive = status === 'active' || status === 'connected' || status === 'enabled';
+          
+          // If status is missing but connection exists, consider it active (some APIs don't return status)
+          const hasStatusField = conn.hasOwnProperty('status');
+          const shouldBeActive = isActive || (!hasStatusField && connElderId !== undefined);
+          
+          console.log(`[MonitorManageScreen] 🔍 Connection check:`, {
+            connElderId: connElderId,
+            elderId: elderId,
+            matches: matches,
+            status: conn.status,
+            isActive: isActive,
+            shouldBeActive: shouldBeActive,
+            hasStatusField: hasStatusField,
+            fullConn: JSON.stringify(conn)
+          });
+          
+          // Return true if matches and (is active OR no status field exists)
+          return matches && shouldBeActive;
+        });
+
+        if (activeConnection) {
+          console.log('[MonitorManageScreen] ✅✅✅ Active connection found and verified!');
+          setHasActiveConnection(true);
+          if (showAlert) Alert.alert('Success', 'Active connection verified!');
+          return true;
+        } else {
+          console.log('[MonitorManageScreen] ❌ No active connection found in response');
+          console.log('[MonitorManageScreen] 📋 All connections analyzed:');
+          connections.forEach((c: any, idx: number) => {
+            const elderIdFromConn = c.elder?.userId || c.elder?._id || c.elder?.id || c.elderId || c.elder;
+            console.log(`  [${idx}] Elder ID: ${elderIdFromConn}, Status: ${c.status}, Type: ${typeof elderIdFromConn}`);
+          });
+          console.log(`[MonitorManageScreen] 🔍 Looking for elder ID: ${elderId} (type: ${typeof elderId})`);
+          setHasActiveConnection(false);
+          if (showAlert) {
+            Alert.alert(
+              'No Active Connection',
+              `Connection exists but status is not 'active'.\n\nFound ${connections.length} connection(s) but none are active.\n\nPlease check the connection status in the backend.`,
+              [{ text: 'OK' }]
+            );
+          }
+          return false;
+        }
+        } else if (response.status === 404) {
+        console.log('[MonitorManageScreen] ❌ Connection not found (404)');
+        
+        // Try to create connection if autoCreate is enabled
+        if (autoCreate) {
+          console.log('[MonitorManageScreen] 🔧 Attempting to create connection automatically...');
+          const created = await createCaregiverConnection(elderId);
+          if (created) {
+            // Retry the check
+            console.log('[MonitorManageScreen] 🔄 Retrying connection check after creation...');
+            return await checkCaregiverConnection(elderId, showAlert, false);
+          }
+        }
+        
+        setHasActiveConnection(false);
+        if (showAlert) {
+          Alert.alert(
+            'Connection Not Found',
+            'No connection found. Would you like to create one now?',
+            [
+              { text: 'Cancel', style: 'cancel' },
+              {
+                text: 'Create Connection',
+                onPress: async () => {
+                  const created = await createCaregiverConnection(elderId);
+                  if (created) {
+                    Alert.alert('Success', 'Connection created! Please refresh.');
+                    await checkCaregiverConnection(elderId, false, false);
+                  } else {
+                    Alert.alert('Error', 'Failed to create connection. Please try connecting from the Caregiver Dashboard.');
+                  }
+                }
+              }
+            ]
+          );
+        }
+        return false;
+      } else {
+        const errorText = await response.text();
+        console.error(`[MonitorManageScreen] Error (${response.status}): ${errorText}`);
+        setHasActiveConnection(false);
+        if (showAlert) {
+          Alert.alert('Error', `Connection check failed: ${response.status}\n\n${errorText.substring(0, 100)}`);
+        }
+        return false;
+      }
+    } catch (error) {
+      console.error('[MonitorManageScreen] Exception checking connection:', error);
+      if (error instanceof Error) {
+        console.error('[MonitorManageScreen] Error details:', error.message);
+        if (showAlert) {
+          Alert.alert('Error', `Connection check failed: ${error.message}`);
+        }
+      }
+      setHasActiveConnection(false);
+      return false;
+    }
+  }, [getCurrentCaregiverId, createCaregiverConnection]);
 
   // Load verification results
   const loadVerifications = useCallback(async () => {
@@ -354,8 +578,8 @@ const MonitorManageScreen = () => {
         if (elderName) {
           setMonitoringElder({ id: selectedElderId, name: elderName });
           console.log('[MonitorManageScreen] ✅ Monitoring status set:', { id: selectedElderId, name: elderName });
-          // Check if caregiver has active connection to elder
-          await checkCaregiverConnection(selectedElderId);
+          // Check if caregiver has active connection to elder (auto-create if missing)
+          await checkCaregiverConnection(selectedElderId, false, true);
         } else {
           setMonitoringElder(null);
           setHasActiveConnection(false);
@@ -595,12 +819,23 @@ const MonitorManageScreen = () => {
   // Auto-delete missed schedules, then sync remaining schedules to Arduino
   useEffect(() => {
     const unsubscribe = navigation.addListener('focus', async () => {
+      // Re-check connection when screen comes into focus
+      const selectedElderId = await getSelectedElderId();
+      const userRole = await getUserRole();
+      const roleStr = userRole ? String(userRole) : '';
+      const isCaregiverUser = roleStr === '3';
+      
+      if (isCaregiverUser && selectedElderId) {
+        console.log('[MonitorManageScreen] Screen focused - re-checking connection for elder:', selectedElderId);
+        await checkCaregiverConnection(selectedElderId);
+      }
+      
       await loadScheduleData(true, false, true); // Sync to Arduino, NO auto-delete, show loading
       await loadVerifications();
     });
 
     return unsubscribe;
-  }, [navigation, loadScheduleData, loadVerifications]);
+  }, [navigation, loadScheduleData, loadVerifications, getSelectedElderId, getUserRole, checkCaregiverConnection]);
 
   // Periodically refresh derived statuses (Pending -> Missed once time passes)
   // Also auto-delete schedules missed for more than 5 minutes
@@ -638,6 +873,175 @@ const MonitorManageScreen = () => {
       clearInterval(dataReloadInterval);
     };
   }, [loadScheduleData]);
+
+  // Central handler for alarm stop events (from Bluetooth or modal)
+  const handleAlarmStopped = useCallback(async (containerFromMessage: number, source: 'bluetooth' | 'modal' = 'bluetooth') => {
+    let container = containerFromMessage;
+    if (!container) {
+      container = alarmContainer;
+      console.log(`[MonitorManageScreen] No container in ${source} stop message, using last alarm container: ${container}`);
+    }
+
+    if (!container) {
+      console.warn(`[MonitorManageScreen] ${source} stop received without container, skipping capture`);
+      return;
+    }
+
+    const now = Date.now();
+    if (lastAlarmStoppedRef.current.container === container && now - lastAlarmStoppedRef.current.timestamp < 2000) {
+      console.log(`[MonitorManageScreen] Skipping duplicate alarm stop for Container ${container} from ${source}`);
+      return;
+    }
+    lastAlarmStoppedRef.current = { container, timestamp: now };
+
+    console.log(`[Auto Capture] Alarm stop handled (${source}) for Container ${container}, capturing AFTER pill taken...`);
+
+    // Dismiss alarm modal immediately
+    setAlarmVisible(false);
+    console.log('[MonitorManageScreen] Dismissed alarm modal on alarm stop');
+
+    // Send notification that pill was taken
+    try {
+      // @ts-expect-error - Dynamic import for lazy loading (works at runtime)
+      const Notifications = await import('expo-notifications');
+      if (Notifications.default && typeof Notifications.default.scheduleNotificationAsync === 'function') {
+        await Notifications.default.scheduleNotificationAsync({
+          content: {
+            title: '✅ Pill Taken',
+            body: `Verifying medication in Container ${container}...`,
+            sound: false,
+            ...(Platform.OS === 'android' && { priority: 'default' as const }),
+            data: { container, action: 'pill_taken', source },
+          },
+          trigger: null, // Show immediately
+        });
+      }
+    } catch (notificationError) {
+      const errorMessage = notificationError instanceof Error ? notificationError.message : String(notificationError);
+      console.warn('Failed to send notification:', errorMessage);
+    }
+
+    // Create schedule notification for alarm stopped
+    try {
+      const notificationResponse = await fetch('http://10.56.196.91:5001/notifications/schedule', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          type: 'alarm_stopped',
+          container: `container${container}`,
+          message: `Alarm stopped for Container ${container}. Verifying medication...`,
+          scheduleId: null,
+          source,
+        })
+      });
+      if (notificationResponse.ok) {
+        console.log('[MonitorManageScreen] ✅ Created schedule notification for alarm stopped');
+      }
+    } catch (notifErr) {
+      console.warn('[MonitorManageScreen] Failed to create schedule notification:', notifErr);
+    }
+
+    // Automatically trigger ESP32-CAM capture AFTER user takes pill
+    try {
+      const containerId = verificationService.getContainerId(container);
+      console.log(`[Auto Capture] Alarm stopped for Container ${container}, mapping to containerId: ${containerId}`);
+      console.log(`[Auto Capture] Capturing AFTER pill taken...`);
+      
+      // Get pill count from backend
+      let pillCount = 0;
+      try {
+        const configResponse = await fetch(`http://10.56.196.91:5001/get-pill-config/${containerId}`);
+        if (configResponse.ok) {
+          const configData = await configResponse.json();
+          pillCount = configData.pill_config?.count || 0;
+          console.log(`[Auto Capture] Got pill count: ${pillCount} for ${containerId}`);
+        } else {
+          console.warn(`[Auto Capture] Failed to get pill config: ${configResponse.status}`);
+        }
+      } catch (configError) {
+        console.warn(`[Auto Capture] Error fetching pill config:`, configError);
+      }
+      
+      // Trigger capture with retry logic (same as pre-pill)
+      console.log(`[Auto Capture] Calling triggerCapture for ${containerId} with pill count ${pillCount}...`);
+      let captureResult = await verificationService.triggerCapture(containerId, { count: pillCount });
+      console.log(`[Auto Capture] Post-pill capture result:`, captureResult);
+      
+      // Retry up to 2 more times if it fails
+      let retryCount = 0;
+      const maxRetries = 2;
+      while (!captureResult.ok && retryCount < maxRetries) {
+        retryCount++;
+        console.warn(`[Auto Capture] ⚠️ Post-pill capture attempt ${retryCount} failed, retrying in ${retryCount * 2} seconds...`);
+        await new Promise(resolve => setTimeout(resolve, retryCount * 2000));
+        captureResult = await verificationService.triggerCapture(containerId, { count: pillCount });
+        console.log(`[Auto Capture] 📸 Post-pill retry ${retryCount} result:`, captureResult);
+      }
+      
+      if (captureResult.ok) {
+        console.log(`[Auto Capture] ✅ Post-pill capture triggered successfully for Container ${container}`);
+        
+        // Wait a bit and check result
+        setTimeout(async () => {
+          const result = await verificationService.getVerificationResult(containerId);
+          console.log(`[Auto Capture] Post-pill verification result:`, result);
+          
+          // Send verification result notification (alarm modal is already dismissed)
+          try {
+            // @ts-expect-error - Dynamic import for lazy loading (works at runtime)
+            const Notifications = await import('expo-notifications');
+            if (Notifications.default && typeof Notifications.default.scheduleNotificationAsync === 'function') {
+              const verificationStatus = result.success && result.result?.pass_ ? '✅ Verified' : '⚠️ Verification Failed';
+              await Notifications.default.scheduleNotificationAsync({
+                content: {
+                  title: verificationStatus,
+                  body: result.success && result.result?.pass_ 
+                    ? `Container ${container} medication verified successfully!`
+                    : `Container ${container} verification failed. Please check the medication.`,
+                  sound: result.success && result.result?.pass_,
+                  ...(Platform.OS === 'android' && { priority: 'default' as const }),
+                  data: { container, verificationResult: result, source },
+                },
+                trigger: null,
+              });
+            } else {
+              throw new Error('Native module not available');
+            }
+          } catch (notificationError) {
+            const errorMessage = notificationError instanceof Error ? notificationError.message : String(notificationError);
+            console.warn('Failed to send verification notification, using Alert:', errorMessage);
+            // Only show alert if verification passed - don't show failure alert (too intrusive)
+            if (result.success && result.result?.pass_) {
+              Alert.alert(
+                '✅ Verified',
+                `Container ${container} medication verified successfully!`
+              );
+            } else {
+              // Don't show failure alert - just log it
+              console.log(`[MonitorManageScreen] Verification result: ${result.success ? 'Failed verification' : 'No result'}`);
+            }
+          }
+          
+          // Reload verifications to show updated status
+          await loadVerifications();
+          
+          // Also reload schedules to update status after pill taken
+          try {
+            await loadScheduleData(false, false, false); // Don't sync to Arduino, don't auto-delete, no loading
+          } catch (err) {
+            console.warn('[MonitorManageScreen] Error reloading schedules after post-pill capture:', err);
+          }
+        }, 3000); // Reduced from 5000ms to 3000ms for faster feedback
+      } else {
+        console.error(`[Auto Capture] ❌ Failed to trigger capture: ${captureResult.message}`);
+      }
+    } catch (error) {
+      console.error(`[Auto Capture] ❌ Exception during post-pill capture for Container ${container}:`, error);
+      if (error instanceof Error) {
+        console.error(`[Auto Capture] Error details: ${error.message}\n${error.stack}`);
+      }
+    }
+  }, [alarmContainer, loadVerifications, loadScheduleData]);
 
   // Listen for Bluetooth alarm notifications
   useEffect(() => {
@@ -775,7 +1179,7 @@ const MonitorManageScreen = () => {
           // Play alarm sound
           try {
             // @ts-expect-error - Dynamic import for lazy loading (works at runtime)
-            const { soundService } = await import('./services/soundService');
+            const { soundService } = await import('@/services/soundService');
             await soundService.initialize();
             await soundService.playAlarmSound('alarm');
           } catch (soundError) {
@@ -857,157 +1261,7 @@ const MonitorManageScreen = () => {
           console.log(`[MonitorManageScreen] No container in ALARM_STOPPED message, using last known: ${container}`);
         }
         
-        if (container > 0) {
-          console.log(`[Auto Capture] Alarm stopped for Container ${container}, capturing AFTER pill taken...`);
-          
-          // Dismiss alarm modal immediately when ALARM_STOPPED is received
-          // This prevents duplicate modals
-          setAlarmVisible(false);
-          console.log('[MonitorManageScreen] Dismissed alarm modal on ALARM_STOPPED');
-          
-          // Send notification that pill was taken
-          try {
-            // @ts-expect-error - Dynamic import for lazy loading (works at runtime)
-            const Notifications = await import('expo-notifications');
-            if (Notifications.default && typeof Notifications.default.scheduleNotificationAsync === 'function') {
-              await Notifications.default.scheduleNotificationAsync({
-                content: {
-                  title: '✅ Pill Taken',
-                  body: `Verifying medication in Container ${container}...`,
-                  sound: false,
-                  ...(Platform.OS === 'android' && { priority: 'default' as const }),
-                  data: { container, action: 'pill_taken' },
-                },
-                trigger: null, // Show immediately
-              });
-            }
-          } catch (notificationError) {
-            const errorMessage = notificationError instanceof Error ? notificationError.message : String(notificationError);
-            console.warn('Failed to send notification:', errorMessage);
-          }
-          
-          // Create schedule notification for alarm stopped
-          try {
-            const notificationResponse = await fetch('http://10.56.196.91:5001/notifications/schedule', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                type: 'alarm_stopped',
-                container: `container${container}`,
-                message: `Alarm stopped for Container ${container}. Verifying medication...`,
-                scheduleId: null
-              })
-            });
-            if (notificationResponse.ok) {
-              console.log('[MonitorManageScreen] ✅ Created schedule notification for alarm stopped');
-            }
-          } catch (notifErr) {
-            console.warn('[MonitorManageScreen] Failed to create schedule notification:', notifErr);
-          }
-          
-          // Automatically trigger ESP32-CAM capture AFTER user takes pill
-          try {
-            const containerId = verificationService.getContainerId(container);
-            console.log(`[Auto Capture] Alarm stopped for Container ${container}, mapping to containerId: ${containerId}`);
-            console.log(`[Auto Capture] Capturing AFTER pill taken...`);
-            
-            // Get pill count from backend
-            let pillCount = 0;
-            try {
-              const configResponse = await fetch(`http://10.56.196.91:5001/get-pill-config/${containerId}`);
-              if (configResponse.ok) {
-                const configData = await configResponse.json();
-                pillCount = configData.pill_config?.count || 0;
-                console.log(`[Auto Capture] Got pill count: ${pillCount} for ${containerId}`);
-              } else {
-                console.warn(`[Auto Capture] Failed to get pill config: ${configResponse.status}`);
-              }
-            } catch (configError) {
-              console.warn(`[Auto Capture] Error fetching pill config:`, configError);
-            }
-            
-            // Trigger capture with retry logic (same as pre-pill)
-            console.log(`[Auto Capture] Calling triggerCapture for ${containerId} with pill count ${pillCount}...`);
-            let captureResult = await verificationService.triggerCapture(containerId, { count: pillCount });
-            console.log(`[Auto Capture] Post-pill capture result:`, captureResult);
-            
-            // Retry up to 2 more times if it fails
-            let retryCount = 0;
-            const maxRetries = 2;
-            while (!captureResult.ok && retryCount < maxRetries) {
-              retryCount++;
-              console.warn(`[Auto Capture] ⚠️ Post-pill capture attempt ${retryCount} failed, retrying in ${retryCount * 2} seconds...`);
-              await new Promise(resolve => setTimeout(resolve, retryCount * 2000));
-              captureResult = await verificationService.triggerCapture(containerId, { count: pillCount });
-              console.log(`[Auto Capture] 📸 Post-pill retry ${retryCount} result:`, captureResult);
-            }
-            
-            if (captureResult.ok) {
-              console.log(`[Auto Capture] ✅ Post-pill capture triggered successfully for Container ${container}`);
-              
-              // Wait a bit and check result
-              setTimeout(async () => {
-                const result = await verificationService.getVerificationResult(containerId);
-                console.log(`[Auto Capture] Post-pill verification result:`, result);
-                
-                // Send verification result notification (alarm modal is already dismissed)
-                try {
-                  // @ts-expect-error - Dynamic import for lazy loading (works at runtime)
-                  const Notifications = await import('expo-notifications');
-                  if (Notifications.default && typeof Notifications.default.scheduleNotificationAsync === 'function') {
-                    const verificationStatus = result.success && result.result?.pass_ ? '✅ Verified' : '⚠️ Verification Failed';
-                    await Notifications.default.scheduleNotificationAsync({
-                      content: {
-                        title: verificationStatus,
-                        body: result.success && result.result?.pass_ 
-                          ? `Container ${container} medication verified successfully!`
-                          : `Container ${container} verification failed. Please check the medication.`,
-                        sound: result.success && result.result?.pass_,
-                        ...(Platform.OS === 'android' && { priority: 'default' as const }),
-                        data: { container, verificationResult: result },
-                      },
-                      trigger: null,
-                    });
-                  } else {
-                    throw new Error('Native module not available');
-                  }
-                } catch (notificationError) {
-                  const errorMessage = notificationError instanceof Error ? notificationError.message : String(notificationError);
-                  console.warn('Failed to send verification notification, using Alert:', errorMessage);
-                  // Only show alert if verification passed - don't show failure alert (too intrusive)
-                  if (result.success && result.result?.pass_) {
-                    Alert.alert(
-                      '✅ Verified',
-                      `Container ${container} medication verified successfully!`
-                    );
-                  } else {
-                    // Don't show failure alert - just log it
-                    console.log(`[MonitorManageScreen] Verification result: ${result.success ? 'Failed verification' : 'No result'}`);
-                  }
-                }
-                
-                // Reload verifications to show updated status
-                await loadVerifications();
-                
-                // Also reload schedules to update status after pill taken
-                try {
-                  await loadScheduleData(false, false, false); // Don't sync to Arduino, don't auto-delete, no loading
-                } catch (err) {
-                  console.warn('[MonitorManageScreen] Error reloading schedules after post-pill capture:', err);
-                }
-              }, 3000); // Reduced from 5000ms to 3000ms for faster feedback
-            } else {
-              console.error(`[Auto Capture] ❌ Failed to trigger capture: ${captureResult.message}`);
-            }
-          } catch (error) {
-            console.error(`[Auto Capture] ❌ Exception during post-pill capture for Container ${container}:`, error);
-            if (error instanceof Error) {
-              console.error(`[Auto Capture] Error details: ${error.message}\n${error.stack}`);
-            }
-          }
-        } else {
-          console.warn(`[MonitorManageScreen] ALARM_STOPPED received but container is 0, skipping capture`);
-        }
+        await handleAlarmStopped(container, 'bluetooth');
       }
     });
     
@@ -1026,7 +1280,7 @@ const MonitorManageScreen = () => {
         console.warn('[MonitorManageScreen] Error during cleanup:', err);
       }
     };
-  }, [loadVerifications, loadScheduleData]);
+  }, [loadVerifications, loadScheduleData, handleAlarmStopped]);
 
   // Get latest schedule ID
   const getLatestScheduleId = async (): Promise<number> => {
@@ -1636,11 +1890,27 @@ const MonitorManageScreen = () => {
       <View style={styles.buttonsContainer}>
         {/* Hide buttons if caregiver is not connected to selected elder */}
         {isCaregiver && monitoringElder && !hasActiveConnection ? (
-          <View style={[styles.connectionWarning, { backgroundColor: theme.warning + '20', borderColor: theme.warning }]}>
-            <Ionicons name="warning" size={20} color={theme.warning} />
-            <Text style={[styles.connectionWarningText, { color: theme.warning }]}>
-              You must have an active connection to {monitoringElder.name} to set or modify schedules.
-            </Text>
+          <View style={styles.connectionWarningContainer}>
+            <View style={[styles.connectionWarning, { backgroundColor: theme.warning + '20', borderColor: theme.warning }]}>
+              <Ionicons name="warning" size={20} color={theme.warning} />
+              <Text style={[styles.connectionWarningText, { color: theme.warning }]}>
+                You must have an active connection to {monitoringElder.name} to set or modify schedules.
+              </Text>
+            </View>
+            <TouchableOpacity
+              style={[styles.checkConnectionButton, { backgroundColor: theme.primary }]}
+              onPress={async () => {
+                if (monitoringElder) {
+                  // Try to check connection, and if 404, offer to create it
+                  await checkCaregiverConnection(monitoringElder.id, true, true);
+                }
+              }}
+            >
+              <Ionicons name="refresh" size={16} color={theme.card} />
+              <Text style={[styles.checkConnectionButtonText, { color: theme.card }]}>
+                Check Connection
+              </Text>
+            </TouchableOpacity>
           </View>
         ) : (
           <>
@@ -1727,6 +1997,7 @@ const MonitorManageScreen = () => {
         container={alarmContainer}
         time={alarmTime}
         onDismiss={() => setAlarmVisible(false)}
+        onStopAlarm={(containerNum) => handleAlarmStopped(containerNum, 'modal')}
       />
     </View>
   );
@@ -1810,14 +2081,19 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginBottom: 20,
   },
+  connectionWarningContainer: {
+    width: '90%',
+    alignItems: 'center',
+    marginVertical: 10,
+  },
   connectionWarning: {
     flexDirection: 'row',
     alignItems: 'center',
     padding: 15,
     borderRadius: 12,
     borderWidth: 1,
-    marginVertical: 10,
-    width: '90%',
+    marginBottom: 10,
+    width: '100%',
     gap: 10,
   },
   connectionWarningText: {
@@ -1825,6 +2101,19 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '600',
     textAlign: 'center',
+  },
+  checkConnectionButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 12,
+    borderRadius: 12,
+    gap: 8,
+    width: '100%',
+  },
+  checkConnectionButtonText: {
+    fontSize: 14,
+    fontWeight: '600',
   },
   button: {
     width: '90%',

@@ -1,9 +1,9 @@
 import React, { useState, useCallback } from 'react';
 import { Modal, View, StyleSheet } from 'react-native';
-import { useTheme } from '../context/ThemeContext';
-import { lightTheme, darkTheme } from '../styles/theme';
+import { useTheme } from '@/context/ThemeContext';
+import { lightTheme, darkTheme } from '@/styles/theme';
 import MedicationNotification from './MedicationNotification';
-import { notificationService, NotificationData } from '../services/notificationService';
+import { notificationService, NotificationData } from '@/services/notificationService';
 
 interface NotificationManagerProps {
   visible: boolean;
