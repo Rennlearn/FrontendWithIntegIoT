@@ -113,82 +113,107 @@ const Adherence = () => {
 
       const currentUserId = await getCurrentUserId();
       const userRole = await getUserRole();
-      const selectedElderId = await getSelectedElderId();
+      let selectedElderId = await getSelectedElderId();
+      
+      console.log(`[Adherence] Initial state - userId: ${currentUserId}, role: ${userRole}, selectedElderId: ${selectedElderId}`);
       
       // Strict check: Only role '3' is caregiver, role '2' is elder
       const roleStr = userRole ? String(userRole) : '';
-      const isCaregiver = roleStr === '3' && roleStr !== '2';
+      const isCaregiverByRole = roleStr === '3' && roleStr !== '2';
       const isElder = roleStr === '2';
       
-      // If user is an elder, clear any selectedElderId (elders don't select other elders)
-      if (isElder) {
+      // IMPORTANT: If selectedElderId exists, treat user as caregiver (backend will detect them as caregiver anyway)
+      // This handles the case where role token is null but user has selected an elder to monitor
+      // Backend requires elderId for caregivers, so if selectedElderId exists, we must use it
+      const isCaregiver = isCaregiverByRole || (selectedElderId !== null && selectedElderId !== undefined && String(selectedElderId) !== String(currentUserId));
+      
+      console.log(`[Adherence] Role check - isCaregiverByRole: ${isCaregiverByRole}, isElder: ${isElder}, selectedElderId: ${selectedElderId}, isCaregiver: ${isCaregiver}`);
+      
+      // If user is ONLY an elder (not a caregiver) AND has no selectedElderId, clear any selectedElderId
+      // But if user has selectedElderId, they're acting as a caregiver, so keep it
+      if (isElder && !isCaregiverByRole && !selectedElderId) {
         await AsyncStorage.removeItem('selectedElderId');
         await AsyncStorage.removeItem('selectedElderName');
-        console.log('[Adherence] Cleared selectedElderId for elder user');
+        selectedElderId = null; // Update local variable too
+        console.log('[Adherence] Cleared selectedElderId for elder-only user');
+      } else if (selectedElderId) {
+        console.log(`[Adherence] User has selectedElderId (${selectedElderId}) - treating as caregiver`);
       }
 
       let userSchedules: any[] = [];
       let elderInfo: { id: string; name: string; email?: string; phone?: string; age?: number } | null = null;
 
       if (isCaregiver && selectedElderId) {
-        // Caregiver: Use new endpoint to get elder's adherence data
+        // Caregiver: Fetch elder's schedules directly (device connection not required for viewing adherence)
         try {
-          const response = await fetch(`https://pillnow-database.onrender.com/api/monitor/elder-device/${selectedElderId}`, {
+          // First, try to get elder info from the monitor endpoint (optional - for additional info)
+          try {
+            const monitorResponse = await fetch(`https://pillnow-database.onrender.com/api/monitor/elder-device/${selectedElderId}`, {
+              headers
+            });
+
+            if (monitorResponse.ok) {
+              const monitorData = await monitorResponse.json();
+              if (monitorData.success && monitorData.data && monitorData.data.elder) {
+                elderInfo = monitorData.data.elder;
+                console.log(`[Adherence] Got elder info from monitor endpoint: ${elderInfo.name}`);
+              }
+            } else if (monitorResponse.status === 404) {
+              // Device not connected - that's okay, we can still view schedules
+              console.log('[Adherence] Device not connected, but can still view schedules');
+            } else if (monitorResponse.status === 401 || monitorResponse.status === 403) {
+              // Auth/permission issues - these are critical
+              if (monitorResponse.status === 401) {
+                Alert.alert(
+                  'Authentication Required',
+                  'Your session has expired. Please log in again.',
+                  [{ text: 'OK', onPress: () => router.replace('/LoginScreen') }]
+                );
+                return;
+              } else {
+                Alert.alert(
+                  'Permission Denied',
+                  'You do not have permission to view this elder\'s adherence. Please check your caregiver-elder connection.',
+                  [{ text: 'OK' }]
+                );
+                return;
+              }
+            }
+          } catch (monitorError) {
+            // Monitor endpoint failed - continue with direct schedule fetch
+            console.log('[Adherence] Monitor endpoint unavailable, fetching schedules directly');
+          }
+
+          // Always fetch schedules directly (device connection not required)
+          // Backend requires elderId query parameter for caregivers
+          const schedulesUrl = `https://pillnow-database.onrender.com/api/medication_schedules?elderId=${selectedElderId}`;
+          const schedulesResp = await fetch(schedulesUrl, {
             headers
           });
-
-          if (response.status === 401) {
-            Alert.alert(
-              'Authentication Required',
-              'Your session has expired. Please log in again.',
-              [{ text: 'OK', onPress: () => router.replace('/LoginScreen') }]
-            );
-            return;
+          
+          if (!schedulesResp.ok) {
+            const errorText = await schedulesResp.text();
+            console.error(`[Adherence] Failed to fetch schedules (${schedulesResp.status}): ${errorText}`);
+            throw new Error(`Failed to fetch schedules: ${schedulesResp.status} - ${errorText}`);
           }
-
-          if (response.status === 403) {
-            Alert.alert(
-              'Permission Denied',
-              'You do not have permission to view this elder\'s adherence. Please check your caregiver-elder connection.',
-              [{ text: 'OK' }]
-            );
-            return;
-          }
-
-          if (response.status === 404) {
-            Alert.alert(
-              'No Device Connection',
-              'This elder does not have an active device connection. Please connect a device first.',
-              [{ text: 'OK' }]
-            );
-            return;
-          }
-
-          if (!response.ok) {
-            const errorText = await response.text();
-            console.error(`[Adherence] API error (${response.status}): ${errorText}`);
-            Alert.alert('Error', `Failed to load adherence data: ${response.status}`);
-            return;
-          }
-
-          const responseData = await response.json();
-          if (responseData.success && responseData.data) {
-            elderInfo = responseData.data.elder;
-            // Extract schedules from devices array
-            const devices = responseData.data.devices || [];
-            if (devices.length > 0 && devices[0].monitoring) {
-              // For now, we'll still fetch schedules from the schedules endpoint
-              // The monitoring data provides statistics, but we need individual schedule records
-              const schedulesResp = await fetch('https://pillnow-database.onrender.com/api/medication_schedules', {
-                headers
-              });
-              const schedulesJson = await schedulesResp.json();
-              const allSchedules: any[] = schedulesJson?.data || [];
-              userSchedules = allSchedules.filter((schedule: any) => {
-                const scheduleUserId = parseInt(schedule.user);
-                return scheduleUserId === parseInt(selectedElderId);
-              });
-              console.log(`[Adherence] Caregiver viewing elder ${selectedElderId}'s adherence: ${userSchedules.length} schedule(s)`);
+          
+          const schedulesJson = await schedulesResp.json();
+          const allSchedules: any[] = schedulesJson?.data || schedulesJson || [];
+          userSchedules = allSchedules.filter((schedule: any) => {
+            const scheduleUserId = parseInt(schedule.user);
+            return scheduleUserId === parseInt(selectedElderId);
+          });
+          console.log(`[Adherence] Caregiver viewing elder ${selectedElderId}'s adherence: ${userSchedules.length} schedule(s)`);
+          
+          // If we didn't get elder info from monitor endpoint, try to get it from user data
+          if (!elderInfo) {
+            try {
+              const elderName = await AsyncStorage.getItem('selectedElderName');
+              if (elderName) {
+                elderInfo = { id: selectedElderId, name: elderName };
+              }
+            } catch (e) {
+              console.log('[Adherence] Could not get elder name from storage');
             }
           }
         } catch (error) {
@@ -198,20 +223,117 @@ const Adherence = () => {
         }
       } else if (isCaregiver && !selectedElderId) {
         // Caregiver but no elder selected
-        setMedications([]);
-        return;
+        // Backend requires elderId for caregivers
+        // If user is an elder trying to view own data, we need special handling
+        if (isElder) {
+          // User is both caregiver and elder - try to view own data
+          // Backend will require elderId, but we can't use self-connection
+          // Try fetching with a workaround: use currentUserId as elderId and handle 403 gracefully
+          console.log(`[Adherence] User is caregiver and elder - attempting to view own data`);
+          
+          // Try with elderId = currentUserId (even though connection won't exist)
+          // Backend will return 403, but we can catch it and show helpful message
+          const schedulesUrl = `https://pillnow-database.onrender.com/api/medication_schedules?elderId=${currentUserId}`;
+          const schedulesResp = await fetch(schedulesUrl, {
+            headers
+          });
+          
+          if (!schedulesResp.ok) {
+            const errorText = await schedulesResp.text();
+            console.error(`[Adherence] Failed to fetch own data as caregiver-elder (${schedulesResp.status}): ${errorText}`);
+            
+            if (schedulesResp.status === 403) {
+              // No self-connection exists - this is expected
+              Alert.alert(
+                'Unable to View Own Data',
+                'You are detected as both a caregiver and an elder. The system requires a caregiver-elder connection to view data, but you cannot have a connection to yourself.\n\nTo view adherence data:\n\n1. Go to the Caregiver Dashboard\n2. Select an elder to monitor\n3. Then view their adherence data\n\nIf you need to view your own adherence, please contact support to adjust your account settings.',
+                [{ text: 'OK' }]
+              );
+            } else {
+              Alert.alert('Error', `Failed to load adherence data: ${schedulesResp.status}`);
+            }
+            setMedications([]);
+            setLoading(false);
+            return;
+          }
+          
+          // If somehow it worked, process the data
+          const schedulesJson = await schedulesResp.json();
+          const allSchedules: any[] = schedulesJson?.data || schedulesJson || [];
+          userSchedules = allSchedules.filter((schedule: any) => {
+            const scheduleUserId = parseInt(schedule.user);
+            return scheduleUserId === currentUserId;
+          });
+          console.log(`[Adherence] User viewing own adherence: ${userSchedules.length} schedule(s)`);
+        } else {
+          // Pure caregiver with no elder selected
+          Alert.alert(
+            'No Elder Selected',
+            'Please select an elder to monitor from the Caregiver Dashboard to view their adherence data.',
+            [{ text: 'OK' }]
+          );
+          setMedications([]);
+          setLoading(false);
+          return;
+        }
       } else {
-        // Elder: show own schedules using traditional endpoint
-        const schedulesResp = await fetch('https://pillnow-database.onrender.com/api/medication_schedules', {
+        // User viewing their own schedules (not a caregiver, or elder without caregiver connections)
+        // Try fetching without parameters first
+        let schedulesUrl = 'https://pillnow-database.onrender.com/api/medication_schedules';
+        let schedulesResp = await fetch(schedulesUrl, {
           headers
         });
+        
+        // If backend requires elderId (user detected as caregiver), try with userId
+        if (!schedulesResp.ok && schedulesResp.status === 400) {
+          const errorText = await schedulesResp.text();
+          if (errorText.includes('elderId')) {
+            console.log(`[Adherence] Backend requires elderId, trying with userId parameter`);
+            schedulesUrl = `https://pillnow-database.onrender.com/api/medication_schedules?userId=${currentUserId}`;
+            schedulesResp = await fetch(schedulesUrl, {
+              headers
+            });
+            
+            // If still fails, backend strictly requires elderId but user is viewing own data
+            if (!schedulesResp.ok && schedulesResp.status === 400) {
+              const retryErrorText = await schedulesResp.text();
+              console.error(`[Adherence] Backend requires elderId but user is viewing own data: ${retryErrorText}`);
+              Alert.alert(
+                'Unable to Load Data',
+                'The system detected you as a caregiver, but you are trying to view your own data. Please select an elder to monitor from the Caregiver Dashboard, or if you need to view your own adherence, ensure your account role is set correctly.',
+                [{ text: 'OK' }]
+              );
+              setLoading(false);
+              return;
+            }
+          }
+        }
+        
+        if (!schedulesResp.ok) {
+          const errorText = await schedulesResp.text();
+          console.error(`[Adherence] Failed to fetch schedules (${schedulesResp.status}): ${errorText}`);
+          
+          // If 403, it means backend detected caregiver but no connection exists
+          if (schedulesResp.status === 403 && errorText.includes('caregiver-elder connection')) {
+            Alert.alert(
+              'Access Denied',
+              'You are detected as a caregiver, but there is no active connection to view this data. If you are trying to view your own adherence, please ensure your account role is set correctly.',
+              [{ text: 'OK' }]
+            );
+          } else {
+            Alert.alert('Error', `Failed to load adherence data: ${schedulesResp.status}`);
+          }
+          setLoading(false);
+          return;
+        }
+        
         const schedulesJson = await schedulesResp.json();
-        const allSchedules: any[] = schedulesJson?.data || [];
+        const allSchedules: any[] = schedulesJson?.data || schedulesJson || [];
         userSchedules = allSchedules.filter((schedule: any) => {
           const scheduleUserId = parseInt(schedule.user);
           return scheduleUserId === currentUserId;
         });
-        console.log(`[Adherence] Elder viewing own adherence: ${userSchedules.length} schedule(s)`);
+        console.log(`[Adherence] User viewing own adherence: ${userSchedules.length} schedule(s)`);
       }
 
       const medsResp = await fetch('https://pillnow-database.onrender.com/api/medications');
