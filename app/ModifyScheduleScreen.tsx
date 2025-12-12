@@ -56,6 +56,7 @@ const ModifyScheduleScreen = () => {
   const [editPillCount, setEditPillCount] = useState<Record<number, number>>({ 1: 0, 2: 0, 3: 0 });
   const [pillCountsLocked, setPillCountsLocked] = useState<Record<number, boolean>>({ 1: false, 2: false, 3: false });
   const [saving, setSaving] = useState(false);
+  const [deletingScheduleId, setDeletingScheduleId] = useState<string | null>(null);
   const [isCaregiver, setIsCaregiver] = useState(false);
   const [monitoringElder, setMonitoringElder] = useState<{ id: string; name: string } | null>(null);
 
@@ -294,11 +295,18 @@ const ModifyScheduleScreen = () => {
         const medication = currentMedications.find(med => med.medId === schedule.medication);
 
         // Normalize container to a number (supports string like "container1" or "1")
+        // Only allow valid containers: 1, 2, or 3
         const rawContainer = schedule.container;
-        const parsedContainer =
+        let parsedContainer =
           parseInt(rawContainer) ||
           parseInt(String(rawContainer).replace(/[^0-9]/g, '')) ||
           1;
+        
+        // Ensure container is only 1, 2, or 3
+        if (parsedContainer < 1 || parsedContainer > 3) {
+          console.warn(`[ModifyScheduleScreen] Invalid container value: ${rawContainer}, defaulting to 1`);
+          parsedContainer = 1;
+        }
 
         return {
           ...schedule,
@@ -307,23 +315,65 @@ const ModifyScheduleScreen = () => {
         } as Schedule;
       });
       
-      // Filter to only show pending schedules (only pending schedules can be modified)
-      const pendingSchedules = enrichedSchedules.filter((schedule: Schedule) => {
+      // Filter to only show schedules that:
+      // 1. Have valid containers (1, 2, or 3)
+      // 2. Are not done (status !== 'Done')
+      // 3. Haven't passed their scheduled time
+      const now = new Date();
+      const modifiableSchedules = enrichedSchedules.filter((schedule: Schedule) => {
+        // First, ensure container is valid (1, 2, or 3)
+        const containerNum = schedule.container;
+        if (!containerNum || (containerNum !== 1 && containerNum !== 2 && containerNum !== 3)) {
+          console.warn(`[ModifyScheduleScreen] Skipping schedule ${schedule._id} with invalid container: ${containerNum}`);
+          return false; // Skip schedules with invalid containers
+        }
+        
         const statusLower = (schedule.status || 'Pending').toLowerCase();
-        return statusLower === 'pending';
+        
+        // Exclude done schedules
+        if (statusLower === 'done') {
+          return false;
+        }
+        
+        // Check if schedule time has passed
+        try {
+          const scheduleDate = schedule.date; // Format: YYYY-MM-DD
+          const scheduleTime = schedule.time; // Format: HH:MM
+          
+          if (!scheduleDate || !scheduleTime) {
+            return false; // Invalid schedule data
+          }
+          
+          // Parse schedule date and time
+          const [year, month, day] = scheduleDate.split('-').map(Number);
+          const [hours, minutes] = scheduleTime.split(':').map(Number);
+          
+          // Create schedule datetime
+          const scheduleDateTime = new Date(year, month - 1, day, hours, minutes, 0, 0);
+          
+          // Check if schedule time has passed
+          if (scheduleDateTime < now) {
+            return false; // Schedule time has passed
+          }
+          
+          return true; // Schedule is modifiable
+        } catch (error) {
+          console.warn(`[ModifyScheduleScreen] Error parsing schedule date/time for schedule ${schedule._id}:`, error);
+          return false; // Skip invalid schedules
+        }
       });
       
-      console.log(`[ModifyScheduleScreen] ✅ Loaded ${enrichedSchedules.length} total schedule(s), ${pendingSchedules.length} pending schedule(s) available for modification`);
-      setSchedules(pendingSchedules);
+      console.log(`[ModifyScheduleScreen] ✅ Loaded ${enrichedSchedules.length} total schedule(s), ${modifiableSchedules.length} modifiable schedule(s) available (not done and not passed time)`);
+      setSchedules(modifiableSchedules);
       
       // Load pill counts from schedules (get max count per container from schedule data)
-      // Use pending schedules for pill count calculation
+      // Use modifiable schedules for pill count calculation
       const counts: Record<number, number> = { 1: 0, 2: 0, 3: 0 };
       const locked: Record<number, boolean> = { 1: false, 2: false, 3: false };
-      pendingSchedules.forEach((schedule: Schedule) => {
+      modifiableSchedules.forEach((schedule: Schedule) => {
         // If schedule has a count field, use it; otherwise default to number of schedules
         const containerNum = schedule.container;
-        const scheduleCount = pendingSchedules.filter((s: Schedule) => s.container === containerNum).length;
+        const scheduleCount = modifiableSchedules.filter((s: Schedule) => s.container === containerNum).length;
         if (!counts[containerNum] || counts[containerNum] < scheduleCount) {
           counts[containerNum] = scheduleCount;
         }
@@ -396,15 +446,39 @@ const ModifyScheduleScreen = () => {
   };
 
   const openEditModal = (schedule: Schedule) => {
-    // Only allow editing if status is Pending
+    // Check if schedule is modifiable (not done and not passed time)
     const statusLower = (schedule.status || 'Pending').toLowerCase();
-    if (statusLower !== 'pending') {
+    if (statusLower === 'done') {
       Alert.alert(
         'Cannot Edit',
-        `This schedule cannot be edited because it is already marked as "${schedule.status || 'Pending'}". Only pending schedules can be modified.`,
+        `This schedule cannot be edited because it is already marked as "Done". Only schedules that haven't been completed can be modified.`,
         [{ text: 'OK' }]
       );
       return;
+    }
+    
+    // Check if schedule time has passed
+    try {
+      const now = new Date();
+      const scheduleDate = schedule.date;
+      const scheduleTime = schedule.time;
+      
+      if (scheduleDate && scheduleTime) {
+        const [year, month, day] = scheduleDate.split('-').map(Number);
+        const [hours, minutes] = scheduleTime.split(':').map(Number);
+        const scheduleDateTime = new Date(year, month - 1, day, hours, minutes, 0, 0);
+        
+        if (scheduleDateTime < now) {
+          Alert.alert(
+            'Cannot Edit',
+            `This schedule cannot be edited because its scheduled time has already passed. Only future schedules can be modified.`,
+            [{ text: 'OK' }]
+          );
+          return;
+        }
+      }
+    } catch (error) {
+      console.warn('[ModifyScheduleScreen] Error checking schedule time:', error);
     }
     
     // Parse date (YYYY-MM-DD) and time (HH:MM) to Date
@@ -474,17 +548,43 @@ const ModifyScheduleScreen = () => {
   const saveEdit = async () => {
     if (!editingSchedule) return;
     
-    // Double-check that schedule is still pending before saving
+    // Double-check that schedule is still modifiable before saving
     const statusLower = (editingSchedule.status || 'Pending').toLowerCase();
-    if (statusLower !== 'pending') {
+    if (statusLower === 'done') {
       Alert.alert(
         'Cannot Save',
-        `This schedule cannot be edited because it is marked as "${editingSchedule.status || 'Pending'}". Only pending schedules can be modified.`,
+        `This schedule cannot be edited because it is marked as "Done". Only schedules that haven't been completed can be modified.`,
         [{ text: 'OK' }]
       );
       setEditModalVisible(false);
       await loadSchedules(); // Reload to get latest status
       return;
+    }
+    
+    // Check if schedule time has passed
+    try {
+      const now = new Date();
+      const scheduleDate = editingSchedule.date;
+      const scheduleTime = editingSchedule.time;
+      
+      if (scheduleDate && scheduleTime) {
+        const [year, month, day] = scheduleDate.split('-').map(Number);
+        const [hours, minutes] = scheduleTime.split(':').map(Number);
+        const scheduleDateTime = new Date(year, month - 1, day, hours, minutes, 0, 0);
+        
+        if (scheduleDateTime < now) {
+          Alert.alert(
+            'Cannot Save',
+            `This schedule cannot be edited because its scheduled time has already passed. Only future schedules can be modified.`,
+            [{ text: 'OK' }]
+          );
+          setEditModalVisible(false);
+          await loadSchedules(); // Reload to get latest status
+          return;
+        }
+      }
+    } catch (error) {
+      console.warn('[ModifyScheduleScreen] Error checking schedule time:', error);
     }
     
     // For caregivers only: Check if they have active connection to elder
@@ -511,23 +611,42 @@ const ModifyScheduleScreen = () => {
     try {
       setSaving(true);
       
+      // Get token for authentication
+      const token = await AsyncStorage.getItem('token');
+      const headers: HeadersInit = {
+        'Content-Type': 'application/json',
+      };
+      if (token) {
+        headers['Authorization'] = `Bearer ${token.trim()}`;
+      }
+      
       // Update date/time format
       const newTime = `${String(editDateTime.getHours()).padStart(2, '0')}:${String(editDateTime.getMinutes()).padStart(2, '0')}`;
       const newDate = `${editDateTime.getFullYear()}-${String(editDateTime.getMonth() + 1).padStart(2, '0')}-${String(editDateTime.getDate()).padStart(2, '0')}`;
       
       // Update schedule in backend
+      // CRITICAL: Preserve the original container value - do NOT change it
+      const originalContainer = editingSchedule.container;
+      console.log(`[ModifyScheduleScreen] 🔍 Original container before update: ${originalContainer} (type: ${typeof originalContainer})`);
+      
+      // Include all original schedule fields to preserve the schedule completely
+      // This ensures the backend doesn't reset any fields including container
       const updateData = {
+        scheduleId: editingSchedule.scheduleId, // Preserve schedule ID
+        user: editingSchedule.user, // Preserve user ID
+        medication: editingSchedule.medication, // Preserve medication ID
+        container: originalContainer, // CRITICAL: Use original container value, don't modify it
         time: newTime,
         date: newDate,
         status: editingSchedule.status, // Keep status as Pending
         alertSent: editingSchedule.alertSent
       };
       
+      console.log(`[ModifyScheduleScreen] 📤 Sending update for schedule ${editingSchedule._id} with container: ${updateData.container}`);
+      
       const response = await fetch(`https://pillnow-database.onrender.com/api/medication_schedules/${editingSchedule._id}`, {
         method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers,
         body: JSON.stringify(updateData),
       });
       
@@ -669,17 +788,42 @@ const ModifyScheduleScreen = () => {
   };
 
   const deleteSchedule = async (scheduleId: string) => {
-    // Find the schedule to check its status
+    if (deletingScheduleId) return; // Prevent double-clicks
+    // Find the schedule to check if it's modifiable
     const schedule = schedules.find(s => s._id === scheduleId);
     if (schedule) {
       const statusLower = (schedule.status || 'Pending').toLowerCase();
-      if (statusLower !== 'pending') {
+      if (statusLower === 'done') {
         Alert.alert(
           'Cannot Delete',
-          `This schedule cannot be deleted because it is marked as "${schedule.status || 'Pending'}". Only pending schedules can be deleted.`,
+          `This schedule cannot be deleted because it is marked as "Done". Only schedules that haven't been completed can be deleted.`,
           [{ text: 'OK' }]
         );
         return;
+      }
+      
+      // Check if schedule time has passed
+      try {
+        const now = new Date();
+        const scheduleDate = schedule.date;
+        const scheduleTime = schedule.time;
+        
+        if (scheduleDate && scheduleTime) {
+          const [year, month, day] = scheduleDate.split('-').map(Number);
+          const [hours, minutes] = scheduleTime.split(':').map(Number);
+          const scheduleDateTime = new Date(year, month - 1, day, hours, minutes, 0, 0);
+          
+          if (scheduleDateTime < now) {
+            Alert.alert(
+              'Cannot Delete',
+              `This schedule cannot be deleted because its scheduled time has already passed. Only future schedules can be deleted.`,
+              [{ text: 'OK' }]
+            );
+            return;
+          }
+        }
+      } catch (error) {
+        console.warn('[ModifyScheduleScreen] Error checking schedule time:', error);
       }
     }
     
@@ -711,6 +855,7 @@ const ModifyScheduleScreen = () => {
           style: 'destructive',
           onPress: async () => {
             try {
+              setDeletingScheduleId(scheduleId);
               const token = await AsyncStorage.getItem('token');
               const headers: HeadersInit = {
                 'Content-Type': 'application/json',
@@ -774,6 +919,8 @@ const ModifyScheduleScreen = () => {
             } catch (err) {
               console.error('Error deleting schedule:', err);
               Alert.alert('Error', `Failed to delete schedule: ${err instanceof Error ? err.message : 'Unknown error'}`);
+            } finally {
+              setDeletingScheduleId(null);
             }
           }
         }
@@ -781,7 +928,8 @@ const ModifyScheduleScreen = () => {
     );
   };
 
-  // Group schedules by container
+  // Group schedules by container (only containers 1, 2, 3)
+  // Filter out any schedules with invalid containers
   const schedulesByContainer: Record<number, Schedule[]> = {
     1: schedules.filter(s => s.container === 1),
     2: schedules.filter(s => s.container === 2),
@@ -806,14 +954,6 @@ const ModifyScheduleScreen = () => {
           <Text style={[styles.headerTitle, { color: theme.secondary }]}>
             MODIFY <Text style={[styles.headerHighlight, { color: theme.primary }]}>SCHEDULE</Text>
           </Text>
-        )}
-        {schedules.length > 0 && (
-          <TouchableOpacity 
-            style={[styles.deleteAllButton, { backgroundColor: theme.error }]}
-            onPress={deleteAllSchedules}
-          >
-            <Ionicons name="trash" size={20} color={theme.card} />
-          </TouchableOpacity>
         )}
       </View>
 
@@ -925,8 +1065,22 @@ const ModifyScheduleScreen = () => {
                   const timeStr = schedule.time;
                   const dateStr = schedule.date;
                   const statusLower = (schedule.status || 'Pending').toLowerCase();
-                  const isPending = statusLower === 'pending';
-                  const isEditable = isPending && !saving;
+                  
+                  // Check if schedule is modifiable (not done and not passed time)
+                  let isModifiable = statusLower !== 'done';
+                  if (isModifiable && schedule.date && schedule.time) {
+                    try {
+                      const now = new Date();
+                      const [year, month, day] = schedule.date.split('-').map(Number);
+                      const [hours, minutes] = schedule.time.split(':').map(Number);
+                      const scheduleDateTime = new Date(year, month - 1, day, hours, minutes, 0, 0);
+                      isModifiable = scheduleDateTime >= now;
+                    } catch (error) {
+                      isModifiable = false;
+                    }
+                  }
+                  
+                  const isEditable = isModifiable && !saving;
                   return (
                     <View key={schedule._id} style={[styles.scheduleItem, { backgroundColor: theme.background }]}>
                       <Ionicons name="alarm" size={16} color={theme.primary} />
@@ -938,7 +1092,7 @@ const ModifyScheduleScreen = () => {
                           </Text>
                         )}
                       </View>
-                      <View style={[styles.statusBadge, { backgroundColor: isPending ? theme.success : theme.textSecondary }]}>
+                      <View style={[styles.statusBadge, { backgroundColor: isModifiable ? theme.success : theme.textSecondary }]}>
                         <Text style={[styles.statusText, { color: theme.card }]}>{schedule.status || 'Pending'}</Text>
                       </View>
                       <TouchableOpacity 
@@ -950,10 +1104,19 @@ const ModifyScheduleScreen = () => {
                       </TouchableOpacity>
                       <TouchableOpacity 
                         onPress={() => isEditable && deleteSchedule(schedule._id)}
-                        style={[styles.deleteButton, { opacity: isEditable ? 1 : 0.4 }]}
-                        disabled={!isEditable}
+                        style={[
+                          styles.deleteButton, 
+                          { 
+                            opacity: (isEditable && deletingScheduleId !== schedule._id) ? 1 : 0.4
+                          }
+                        ]}
+                        disabled={!isEditable || deletingScheduleId !== null}
                       >
-                        <Ionicons name="trash-outline" size={18} color={theme.error} />
+                        {deletingScheduleId === schedule._id ? (
+                          <ActivityIndicator size="small" color={theme.error} />
+                        ) : (
+                          <Ionicons name="trash-outline" size={18} color={theme.error} />
+                        )}
                       </TouchableOpacity>
                     </View>
                   );

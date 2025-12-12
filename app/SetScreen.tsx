@@ -675,6 +675,51 @@ const SetScreen = () => {
         console.log(`  [${index + 1}] Container ${record.container} - ${record.time} (Schedule ID: ${results[index]?.scheduleId || 'N/A'})`);
       });
 
+      // Schedule local notifications on the device for each upcoming alarm time
+      // This ensures the app notifies at the same time as the IoT box alarm
+      try {
+        // @ts-expect-error - dynamic import used only at runtime
+        const Notifications = await import('expo-notifications');
+        if (Notifications.default && typeof Notifications.default.scheduleNotificationAsync === 'function') {
+          for (const record of scheduleRecords) {
+            try {
+              const [y, m, d] = String(record.date).split('-').map(Number);
+              const [hh, mm] = String(record.time).split(':').map(Number);
+              const fireDate = new Date(y, (m || 1) - 1, d, hh, mm, 0, 0);
+
+              // Skip times that are already in the past
+              if (!Number.isFinite(fireDate.getTime()) || fireDate.getTime() <= Date.now()) {
+                continue;
+              }
+
+              const med = medications.find(med => med.medId === record.medication);
+              const medName = med ? med.name : 'your medication';
+
+              await Notifications.default.scheduleNotificationAsync({
+                content: {
+                  title: 'Medication Reminder',
+                  body: `Time to take ${medName} from Container ${record.container}`,
+                  sound: true,
+                  ...(Platform.OS === 'android' && { priority: 'high' as const }),
+                  data: { 
+                    container: record.container, 
+                    medicationId: record.medication,
+                    scheduleId: record.scheduleId 
+                  },
+                },
+                trigger: fireDate,
+              });
+            } catch (notifErr) {
+              console.warn('[SetScreen] Failed to schedule local notification:', notifErr);
+            }
+          }
+        } else {
+          console.warn('[SetScreen] expo-notifications not available, skipping local notification scheduling');
+        }
+      } catch (e) {
+        console.warn('[SetScreen] Could not import expo-notifications, skipping local notification scheduling:', e);
+      }
+
       // Save pill counts to backend for each container
       for (let containerNum = 1; containerNum <= 3; containerNum++) {
         if (pillCountsLocked[containerNum] && pillCounts[containerNum] > 0) {
@@ -912,8 +957,20 @@ const SetScreen = () => {
         : '';
       
       // Show success message without verification
+      // After saving:
+      // - Caregiver (acting for an elder): go back to Monitor & Manage (monitoring dashboard)
+      // - Elder (own schedule): go back to ElderDashboard
       Alert.alert('Success', `Schedule saved successfully!${summaryText}`, [
-        { text: 'OK', onPress: () => navigation.navigate("ElderDashboard" as never) }
+        { 
+          text: 'OK', 
+          onPress: () => {
+            if (isActingAsCaregiver) {
+              navigation.navigate("MonitorManageScreen" as never);
+            } else {
+              navigation.navigate("ElderDashboard" as never);
+            }
+          } 
+        }
       ]);
     } catch (err) {
       console.error('Error saving schedule:', err);

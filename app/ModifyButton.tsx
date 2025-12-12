@@ -96,6 +96,31 @@ const ModifyButton = () => {
     }
   };
 
+  // Get selected elder ID for caregivers
+  const getSelectedElderId = async (): Promise<string | null> => {
+    try {
+      const selectedElderId = await AsyncStorage.getItem('selectedElderId');
+      return selectedElderId;
+    } catch (error) {
+      console.error('[ModifyButton] Error getting selected elder ID:', error);
+      return null;
+    }
+  };
+
+  // Get user role from JWT token
+  const getUserRole = async (): Promise<string | null> => {
+    try {
+      const token = await AsyncStorage.getItem('token');
+      if (!token) return null;
+
+      const decodedToken = jwtDecode<DecodedToken>(token.trim());
+      return decodedToken.role || null;
+    } catch (error) {
+      console.error('[ModifyButton] Error getting user role from token:', error);
+      return null;
+    }
+  };
+
   // Load saved data and fetch medications on component mount
   useEffect(() => {
     const loadData = async () => {
@@ -125,7 +150,7 @@ const ModifyButton = () => {
     loadData();
   }, []);
 
-  // Load schedule data from database (same as Monitor & Manage)
+  // Load schedule data from database (preview card at top)
   const loadScheduleData = async () => {
     try {
       const token = await AsyncStorage.getItem('token');
@@ -143,11 +168,51 @@ const ModifyButton = () => {
       });
       const schedulesData = await schedulesResponse.json();
       
-      // Get all schedules and show the latest ones (no user/status filtering) - same as Monitor & Manage
+      // Get all schedules and then filter for the correct owner (elder if caregiver is monitoring, otherwise self)
       const allSchedules = schedulesData.data || [];
+
+      const currentUserId = await getCurrentUserId();
+      const userRole = await getUserRole();
+      const selectedElderId = await getSelectedElderId();
+
+      // Determine if user is acting as caregiver (has a different selectedElderId)
+      const isActingAsCaregiver =
+        !!selectedElderId && String(selectedElderId) !== String(currentUserId);
+
+      // Decide which user ID's schedules to display
+      let scheduleOwnerIdStr = String(currentUserId);
+      let scheduleOwnerIdNum = currentUserId;
+
+      if (isActingAsCaregiver && selectedElderId) {
+        const elderIdNum = parseInt(selectedElderId);
+        if (!isNaN(elderIdNum)) {
+          scheduleOwnerIdNum = elderIdNum;
+          scheduleOwnerIdStr = String(elderIdNum);
+          console.log(
+            `[ModifyButton] Preview: showing schedules for elder ID: ${scheduleOwnerIdNum} (selectedElderId: ${selectedElderId})`
+          );
+        } else {
+          console.log(
+            `[ModifyButton] Preview: ⚠️ Invalid selectedElderId: ${selectedElderId}, falling back to own ID: ${scheduleOwnerIdNum}`
+          );
+        }
+      } else {
+        console.log(
+          `[ModifyButton] Preview: showing schedules for own ID: ${scheduleOwnerIdNum} (role: ${userRole ?? 'unknown'})`
+        );
+      }
+
+      const ownerSchedules = allSchedules.filter((s: any) => {
+        const scheduleUserIdNum = parseInt(s.user);
+        const scheduleUserIdStr = s.user?.toString?.() || '';
+        return (
+          scheduleUserIdStr === scheduleOwnerIdStr ||
+          scheduleUserIdNum === scheduleOwnerIdNum
+        );
+      });
       
-      // Sort by schedule ID (highest first) and take top 3, then arrange by container number - same as Monitor & Manage
-      const sortedSchedules = allSchedules
+      // Sort by schedule ID (highest first) and take top 3, then arrange by container number
+      const sortedSchedules = ownerSchedules
         .sort((a: any, b: any) => b.scheduleId - a.scheduleId) // Sort by highest schedule ID first
         .slice(0, 3) // Take top 3 highest schedule IDs
         .sort((a: any, b: any) => {
@@ -188,7 +253,45 @@ const ModifyButton = () => {
       
       if (schedules && schedules.length > 0) {
         const currentUserId = await getCurrentUserId();
-        const userSchedules = schedules.filter((s: any) => s.user === currentUserId);
+        const userRole = await getUserRole();
+        const selectedElderId = await getSelectedElderId();
+
+        // Determine if user is acting as caregiver (has a different selectedElderId)
+        const isActingAsCaregiver =
+          !!selectedElderId && String(selectedElderId) !== String(currentUserId);
+
+        // Decide which user ID's schedules to load
+        let scheduleOwnerIdStr = String(currentUserId);
+        let scheduleOwnerIdNum = currentUserId;
+
+        if (isActingAsCaregiver && selectedElderId) {
+          const elderIdNum = parseInt(selectedElderId);
+          if (!isNaN(elderIdNum)) {
+            scheduleOwnerIdNum = elderIdNum;
+            scheduleOwnerIdStr = String(elderIdNum);
+            console.log(
+              `[ModifyButton] Caregiver modifying schedules for elder ID: ${scheduleOwnerIdNum} (selectedElderId: ${selectedElderId})`
+            );
+          } else {
+            console.log(
+              `[ModifyButton] ⚠️ Invalid selectedElderId: ${selectedElderId}, falling back to own ID: ${scheduleOwnerIdNum}`
+            );
+          }
+        } else {
+          console.log(
+            `[ModifyButton] Modifying schedules for own ID: ${scheduleOwnerIdNum} (role: ${userRole ?? 'unknown'})`
+          );
+        }
+
+        // Filter schedules for the correct owner (elder if caregiver is monitoring, otherwise self)
+        const userSchedules = schedules.filter((s: any) => {
+          const scheduleUserIdNum = parseInt(s.user);
+          const scheduleUserIdStr = s.user?.toString?.() || '';
+          return (
+            scheduleUserIdStr === scheduleOwnerIdStr ||
+            scheduleUserIdNum === scheduleOwnerIdNum
+          );
+        });
         
         // Group schedules by container and reconstruct our app format
         const selectedPills: Record<number, string | null> = { 1: null, 2: null, 3: null };
@@ -274,6 +377,33 @@ const ModifyButton = () => {
       setSaving(true);
       
       const currentUserId = await getCurrentUserId();
+      const userRole = await getUserRole();
+      const selectedElderId = await getSelectedElderId();
+
+      // Determine if user is acting as caregiver (has a different selectedElderId)
+      const isActingAsCaregiver =
+        !!selectedElderId && String(selectedElderId) !== String(currentUserId);
+
+      // Decide which user ID to use for saving schedules
+      let scheduleUserId = currentUserId;
+
+      if (isActingAsCaregiver && selectedElderId) {
+        const elderIdNum = parseInt(selectedElderId);
+        if (!isNaN(elderIdNum)) {
+          scheduleUserId = elderIdNum;
+          console.log(
+            `[ModifyButton] Caregiver saving schedules for elder ID: ${scheduleUserId} (selectedElderId: ${selectedElderId})`
+          );
+        } else {
+          console.log(
+            `[ModifyButton] ⚠️ Invalid selectedElderId: ${selectedElderId}, using own ID: ${scheduleUserId}`
+          );
+        }
+      } else {
+        console.log(
+          `[ModifyButton] Saving schedules for own ID: ${scheduleUserId} (role: ${userRole ?? 'unknown'})`
+        );
+      }
       
       // First, get existing schedules to determine which ones to update vs create
       const token = await AsyncStorage.getItem('token');
@@ -315,7 +445,7 @@ const ModifyButton = () => {
             containerAlarms.forEach(alarmDate => {
               const scheduleRecord = {
                 scheduleId: scheduleId++,
-                user: currentUserId, // Use current user ID from token
+                user: scheduleUserId, // Use elder's ID if caregiver is monitoring, otherwise own ID
                 medication: medication.medId, // Use medication ID (number) as required by backend
                 container: containerNum, // Add container number
                 date: alarmDate.getFullYear() + '-' + 

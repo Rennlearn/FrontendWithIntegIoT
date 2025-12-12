@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { View, Text, TouchableOpacity, StyleSheet, Image, Alert, AppState, ScrollView, FlatList } from 'react-native';
+import { View, Text, TouchableOpacity, StyleSheet, Image, Alert, AppState, ScrollView, FlatList, ActivityIndicator } from 'react-native';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -24,6 +24,7 @@ const CaregiverDashboard: React.FC = () => {
   // Bluetooth and locate box state
   const [isBluetoothConnected, setIsBluetoothConnected] = useState(false);
   const [locateBoxActive, setLocateBoxActive] = useState(false);
+  const [locatingBox, setLocatingBox] = useState(false);
   
   // Connected elders state
   const [connectedElders, setConnectedElders] = useState<any[]>([]);
@@ -31,6 +32,9 @@ const CaregiverDashboard: React.FC = () => {
   const [selectedElderName, setSelectedElderName] = useState<string | null>(null);
   const [loadingElders, setLoadingElders] = useState(false);
   const [hasActiveConnection, setHasActiveConnection] = useState<boolean>(false);
+  const [selectingElder, setSelectingElder] = useState<string | null>(null);
+  const [navigatingTo, setNavigatingTo] = useState<'eldersProf' | 'monitorManage' | null>(null);
+  const [loggingOut, setLoggingOut] = useState(false);
   
   // Legacy design: no real-time notification center or monitoring dashboard
 
@@ -367,7 +371,9 @@ const CaregiverDashboard: React.FC = () => {
 
   // Select elder for monitoring
   const selectElder = async (elderId: string, elderName: string) => {
+    if (selectingElder) return; // Prevent double-clicks
     try {
+      setSelectingElder(elderId);
       // Check if there's an active connection first
       const hasConnection = await checkCaregiverConnection(elderId);
       
@@ -391,6 +397,8 @@ const CaregiverDashboard: React.FC = () => {
       console.error('Error selecting elder:', error);
       Alert.alert('Error', 'Failed to select elder');
       setHasActiveConnection(false);
+    } finally {
+      setSelectingElder(null);
     }
   };
 
@@ -451,6 +459,7 @@ const CaregiverDashboard: React.FC = () => {
   };
 
   const handleLocateBox = async () => {
+    if (locatingBox) return; // Prevent double-clicks
     if (!isBluetoothConnected) {
       Alert.alert(
         'Bluetooth Not Connected',
@@ -464,6 +473,7 @@ const CaregiverDashboard: React.FC = () => {
     }
 
     try {
+      setLocatingBox(true);
       if (locateBoxActive) {
         // Stop locate box
         const success = await BluetoothService.sendCommand('STOP_LOCATE');
@@ -486,11 +496,14 @@ const CaregiverDashboard: React.FC = () => {
     } catch (error) {
       console.error('Locate box error:', error);
       Alert.alert('Error', 'Failed to control locate box. Please check your connection.');
+    } finally {
+      setLocatingBox(false);
     }
   };
 
 
   const handleLogout = () => {
+    if (loggingOut) return; // Prevent double-clicks
     Alert.alert(
       'Logout',
       'Are you sure you want to logout?',
@@ -501,6 +514,7 @@ const CaregiverDashboard: React.FC = () => {
           style: 'destructive',
           onPress: async () => {
             try {
+              setLoggingOut(true);
               await AsyncStorage.multiRemove([
                 'token',
                 'userRole',
@@ -510,6 +524,7 @@ const CaregiverDashboard: React.FC = () => {
             } catch (error) {
               console.error('Logout error:', error);
               Alert.alert('Error', 'Failed to logout. Please try again.');
+              setLoggingOut(false);
             }
           },
         },
@@ -540,8 +555,13 @@ const CaregiverDashboard: React.FC = () => {
         <TouchableOpacity 
           style={styles.logoutButton} 
           onPress={handleLogout}
+          disabled={loggingOut}
         >
-          <Ionicons name="log-out-outline" size={24} color={theme.text} />
+          {loggingOut ? (
+            <ActivityIndicator size="small" color={theme.text} />
+          ) : (
+            <Ionicons name="log-out-outline" size={24} color={theme.text} />
+          )}
         </TouchableOpacity>
       </View>
 
@@ -597,16 +617,22 @@ const CaregiverDashboard: React.FC = () => {
             { 
               backgroundColor: locateBoxActive ? theme.warning : theme.background,
               borderWidth: isBluetoothConnected ? 2 : 1,
-              borderColor: isBluetoothConnected ? theme.success : theme.border
+              borderColor: isBluetoothConnected ? theme.success : theme.border,
+              opacity: locatingBox ? 0.6 : 1
             }
           ]} 
           onPress={handleLocateBox}
+          disabled={locatingBox}
         >
-          <Ionicons 
-            name="location" 
-            size={28} 
-            color={locateBoxActive ? theme.card : (isBluetoothConnected ? theme.success : theme.text)} 
-          />
+          {locatingBox ? (
+            <ActivityIndicator size="small" color={locateBoxActive ? theme.card : (isBluetoothConnected ? theme.success : theme.text)} />
+          ) : (
+            <Ionicons 
+              name="location" 
+              size={28} 
+              color={locateBoxActive ? theme.card : (isBluetoothConnected ? theme.success : theme.text)} 
+            />
+          )}
           <Text style={[
             styles.actionLabel, 
             { 
@@ -614,9 +640,9 @@ const CaregiverDashboard: React.FC = () => {
               fontWeight: locateBoxActive ? 'bold' : 'normal'
             }
           ]}>
-            {locateBoxActive ? 'Stop Locate' : 'Locate Box'}
+            {locatingBox ? 'Processing...' : (locateBoxActive ? 'Stop Locate' : 'Locate Box')}
           </Text>
-          {isBluetoothConnected && (
+          {isBluetoothConnected && !locatingBox && (
             <View style={[styles.connectionIndicator, { backgroundColor: theme.success }]} />
           )}
         </TouchableOpacity>
@@ -678,11 +704,24 @@ const CaregiverDashboard: React.FC = () => {
                   )}
                   {!isSelected && (
                     <TouchableOpacity
-                      style={[styles.monitorButton, { backgroundColor: theme.primary }]}
+                      style={[
+                        styles.monitorButton, 
+                        { 
+                          backgroundColor: theme.primary,
+                          opacity: selectingElder === elderId ? 0.6 : 1
+                        }
+                      ]}
                       onPress={() => selectElder(elderId, item.name)}
+                      disabled={selectingElder !== null}
                     >
-                      <Ionicons name="eye" size={16} color={theme.card} />
-                      <Text style={[styles.monitorButtonText, { color: theme.card }]}>Monitor</Text>
+                      {selectingElder === elderId ? (
+                        <ActivityIndicator size="small" color={theme.card} />
+                      ) : (
+                        <>
+                          <Ionicons name="eye" size={16} color={theme.card} />
+                          <Text style={[styles.monitorButtonText, { color: theme.card }]}>Monitor</Text>
+                        </>
+                      )}
                     </TouchableOpacity>
                   )}
                 </View>
@@ -696,32 +735,72 @@ const CaregiverDashboard: React.FC = () => {
       {/* Dashboard Buttons - Compact */}
       <View style={styles.buttonContainer}>
         <TouchableOpacity 
-          style={[styles.dashboardButton, { backgroundColor: theme.primary }]}
+          style={[
+            styles.dashboardButton, 
+            { 
+              backgroundColor: theme.primary,
+              opacity: navigatingTo !== null ? 0.6 : 1
+            }
+          ]}
           onPress={async () => {
-            await router.push('/EldersProf');
-            // Reload elders when returning from EldersProf
-            setTimeout(() => {
+            if (navigatingTo) return;
+            try {
+              setNavigatingTo('eldersProf');
+              await router.push('/EldersProf');
+              // Reload elders when returning from EldersProf
+              setTimeout(() => {
               loadConnectedElders();
             }, 500);
+            } finally {
+              setTimeout(() => setNavigatingTo(null), 400);
+            }
           }}
+          disabled={navigatingTo !== null}
         >
-          <Ionicons name="person-add" size={22} color={theme.card} />
-          <Text style={[styles.buttonText, { color: theme.card }]}>INPUT ELDER'S PROFILE</Text>
+          {navigatingTo === 'eldersProf' ? (
+            <ActivityIndicator size="small" color={theme.card} />
+          ) : (
+            <>
+              <Ionicons name="person-add" size={22} color={theme.card} />
+              <Text style={[styles.buttonText, { color: theme.card }]}>INPUT ELDER'S PROFILE</Text>
+            </>
+          )}
         </TouchableOpacity>
         
         {/* Only show Monitor & Manage button if elder is selected AND has active connection */}
         {selectedElderId && selectedElderName && hasActiveConnection ? (
           <TouchableOpacity 
-            style={[styles.dashboardButton, { backgroundColor: theme.secondary }]}
-            onPress={() => router.push('/MonitorManageScreen')}
+            style={[
+              styles.dashboardButton, 
+              { 
+                backgroundColor: theme.secondary,
+                opacity: navigatingTo !== null ? 0.6 : 1
+              }
+            ]}
+            onPress={async () => {
+              if (navigatingTo) return;
+              try {
+                setNavigatingTo('monitorManage');
+                await router.push('/MonitorManageScreen');
+              } finally {
+                setTimeout(() => setNavigatingTo(null), 400);
+              }
+            }}
+            disabled={navigatingTo !== null}
           >
-            <Ionicons name="desktop" size={22} color={theme.card} />
-            <Text style={[styles.buttonText, { color: theme.card }]}>MONITOR & MANAGE</Text>
-            <View style={[styles.monitoringBadge, { backgroundColor: theme.primary }]}>
-              <Text style={[styles.monitoringBadgeText, { color: theme.card }]}>
-                {selectedElderName}
-              </Text>
-            </View>
+            {navigatingTo === 'monitorManage' ? (
+              <ActivityIndicator size="small" color={theme.card} />
+            ) : (
+              <>
+                <Ionicons name="desktop" size={22} color={theme.card} />
+                <Text style={[styles.buttonText, { color: theme.card }]}>MONITOR & MANAGE</Text>
+                <View style={[styles.monitoringBadge, { backgroundColor: theme.primary }]}>
+                  <Text style={[styles.monitoringBadgeText, { color: theme.card }]}>
+                    {selectedElderName}
+                  </Text>
+                </View>
+              </>
+            )}
           </TouchableOpacity>
         ) : (
           <View style={[styles.disabledButton, { backgroundColor: theme.background, borderColor: theme.border }]}>

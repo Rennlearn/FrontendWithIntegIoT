@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { View, Text, TouchableOpacity, StyleSheet, Image, Alert, ScrollView } from 'react-native';
+import { View, Text, TouchableOpacity, StyleSheet, Image, Alert, ScrollView, ActivityIndicator } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import { useTheme } from '@/context/ThemeContext';
@@ -19,6 +19,8 @@ const BluetoothScreen = () => {
   const [phoneNumber, setPhoneNumber] = useState('+1234567890');
   const [locateBoxActive, setLocateBoxActive] = useState(false);
   const [syncingRtc, setSyncingRtc] = useState(false);
+  const [connectingToDevice, setConnectingToDevice] = useState<string | null>(null);
+  const [sendingCommand, setSendingCommand] = useState<string | null>(null);
 
   useEffect(() => {
     checkBluetoothPermissions();
@@ -113,7 +115,9 @@ const BluetoothScreen = () => {
   };
 
   const connectToDevice = async (device: BluetoothDevice): Promise<void> => {
+    if (connectingToDevice) return; // Prevent double-clicks
     try {
+      setConnectingToDevice(device.address);
       const success = await BluetoothService.connectToDevice(device);
       if (success) {
         setIsConnected(true);
@@ -130,6 +134,8 @@ const BluetoothScreen = () => {
     } catch (error) {
       console.error('Connection error:', error);
       Alert.alert('Error', 'Failed to connect to device');
+    } finally {
+      setConnectingToDevice(null);
     }
   };
 
@@ -151,8 +157,10 @@ const BluetoothScreen = () => {
       Alert.alert('Not Connected', 'Please connect to a device first');
       return;
     }
+    if (sendingCommand) return; // Prevent double-clicks
 
     try {
+      setSendingCommand(command);
       console.log(`Sending real command "${command}" to HC-05...`);
       const success = await BluetoothService.sendCommand(command);
       if (success) {
@@ -164,6 +172,8 @@ const BluetoothScreen = () => {
     } catch (error) {
       console.error('Command error:', error);
       Alert.alert('Command Error', 'Failed to send command to hardware.');
+    } finally {
+      setSendingCommand(null);
     }
   };
 
@@ -175,27 +185,27 @@ const BluetoothScreen = () => {
     }
   };
 
-  const toggleLED = () => {
+  const toggleLED = async () => {
     const command = ledStatus ? 'TURN OFF' : 'TURN ON';
-    sendCommand(command);
+    await sendCommand(command);
     setLedStatus(!ledStatus);
   };
 
-  const toggleBuzzer = () => {
+  const toggleBuzzer = async () => {
     const command = buzzerStatus ? 'TURN OFF' : 'TURN ON';
-    sendCommand(command);
+    await sendCommand(command);
     setBuzzerStatus(!buzzerStatus);
   };
 
-  const triggerAlert = () => {
-    sendCommand('s'); // Send SMS command (triggers LED and buzzer)
+  const triggerAlert = async () => {
+    await sendCommand('ALERT'); // Send ALERT command (triggers LED and buzzer)
     setLedStatus(true);
     setBuzzerStatus(true);
-    Alert.alert('Alert Sent', 'SMS sent and LED/Buzzer activated!');
+    Alert.alert('Alert Sent', 'Alert command sent and LED/Buzzer activated!');
   };
 
-  const stopAlert = () => {
-    sendCommand('TURN OFF');
+  const stopAlert = async () => {
+    await sendCommand('STOP');
     setLedStatus(false);
     setBuzzerStatus(false);
   };
@@ -282,13 +292,21 @@ const BluetoothScreen = () => {
         <TouchableOpacity 
           style={[
             styles.connectButton, 
-            { backgroundColor: isConnected ? theme.warning : theme.primary }
+            { 
+              backgroundColor: isConnected ? theme.warning : theme.primary,
+              opacity: (isScanning || connectingToDevice) ? 0.6 : 1
+            }
           ]}
           onPress={handleConnect}
+          disabled={isScanning || connectingToDevice !== null}
         >
-          <Text style={[styles.buttonText, { color: theme.card }]}>
-            {isScanning ? 'SCANNING...' : isConnected ? 'DISCONNECT' : 'SCAN & CONNECT'}
-          </Text>
+          {isScanning || connectingToDevice ? (
+            <ActivityIndicator size="small" color={theme.card} />
+          ) : (
+            <Text style={[styles.buttonText, { color: theme.card }]}>
+              {isConnected ? 'DISCONNECT' : 'SCAN & CONNECT'}
+            </Text>
+          )}
         </TouchableOpacity>
       </View>
 
@@ -296,17 +314,33 @@ const BluetoothScreen = () => {
       {!isConnected && devices.length > 0 && (
         <View style={[styles.deviceList, { backgroundColor: theme.card }]}>
           <Text style={[styles.sectionTitle, { color: theme.text }]}>Available Devices:</Text>
-          {devices.map((device, index) => (
-            <TouchableOpacity
-              key={index}
-              style={[styles.deviceItem, { borderColor: theme.border }]}
-              onPress={() => connectToDevice(device)}
-            >
-              <Ionicons name="bluetooth" size={24} color={theme.primary} />
-              <Text style={[styles.deviceName, { color: theme.text }]}>{device.name}</Text>
-              <Text style={[styles.deviceAddress, { color: theme.textSecondary }]}>{device.address}</Text>
-            </TouchableOpacity>
-          ))}
+          {devices.map((device, index) => {
+            const isConnecting = connectingToDevice === device.address;
+            return (
+              <TouchableOpacity
+                key={index}
+                style={[
+                  styles.deviceItem, 
+                  { 
+                    borderColor: theme.border,
+                    opacity: (connectingToDevice && !isConnecting) ? 0.5 : 1
+                  }
+                ]}
+                onPress={() => connectToDevice(device)}
+                disabled={connectingToDevice !== null}
+              >
+                {isConnecting ? (
+                  <ActivityIndicator size="small" color={theme.primary} />
+                ) : (
+                  <Ionicons name="bluetooth" size={24} color={theme.primary} />
+                )}
+                <Text style={[styles.deviceName, { color: theme.text }]}>{device.name}</Text>
+                <Text style={[styles.deviceAddress, { color: theme.textSecondary }]}>
+                  {isConnecting ? 'Connecting...' : device.address}
+                </Text>
+              </TouchableOpacity>
+            );
+          })}
         </View>
       )}
 
@@ -320,10 +354,21 @@ const BluetoothScreen = () => {
             <Ionicons name="checkmark-circle" size={30} color={theme.success} />
             <Text style={[styles.controlLabel, { color: theme.text }]}>Test ON (s)</Text>
             <TouchableOpacity 
-              style={[styles.controlButton, { backgroundColor: theme.success }]}
+              style={[
+                styles.controlButton, 
+                { 
+                  backgroundColor: theme.success,
+                  opacity: sendingCommand === 's' ? 0.6 : 1
+                }
+              ]}
               onPress={() => sendCommand('s')}
+              disabled={sendingCommand !== null}
             >
-              <Text style={[styles.controlButtonText, { color: theme.card }]}>TEST ON</Text>
+              {sendingCommand === 's' ? (
+                <ActivityIndicator size="small" color={theme.card} />
+              ) : (
+                <Text style={[styles.controlButtonText, { color: theme.card }]}>TEST ON</Text>
+              )}
             </TouchableOpacity>
           </View>
 
@@ -332,10 +377,21 @@ const BluetoothScreen = () => {
             <Ionicons name="close-circle" size={30} color={theme.error} />
             <Text style={[styles.controlLabel, { color: theme.text }]}>Test OFF (r)</Text>
             <TouchableOpacity 
-              style={[styles.controlButton, { backgroundColor: theme.error }]}
+              style={[
+                styles.controlButton, 
+                { 
+                  backgroundColor: theme.error,
+                  opacity: sendingCommand === 'r' ? 0.6 : 1
+                }
+              ]}
               onPress={() => sendCommand('r')}
+              disabled={sendingCommand !== null}
             >
-              <Text style={[styles.controlButtonText, { color: theme.card }]}>TEST OFF</Text>
+              {sendingCommand === 'r' ? (
+                <ActivityIndicator size="small" color={theme.card} />
+              ) : (
+                <Text style={[styles.controlButtonText, { color: theme.card }]}>TEST OFF</Text>
+              )}
             </TouchableOpacity>
           </View>
 
@@ -350,13 +406,21 @@ const BluetoothScreen = () => {
             <TouchableOpacity 
               style={[
                 styles.controlButton, 
-                { backgroundColor: ledStatus ? theme.success : theme.primary }
+                { 
+                  backgroundColor: ledStatus ? theme.success : theme.primary,
+                  opacity: sendingCommand === 'l' ? 0.6 : 1
+                }
               ]}
               onPress={toggleLED}
+              disabled={sendingCommand !== null}
             >
-              <Text style={[styles.controlButtonText, { color: theme.card }]}>
-                {ledStatus ? 'ON' : 'OFF'}
-              </Text>
+              {sendingCommand === 'l' ? (
+                <ActivityIndicator size="small" color={theme.card} />
+              ) : (
+                <Text style={[styles.controlButtonText, { color: theme.card }]}>
+                  {ledStatus ? 'ON' : 'OFF'}
+                </Text>
+              )}
             </TouchableOpacity>
           </View>
 
@@ -371,13 +435,21 @@ const BluetoothScreen = () => {
             <TouchableOpacity 
               style={[
                 styles.controlButton, 
-                { backgroundColor: buzzerStatus ? theme.success : theme.primary }
+                { 
+                  backgroundColor: buzzerStatus ? theme.success : theme.primary,
+                  opacity: sendingCommand === 'b' ? 0.6 : 1
+                }
               ]}
               onPress={toggleBuzzer}
+              disabled={sendingCommand !== null}
             >
-              <Text style={[styles.controlButtonText, { color: theme.card }]}>
-                {buzzerStatus ? 'ON' : 'OFF'}
-              </Text>
+              {sendingCommand === 'b' ? (
+                <ActivityIndicator size="small" color={theme.card} />
+              ) : (
+                <Text style={[styles.controlButtonText, { color: theme.card }]}>
+                  {buzzerStatus ? 'ON' : 'OFF'}
+                </Text>
+              )}
             </TouchableOpacity>
           </View>
 
@@ -386,10 +458,21 @@ const BluetoothScreen = () => {
             <Ionicons name="notifications" size={30} color={theme.warning} />
             <Text style={[styles.controlLabel, { color: theme.text }]}>Medication Alert</Text>
             <TouchableOpacity 
-              style={[styles.controlButton, { backgroundColor: theme.warning }]}
+              style={[
+                styles.controlButton, 
+                { 
+                  backgroundColor: theme.warning,
+                  opacity: sendingCommand === 'ALERT' ? 0.6 : 1
+                }
+              ]}
               onPress={triggerAlert}
+              disabled={sendingCommand !== null}
             >
-              <Text style={[styles.controlButtonText, { color: theme.card }]}>ALERT</Text>
+              {sendingCommand === 'ALERT' ? (
+                <ActivityIndicator size="small" color={theme.card} />
+              ) : (
+                <Text style={[styles.controlButtonText, { color: theme.card }]}>ALERT</Text>
+              )}
             </TouchableOpacity>
           </View>
 
@@ -398,10 +481,21 @@ const BluetoothScreen = () => {
             <Ionicons name="stop-circle" size={30} color={theme.error} />
             <Text style={[styles.controlLabel, { color: theme.text }]}>Stop Alert</Text>
             <TouchableOpacity 
-              style={[styles.controlButton, { backgroundColor: theme.error }]}
+              style={[
+                styles.controlButton, 
+                { 
+                  backgroundColor: theme.error,
+                  opacity: sendingCommand === 'STOP' ? 0.6 : 1
+                }
+              ]}
               onPress={stopAlert}
+              disabled={sendingCommand !== null}
             >
-              <Text style={[styles.controlButtonText, { color: theme.card }]}>STOP</Text>
+              {sendingCommand === 'STOP' ? (
+                <ActivityIndicator size="small" color={theme.card} />
+              ) : (
+                <Text style={[styles.controlButtonText, { color: theme.card }]}>STOP</Text>
+              )}
             </TouchableOpacity>
           </View>
 
@@ -410,10 +504,21 @@ const BluetoothScreen = () => {
             <Ionicons name="mail" size={30} color={theme.primary} />
             <Text style={[styles.controlLabel, { color: theme.text }]}>Send SMS</Text>
             <TouchableOpacity 
-              style={[styles.controlButton, { backgroundColor: theme.primary }]}
+              style={[
+                styles.controlButton, 
+                { 
+                  backgroundColor: theme.primary,
+                  opacity: sendingCommand === 's' ? 0.6 : 1
+                }
+              ]}
               onPress={sendSMS}
+              disabled={sendingCommand !== null}
             >
-              <Text style={[styles.controlButtonText, { color: theme.card }]}>SMS</Text>
+              {sendingCommand === 's' ? (
+                <ActivityIndicator size="small" color={theme.card} />
+              ) : (
+                <Text style={[styles.controlButtonText, { color: theme.card }]}>SMS</Text>
+              )}
             </TouchableOpacity>
           </View>
 
@@ -422,10 +527,21 @@ const BluetoothScreen = () => {
             <Ionicons name="mail-open" size={30} color={theme.secondary} />
             <Text style={[styles.controlLabel, { color: theme.text }]}>Listen for SMS</Text>
             <TouchableOpacity 
-              style={[styles.controlButton, { backgroundColor: theme.secondary }]}
+              style={[
+                styles.controlButton, 
+                { 
+                  backgroundColor: theme.secondary,
+                  opacity: sendingCommand === 'r' ? 0.6 : 1
+                }
+              ]}
               onPress={startReceivingSMS}
+              disabled={sendingCommand !== null}
             >
-              <Text style={[styles.controlButtonText, { color: theme.card }]}>LISTEN</Text>
+              {sendingCommand === 'r' ? (
+                <ActivityIndicator size="small" color={theme.card} />
+              ) : (
+                <Text style={[styles.controlButtonText, { color: theme.card }]}>LISTEN</Text>
+              )}
             </TouchableOpacity>
           </View>
 
@@ -434,10 +550,21 @@ const BluetoothScreen = () => {
             <Ionicons name="call" size={30} color={theme.success} />
             <Text style={[styles.controlLabel, { color: theme.text }]}>Make Call</Text>
             <TouchableOpacity 
-              style={[styles.controlButton, { backgroundColor: theme.success }]}
+              style={[
+                styles.controlButton, 
+                { 
+                  backgroundColor: theme.success,
+                  opacity: sendingCommand === 'c' ? 0.6 : 1
+                }
+              ]}
               onPress={makeCall}
+              disabled={sendingCommand !== null}
             >
-              <Text style={[styles.controlButtonText, { color: theme.card }]}>CALL</Text>
+              {sendingCommand === 'c' ? (
+                <ActivityIndicator size="small" color={theme.card} />
+              ) : (
+                <Text style={[styles.controlButtonText, { color: theme.card }]}>CALL</Text>
+              )}
             </TouchableOpacity>
           </View>
 
@@ -452,13 +579,21 @@ const BluetoothScreen = () => {
             <TouchableOpacity 
               style={[
                 styles.controlButton, 
-                { backgroundColor: locateBoxActive ? theme.warning : theme.primary }
+                { 
+                  backgroundColor: locateBoxActive ? theme.warning : theme.primary,
+                  opacity: (sendingCommand === 'LOCATE' || sendingCommand === 'STOP_LOCATE') ? 0.6 : 1
+                }
               ]}
               onPress={locateBoxActive ? stopLocateBox : startLocateBox}
+              disabled={sendingCommand !== null}
             >
-              <Text style={[styles.controlButtonText, { color: theme.card }]}>
-                {locateBoxActive ? 'DONE' : 'LOCATE'}
-              </Text>
+              {(sendingCommand === 'LOCATE' || sendingCommand === 'STOP_LOCATE') ? (
+                <ActivityIndicator size="small" color={theme.card} />
+              ) : (
+                <Text style={[styles.controlButtonText, { color: theme.card }]}>
+                  {locateBoxActive ? 'DONE' : 'LOCATE'}
+                </Text>
+              )}
             </TouchableOpacity>
           </View>
 
@@ -467,13 +602,21 @@ const BluetoothScreen = () => {
             <Ionicons name="calendar" size={30} color={theme.primary} />
             <Text style={[styles.controlLabel, { color: theme.text }]}>Sync RTC (SETTIME)</Text>
             <TouchableOpacity
-              style={[styles.controlButton, { backgroundColor: theme.primary }]}
+              style={[
+                styles.controlButton, 
+                { 
+                  backgroundColor: theme.primary,
+                  opacity: syncingRtc ? 0.6 : 1
+                }
+              ]}
               onPress={syncRtc}
               disabled={syncingRtc}
             >
-              <Text style={[styles.controlButtonText, { color: theme.card }]}>
-                {syncingRtc ? 'SYNCING...' : 'SYNC RTC'}
-              </Text>
+              {syncingRtc ? (
+                <ActivityIndicator size="small" color={theme.card} />
+              ) : (
+                <Text style={[styles.controlButtonText, { color: theme.card }]}>SYNC RTC</Text>
+              )}
             </TouchableOpacity>
           </View>
         </View>

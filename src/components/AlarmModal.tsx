@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import { View, Text, TouchableOpacity, Modal, StyleSheet, Animated, Alert } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useTheme } from '@/context/ThemeContext';
@@ -18,9 +18,16 @@ const AlarmModal: React.FC<AlarmModalProps> = ({ visible, container, time, onDis
   const { isDarkMode } = useTheme();
   const theme = isDarkMode ? darkTheme : lightTheme;
   const [pulseAnim] = useState(new Animated.Value(1));
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const [soundInterval, setSoundInterval] = useState<NodeJS.Timeout | null>(null);
+  const startTimeRef = useRef<number | null>(null);
 
   useEffect(() => {
     if (visible) {
+      // Record start time
+      startTimeRef.current = Date.now();
+      setElapsedSeconds(0);
+      
       // Pulse animation
       Animated.loop(
         Animated.sequence([
@@ -36,10 +43,87 @@ const AlarmModal: React.FC<AlarmModalProps> = ({ visible, container, time, onDis
           }),
         ])
       ).start();
+      
+      // Start playing alarm sound repeatedly
+      const playAlarmSound = async () => {
+        try {
+          // @ts-expect-error - Dynamic import for lazy loading (works at runtime)
+          const { soundService } = await import('@/services/soundService');
+          await soundService.initialize();
+          await soundService.playAlarmSound('alarm');
+        } catch (soundError) {
+          console.warn('[AlarmModal] Failed to play alarm sound:', soundError);
+        }
+      };
+      
+      // Play immediately
+      playAlarmSound();
+      
+      // Keep playing every 3 seconds for 2 minutes (40 times)
+      const interval = setInterval(() => {
+        playAlarmSound();
+      }, 3000);
+      
+      setSoundInterval(interval);
+      
+      // Update elapsed time every second
+      const timerInterval = setInterval(() => {
+        if (startTimeRef.current) {
+          const elapsed = Math.floor((Date.now() - startTimeRef.current) / 1000);
+          setElapsedSeconds(elapsed);
+        }
+      }, 1000);
+      
+      // Cleanup after 2 minutes (120 seconds)
+      const cleanupTimer = setTimeout(() => {
+        console.log('[AlarmModal] 2 minutes elapsed - alarm can now be dismissed');
+      }, 120000);
+      
+      return () => {
+        clearInterval(interval);
+        clearInterval(timerInterval);
+        clearTimeout(cleanupTimer);
+        setSoundInterval(null);
+        startTimeRef.current = null;
+        
+        // Stop sound when modal closes
+        try {
+          // @ts-expect-error - Dynamic import for lazy loading (works at runtime)
+          import('@/services/soundService').then(({ soundService }) => {
+            soundService.stopSound();
+          });
+        } catch (error) {
+          console.warn('[AlarmModal] Failed to stop sound:', error);
+        }
+      };
+    } else {
+      // Cleanup when modal is hidden
+      if (soundInterval) {
+        clearInterval(soundInterval);
+        setSoundInterval(null);
+      }
+      startTimeRef.current = null;
+      setElapsedSeconds(0);
     }
   }, [visible]);
 
   const handleStopAlarm = async () => {
+    // Check if alarm has been visible for at least 2 minutes
+    if (startTimeRef.current) {
+      const elapsed = Date.now() - startTimeRef.current;
+      const minDuration = 120000; // 2 minutes in milliseconds
+      
+      if (elapsed < minDuration) {
+        const remainingSeconds = Math.ceil((minDuration - elapsed) / 1000);
+        Alert.alert(
+          'Alarm Active',
+          `The alarm must remain active for at least 2 minutes.\n\nPlease wait ${remainingSeconds} more second(s) before dismissing.`,
+          [{ text: 'OK' }]
+        );
+        return; // Don't allow dismissal yet
+      }
+    }
+    
     try {
       const isConnected = await BluetoothService.isConnectionActive();
       if (isConnected) {
@@ -187,6 +271,25 @@ const AlarmModal: React.FC<AlarmModalProps> = ({ visible, container, time, onDis
           <Text style={[styles.containerText, { color: theme.text }]}>Container {container}</Text>
           <Text style={[styles.timeText, { color: theme.textSecondary }]}>{time}</Text>
           
+          {/* Elapsed time display */}
+          {elapsedSeconds < 120 && (
+            <View style={[styles.timerContainer, { backgroundColor: theme.error + '20', borderColor: theme.error }]}>
+              <Ionicons name="time-outline" size={16} color={theme.error} />
+              <Text style={[styles.timerText, { color: theme.error }]}>
+                Alarm active: {Math.floor(elapsedSeconds / 60)}:{(elapsedSeconds % 60).toString().padStart(2, '0')} / 2:00
+              </Text>
+            </View>
+          )}
+          
+          {elapsedSeconds >= 120 && (
+            <View style={[styles.timerContainer, { backgroundColor: theme.primary + '20', borderColor: theme.primary }]}>
+              <Ionicons name="checkmark-circle-outline" size={16} color={theme.primary} />
+              <Text style={[styles.timerText, { color: theme.primary }]}>
+                You can now dismiss the alarm
+              </Text>
+            </View>
+          )}
+          
           <TouchableOpacity
             style={[styles.stopButton, { backgroundColor: theme.primary }]}
             onPress={handleStopAlarm}
@@ -246,6 +349,20 @@ const styles = StyleSheet.create({
   stopButtonText: {
     fontSize: 18,
     fontWeight: 'bold',
+  },
+  timerContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 15,
+    paddingVertical: 8,
+    borderRadius: 15,
+    borderWidth: 1,
+    marginBottom: 20,
+    gap: 8,
+  },
+  timerText: {
+    fontSize: 14,
+    fontWeight: '600',
   },
 });
 

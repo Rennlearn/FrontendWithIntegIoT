@@ -763,48 +763,45 @@ const MonitorManageScreen = () => {
       });
 
       if (schedulesNeedingMissed.length > 0) {
-        console.log(`[MonitorManageScreen] Marking ${schedulesNeedingMissed.length} past-due schedule(s) as Missed`);
+        console.log(
+          `[MonitorManageScreen] Marking ${schedulesNeedingMissed.length} past-due schedule(s) as Missed (PUT only)`
+        );
         const updatePromises = schedulesNeedingMissed.map(async (sched: any) => {
           try {
-            // Try PATCH first
-            const response = await fetch(`https://pillnow-database.onrender.com/api/medication_schedules/${sched._id}`, {
-              method: 'PATCH',
-              headers: scheduleHeaders,
-              body: JSON.stringify({ status: 'Missed' })
-            });
-            
-            if (!response.ok) {
-              const text = await response.text();
-              console.warn(`[MonitorManageScreen] PATCH failed (${response.status}): ${text}, trying PUT...`);
-              
-              // Fallback to PUT if PATCH doesn't work
-              const putResponse = await fetch(`https://pillnow-database.onrender.com/api/medication_schedules/${sched._id}`, {
+            const putResponse = await fetch(
+              `https://pillnow-database.onrender.com/api/medication_schedules/${sched._id}`,
+              {
                 method: 'PUT',
                 headers: scheduleHeaders,
-                body: JSON.stringify({ ...sched, status: 'Missed' })
-              });
-              
-              if (!putResponse.ok) {
-                const putErrorText = await putResponse.text();
-                console.error(`[MonitorManageScreen] ⚠️ PUT also failed (${putResponse.status}): ${putErrorText}`);
-              } else {
-                console.log(`[MonitorManageScreen] ✅ Schedule ${sched._id} marked as Missed (via PUT)`);
-                sched.status = 'Missed';
+                body: JSON.stringify({ ...sched, status: 'Missed' }),
               }
+            );
+
+            if (!putResponse.ok) {
+              const putErrorText = await putResponse.text();
+              console.error(
+                `[MonitorManageScreen] ⚠️ Failed to mark Missed via PUT (${putResponse.status}): ${putErrorText}`
+              );
             } else {
-              console.log(`[MonitorManageScreen] ✅ Schedule ${sched._id} marked as Missed (via PATCH)`);
+              console.log(
+                `[MonitorManageScreen] ✅ Schedule ${sched._id} marked as Missed (via PUT)`
+              );
               sched.status = 'Missed';
             }
           } catch (err) {
-            console.error(`[MonitorManageScreen] Error marking Missed for ${sched._id}:`, err);
+            console.error(
+              `[MonitorManageScreen] Error marking Missed for ${sched._id}:`,
+              err
+            );
           }
         });
         await Promise.all(updatePromises);
       }
 
-      // Group schedules by container - keep ALL schedules for each container
+      // For "Current Schedules" and Arduino:
+      // - For each container, keep ONLY the next upcoming alarm (future, Pending/Active)
+      // - "Latest schedule to alarm" = nearest future time for that container
       const schedulesByContainer: Record<number, any[]> = {};
-      
       userSchedules.forEach((schedule: any) => {
         const containerNum = parseInt(schedule.container) || 1;
         if (!schedulesByContainer[containerNum]) {
@@ -812,48 +809,53 @@ const MonitorManageScreen = () => {
         }
         schedulesByContainer[containerNum].push(schedule);
       });
-      
-      // Get ALL schedules for each container (not just the latest)
-      // Keep all schedules - no filtering or deletion
-      const allSchedulesByContainer: any[] = [];
-      
+
+      const nowMs = Date.now();
+      const latestPerContainer: any[] = [];
+
       for (let containerNum = 1; containerNum <= 3; containerNum++) {
         const containerSchedules = schedulesByContainer[containerNum] || [];
-        if (containerSchedules.length > 0) {
-          // Keep all schedules - no filtering
-          const activeSchedules = containerSchedules;
-          
-          if (activeSchedules.length > 0) {
-            // Pick the nearest upcoming schedule for this container
-            const withTime = activeSchedules.map((s: any) => {
-              try {
-                const [y, m, d] = String(s.date || '').split('-').map(Number);
-                const [hh, mm] = String(s.time || '').split(':').map(Number);
-                const whenMs = new Date(y, (m || 1) - 1, d, hh, mm).getTime();
-                return { sched: s, whenMs };
-              } catch {
-                return { sched: s, whenMs: Number.POSITIVE_INFINITY };
+        if (!containerSchedules.length) continue;
+
+        // Consider only future, pending/active schedules
+        const candidatesWithTime = containerSchedules
+          .map((s: any) => {
+            try {
+              const [y, m, d] = String(s.date || '').split('-').map(Number);
+              const [hh, mm] = String(s.time || '').split(':').map(Number);
+              const whenMs = new Date(y, (m || 1) - 1, d, hh, mm).getTime();
+              const statusLower = String(s.status || 'Pending').toLowerCase();
+              const isPendingOrActive =
+                statusLower === 'pending' || statusLower === 'active' || statusLower === '';
+
+              if (!Number.isFinite(whenMs) || !isPendingOrActive || whenMs < nowMs) {
+                return null;
               }
-            });
-            
-            const validWithTime = withTime.filter(item => Number.isFinite(item.whenMs));
-            const nearest = (validWithTime.length > 0
-              ? validWithTime.sort((a, b) => a.whenMs - b.whenMs)[0].sched
-              : activeSchedules[0]);
-            
-            allSchedulesByContainer.push(nearest);
-          }
+              return { sched: s, whenMs };
+            } catch {
+              return null;
+            }
+          })
+          .filter((item: any) => item && Number.isFinite(item.whenMs));
+
+        if (!candidatesWithTime.length) {
+          // No upcoming schedules for this container; skip it
+          continue;
+        }
+
+        // Pick nearest upcoming alarm for this container
+        candidatesWithTime.sort((a: any, b: any) => a.whenMs - b.whenMs);
+        if (candidatesWithTime[0]) {
+          latestPerContainer.push(candidatesWithTime[0].sched);
         }
       }
-      
-      // Sort by container number first, then by earliest time (fallback to scheduleId)
-      const sortedSchedules = allSchedulesByContainer.sort((a: any, b: any) => {
-          const containerA = parseInt(a.container);
-          const containerB = parseInt(b.container);
-        if (containerA !== containerB) {
-          return containerA - containerB;
-        }
-        // If same container, sort by time ascending (nearest first)
+
+      // Sort containers 1→3; inside each container there's only 1 schedule now
+      const sortedSchedules = latestPerContainer.sort((a: any, b: any) => {
+        const containerA = parseInt(a.container) || 1;
+        const containerB = parseInt(b.container) || 1;
+        if (containerA !== containerB) return containerA - containerB;
+        // If same container (shouldn't normally happen), fall back to time
         try {
           const [ya, ma, da] = String(a.date || '').split('-').map(Number);
           const [haa, maa] = String(a.time || '').split(':').map(Number);
@@ -865,10 +867,10 @@ const MonitorManageScreen = () => {
             return tA - tB;
           }
         } catch {
-          // ignore and fall back
+          // ignore
         }
-        return (b.scheduleId || 0) - (a.scheduleId || 0);
-        });
+        return (a.scheduleId || 0) - (b.scheduleId || 0);
+      });
       
       setMedications(medsArray);
       setSchedules(sortedSchedules);
@@ -1854,6 +1856,15 @@ const MonitorManageScreen = () => {
 
   return (
     <View style={{ flex: 1 }}>
+      {/* Alarm Modal - Must be outside ScrollView to ensure it's always on top */}
+      <AlarmModal
+        visible={alarmVisible}
+        container={alarmContainer}
+        time={alarmTime}
+        onDismiss={() => setAlarmVisible(false)}
+        onStopAlarm={(containerNum) => handleAlarmStopped(containerNum, 'modal')}
+      />
+      
     <ScrollView style={[styles.container, { backgroundColor: theme.background }]}>
       {/* Header */}
       <View style={[styles.header, { backgroundColor: theme.card }]}>
@@ -2150,15 +2161,6 @@ const MonitorManageScreen = () => {
         </TouchableOpacity>
       </View>
     </ScrollView>
-
-      {/* Alarm Modal */}
-      <AlarmModal
-        visible={alarmVisible}
-        container={alarmContainer}
-        time={alarmTime}
-        onDismiss={() => setAlarmVisible(false)}
-        onStopAlarm={(containerNum) => handleAlarmStopped(containerNum, 'modal')}
-      />
     </View>
   );
 };

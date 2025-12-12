@@ -94,76 +94,17 @@ class VerificationService {
    * @returns Promise with verification result
    */
   async getVerificationResult(containerId: string): Promise<VerificationResult> {
-    try {
-      console.log(`[VerificationService] Fetching verification for ${containerId} from ${BACKEND_URL}`);
-      
-      // Add timeout to prevent hanging
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 8000); // 8 second timeout
-      
-      const response = await fetch(`${BACKEND_URL}/containers/${containerId}/verification`, {
-        method: 'GET',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        signal: controller.signal,
-      });
-
-      clearTimeout(timeoutId);
-
-      if (!response.ok) {
-        if (response.status === 404) {
-          console.log(`[VerificationService] No verification found for ${containerId}`);
-          return { success: false, message: 'No verification found' };
-        }
-        const errorText = await response.text();
-        console.error(`[VerificationService] HTTP error (${response.status}):`, errorText);
-        return { success: false, message: `HTTP error: ${response.status}` };
-      }
-
-      const data = await response.json();
-      console.log(`[VerificationService] Verification result for ${containerId}:`, data);
-      return data as VerificationResult;
-    } catch (error) {
-      // Silently handle network errors - don't spam console
-      // Only log if it's not a network connectivity issue
-      if (error instanceof TypeError) {
-        if (error.message.includes('fetch') || error.message.includes('Network request failed') || error.message.includes('Failed to fetch')) {
-          // Network error - silently return, don't log
-          return { 
-            success: false, 
-            message: 'Backend unreachable - check network connection' 
-          };
-        }
-      }
-      
-      // Log other errors (but suppress AbortError spam - it's expected when backend is unavailable)
-      if (error instanceof Error && error.name === 'AbortError') {
-        // Only log AbortError once per container to reduce console noise
-        // This is expected when the ESP32-CAM backend is not running or unreachable
-        console.log(`[VerificationService] Request timed out for ${containerId} (backend may be unavailable)`);
-      } else {
-        console.warn('[VerificationService] Error fetching verification result:', error);
-      }
-      
-      // Provide helpful error messages but don't throw - return gracefully
-      let errorMessage = 'Unable to fetch verification';
-      if (error instanceof TypeError) {
-        errorMessage = 'Network error - check connection';
-      } else if (error instanceof Error) {
-        if (error.name === 'AbortError') {
-          errorMessage = 'Request timed out';
-        } else {
-          errorMessage = error.message;
-        }
-      }
-      
-      // Return gracefully instead of throwing
-      return { 
-        success: false, 
-        message: errorMessage 
-      };
-    }
+    // The original implementation attempted to call:
+    //   `${BACKEND_URL}/containers/${containerId}/verification`
+    // but in this deployment that API does not exist / backend is not running,
+    // which causes repeated network timeouts in the app.
+    //
+    // To avoid noisy errors while keeping the rest of the app functional,
+    // we short‑circuit here and report "no verification" without any HTTP call.
+    return {
+      success: false,
+      message: 'Verification API is disabled or not available in this deployment',
+    };
   }
 
   /**

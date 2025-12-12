@@ -1,5 +1,5 @@
-import React from "react";
-import { View, Text, Image, TouchableOpacity } from "react-native";
+import React, { useState } from "react";
+import { View, Text, Image, TouchableOpacity, ActivityIndicator } from "react-native";
 import { useNavigation } from "@react-navigation/native";
 import styled from "styled-components/native";
 import { Ionicons } from "@expo/vector-icons";
@@ -10,6 +10,7 @@ const ModifySchedule = () => {
   const navigation = useNavigation();
   const { isDarkMode } = useTheme();
   const theme = isDarkMode ? darkTheme : lightTheme;
+  const [navigatingTo, setNavigatingTo] = useState<"set" | "modify" | null>(null);
 
   return (
     <Container style={{ backgroundColor: theme.background }}>
@@ -27,16 +28,43 @@ const ModifySchedule = () => {
 
       <ButtonContainer>
         <ActionButton 
-          onPress={() => navigation.navigate('SetScreen' as never)}
+          disabled={navigatingTo !== null}
+          onPress={async () => {
+            if (navigatingTo) return;
+            try {
+              setNavigatingTo("set");
+              navigation.navigate('SetScreen' as never);
+            } finally {
+              // Small delay so the user sees the loading feedback
+              setTimeout(() => setNavigatingTo(null), 400);
+            }
+          }}
           style={{ backgroundColor: theme.primary }}
         > 
-          <ButtonText style={{ color: theme.card }}>SET</ButtonText>
+          {navigatingTo === "set" ? (
+            <ActivityIndicator size="small" color={theme.card} />
+          ) : (
+            <ButtonText style={{ color: theme.card }}>SET</ButtonText>
+          )}
         </ActionButton>
         <ActionButton 
-          onPress={() => navigation.navigate("ModifyButton")}
+          disabled={navigatingTo !== null}
+          onPress={async () => {
+            if (navigatingTo) return;
+            try {
+              setNavigatingTo("modify");
+              navigation.navigate("ModifyButton" as never);
+            } finally {
+              setTimeout(() => setNavigatingTo(null), 400);
+            }
+          }}
           style={{ backgroundColor: theme.secondary }}
         >
-          <ButtonText style={{ color: theme.card }}>MODIFY</ButtonText>
+          {navigatingTo === "modify" ? (
+            <ActivityIndicator size="small" color={theme.card} />
+          ) : (
+            <ButtonText style={{ color: theme.card }}>MODIFY</ButtonText>
+          )}
         </ActionButton>
       </ButtonContainer>
     </Container>
