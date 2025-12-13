@@ -798,64 +798,16 @@ const MonitorManageScreen = () => {
         await Promise.all(updatePromises);
       }
 
-      // For "Current Schedules" and Arduino:
-      // - For each container, keep ONLY the next upcoming alarm (future, Pending/Active)
-      // - "Latest schedule to alarm" = nearest future time for that container
-      const schedulesByContainer: Record<number, any[]> = {};
-      userSchedules.forEach((schedule: any) => {
-        const containerNum = parseInt(schedule.container) || 1;
-        if (!schedulesByContainer[containerNum]) {
-          schedulesByContainer[containerNum] = [];
-        }
-        schedulesByContainer[containerNum].push(schedule);
-      });
-
-      const nowMs = Date.now();
-      const latestPerContainer: any[] = [];
-
-      for (let containerNum = 1; containerNum <= 3; containerNum++) {
-        const containerSchedules = schedulesByContainer[containerNum] || [];
-        if (!containerSchedules.length) continue;
-
-        // Consider only future, pending/active schedules
-        const candidatesWithTime = containerSchedules
-          .map((s: any) => {
-            try {
-              const [y, m, d] = String(s.date || '').split('-').map(Number);
-              const [hh, mm] = String(s.time || '').split(':').map(Number);
-              const whenMs = new Date(y, (m || 1) - 1, d, hh, mm).getTime();
-              const statusLower = String(s.status || 'Pending').toLowerCase();
-              const isPendingOrActive =
-                statusLower === 'pending' || statusLower === 'active' || statusLower === '';
-
-              if (!Number.isFinite(whenMs) || !isPendingOrActive || whenMs < nowMs) {
-                return null;
-              }
-              return { sched: s, whenMs };
-            } catch {
-              return null;
-            }
-          })
-          .filter((item: any) => item && Number.isFinite(item.whenMs));
-
-        if (!candidatesWithTime.length) {
-          // No upcoming schedules for this container; skip it
-          continue;
-        }
-
-        // Pick nearest upcoming alarm for this container
-        candidatesWithTime.sort((a: any, b: any) => a.whenMs - b.whenMs);
-        if (candidatesWithTime[0]) {
-          latestPerContainer.push(candidatesWithTime[0].sched);
-        }
-      }
-
-      // Sort containers 1→3; inside each container there's only 1 schedule now
-      const sortedSchedules = latestPerContainer.sort((a: any, b: any) => {
+      // Sort ALL user schedules for display and Arduino sync
+      // - Keep every schedule (no per-container reduction)
+      // - Order by container (1,2,3) then by time ascending
+      const sortedSchedules = [...userSchedules].sort((a: any, b: any) => {
         const containerA = parseInt(a.container) || 1;
         const containerB = parseInt(b.container) || 1;
-        if (containerA !== containerB) return containerA - containerB;
-        // If same container (shouldn't normally happen), fall back to time
+        if (containerA !== containerB) {
+          return containerA - containerB;
+        }
+        // Same container: sort by scheduled Date/Time
         try {
           const [ya, ma, da] = String(a.date || '').split('-').map(Number);
           const [haa, maa] = String(a.time || '').split(':').map(Number);
@@ -867,7 +819,7 @@ const MonitorManageScreen = () => {
             return tA - tB;
           }
         } catch {
-          // ignore
+          // Fall back to scheduleId if dates are invalid
         }
         return (a.scheduleId || 0) - (b.scheduleId || 0);
       });
@@ -1856,15 +1808,6 @@ const MonitorManageScreen = () => {
 
   return (
     <View style={{ flex: 1 }}>
-      {/* Alarm Modal - Must be outside ScrollView to ensure it's always on top */}
-      <AlarmModal
-        visible={alarmVisible}
-        container={alarmContainer}
-        time={alarmTime}
-        onDismiss={() => setAlarmVisible(false)}
-        onStopAlarm={(containerNum) => handleAlarmStopped(containerNum, 'modal')}
-      />
-      
     <ScrollView style={[styles.container, { backgroundColor: theme.background }]}>
       {/* Header */}
       <View style={[styles.header, { backgroundColor: theme.card }]}>
@@ -2161,6 +2104,15 @@ const MonitorManageScreen = () => {
         </TouchableOpacity>
       </View>
     </ScrollView>
+
+      {/* Alarm Modal */}
+      <AlarmModal
+        visible={alarmVisible}
+        container={alarmContainer}
+        time={alarmTime}
+        onDismiss={() => setAlarmVisible(false)}
+        onStopAlarm={(containerNum) => handleAlarmStopped(containerNum, 'modal')}
+      />
     </View>
   );
 };
