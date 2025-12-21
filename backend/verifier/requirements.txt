@@ -2,7 +2,9 @@ fastapi==0.115.0
 uvicorn==0.32.0
 pydantic==2.9.2
 Pillow==10.4.0
-numpy==2.0.2
+# NumPy 2.x breaks some compiled deps in this stack (torch/ultralytics/opencv)
+# on many macOS Python setups. Pin to 1.x for stability.
+numpy==1.26.4
 ultralytics==8.3.0
 scikit-learn==1.5.2
 opencv-python==4.10.0.84

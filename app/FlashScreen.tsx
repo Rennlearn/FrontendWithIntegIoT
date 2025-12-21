@@ -21,9 +21,9 @@ const FlashScreen = () => {
       })
     ).start();
 
-    // Navigate to the main screen after 3 seconds
+    // Navigate to Bluetooth connection screen first, then login
     const timer = setTimeout(() => {
-      router.replace('/LoginScreen');
+      router.replace('/BluetoothConnectionScreen');
     }, 3000);
 
     return () => clearTimeout(timer);

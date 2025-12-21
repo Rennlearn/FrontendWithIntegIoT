@@ -32,6 +32,7 @@ yarn-error.*
 
 # local env files
 .env*.local
+backend/backend.env
 
 # typescript
 *.tsbuildinfo
@@ -68,3 +69,4 @@ backend.log
 
 # Captured images (can be large)
 backend/captures/
+android/local.properties

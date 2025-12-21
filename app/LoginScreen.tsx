@@ -79,54 +79,59 @@ const LoginScreen = () => {
       setLoading(true);
       await AsyncStorage.removeItem("token"); // Clear previous token
 
-      const response = await axios.post("https://pillnow-database.onrender.com/api/users/login", {
+      // Add timeout to prevent hanging on slow API calls (15 seconds)
+      const timeoutPromise = new Promise((_, reject) => {
+        setTimeout(() => reject(new Error("Request timeout. Please check your internet connection and try again.")), 15000);
+      });
+
+      const loginPromise = axios.post("https://pillnow-database.onrender.com/api/users/login", {
         email,
         password,
+      }, {
+        timeout: 15000, // 15 second timeout
       });
+
+      const response = await Promise.race([loginPromise, timeoutPromise]) as any;
 
       if (response.data?.token) {
         await AsyncStorage.setItem("token", response.data.token);
-        console.log("Login successful. Token saved:", response.data.token);
-        console.log("Full response data:", JSON.stringify(response.data, null, 2));
         
         // Check user role and navigate accordingly
         const userRole = response.data.user?.role || response.data.role;
-        console.log("User role:", userRole);
-        console.log("Response data.user:", response.data.user);
-        console.log("Response data.role:", response.data.role);
-        
-        // Handle numeric role IDs: 1=Admin, 2=Elder, 3=Caregiver
         const roleId = parseInt(userRole);
-        console.log("Role ID:", roleId);
         
         // Clear form inputs after successful login
         setEmail("");
         setPassword("");
         setIsLoggedIn(true);
         
+        // Navigate immediately without waiting
         if (roleId === 3) {
-          console.log("Navigating to CaregiverDashboard (Role ID: 3)");
           router.replace("/CaregiverDashboard");
         } else if (roleId === 2) {
-          console.log("Navigating to ElderDashboard (Role ID: 2)");
           router.replace("/ElderDashboard");
         } else if (roleId === 1) {
-          console.log("Admin role detected (Role ID: 1) - showing alert");
           Alert.alert("Login Failed", "Admin access not supported in this app.");
           setIsLoggedIn(false);
+          setLoading(false);
         } else {
-          console.log("Unknown role, showing alert");
-          // If role is not recognized, show an alert
           Alert.alert("Login Failed", "Invalid user role. Please contact support.");
           setIsLoggedIn(false);
+          setLoading(false);
         }
       } else {
         Alert.alert("Login Failed", "Invalid username or password");
+        setLoading(false);
       }
     } catch (error: any) {
-      Alert.alert("Login Failed", error.response?.data?.message || "Invalid credentials");
-    } finally {
       setLoading(false);
+      if (error.message && error.message.includes("timeout")) {
+        Alert.alert("Login Timeout", "The login request took too long. Please check your internet connection and try again.");
+      } else if (error.code === 'ECONNABORTED' || error.message?.includes('timeout')) {
+        Alert.alert("Connection Timeout", "Unable to connect to the server. Please check your internet connection.");
+      } else {
+        Alert.alert("Login Failed", error.response?.data?.message || error.message || "Invalid credentials. Please try again.");
+      }
     }
   };
 

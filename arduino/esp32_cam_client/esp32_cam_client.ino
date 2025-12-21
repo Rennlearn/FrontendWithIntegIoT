@@ -4,16 +4,19 @@
 
 // ================== USER CONFIG ==================
 // Fill these with your network and server settings
-static const char* WIFI_SSID = "YOUR_WIFI_SSID";
-static const char* WIFI_PASS = "YOUR_WIFI_PASSWORD";
+static const char* WIFI_SSID = "YOUR_WIFI_SSID";      // <-- set this to your WiFi name
+static const char* WIFI_PASS = "YOUR_WIFI_PASSWORD";  // <-- set this to your WiFi password
 
-static const char* MQTT_HOST = "10.56.196.91";    // Mosquitto/Broker host
+// IMPORTANT: Use your Mac's current LAN IP so ESP32-CAM can reach it.
+// Mac LAN IP (en0): 10.100.56.91 (UPDATE THIS if your Mac's IP changes!)
+static const char* MQTT_HOST = "10.100.56.91";    // Mosquitto/Broker host
 static const uint16_t MQTT_PORT = 1883;
 
-static const char* BACKEND_HOST = "10.56.196.91"; // Node backend host
-static const uint16_t BACKEND_PORT = 5001;         // Node backend port (changed from 5000 due to AirTunes conflict)
+// Node backend (uploads to /ingest/:deviceId/:container)
+static const char* BACKEND_HOST = "10.100.56.91"; // Node backend host
+static const uint16_t BACKEND_PORT = 5001;         // Node backend port (avoid AirTunes conflict)
 
-static const char* DEVICE_ID = "container1";         // Unique per ESP32-CAM: container1|container2|container3
+static const char* DEVICE_ID = "container2";         // Unique per ESP32-CAM: container1|container2|container3
 
 // =================================================
 
@@ -42,6 +45,25 @@ PubSubClient mqttClient(wifiClient);
 
 // Flash LED pin (built-in LED on most ESP32-CAM boards)
 static const gpio_num_t FLASH_GPIO_NUM = GPIO_NUM_4;
+// Flash tuning (helps pill detection accuracy)
+static const bool FLASH_ENABLED = true;
+static const uint16_t FLASH_PRECAPTURE_MS = 300;   // let flash + sensor stabilize before capture (increased for better pill detection)
+static const uint16_t FLASH_POSTCAPTURE_MS = 20;   // tiny hold to avoid abrupt cutoff artifacts
+static const uint8_t FLASH_DISCARD_FRAMES = 2;     // discard first 2 frames after enabling flash (exposure settles better for pill detection)
+// Flash brightness (to reduce glare and improve pill imprint/brand visibility)
+// Many ESP32-CAM boards (AI Thinker) can PWM-dim GPIO4 via LEDC.
+// IMPORTANT: Camera uses LEDC_CHANNEL_0 for XCLK, so we use a different channel for flash.
+static const bool FLASH_USE_PWM = true;            // set false to force simple ON/OFF
+static const uint8_t FLASH_PWM_DUTY = 60;          // 0..255 (lower = dimmer). 60 = optimal for pill detection (good contrast without glare)
+static const uint32_t FLASH_PWM_FREQ_HZ = 5000;    // 1k-10k is typical
+static const uint8_t FLASH_PWM_RES_BITS = 8;       // 8-bit duty (0..255)
+static const uint8_t FLASH_PWM_CHANNEL = 1;        // used only on older ESP32 core (pre-3.x)
+
+static bool flashPwmReady = false;
+
+static void flashInit();
+static void flashOn();
+static void flashOff();
 
 // Topics
 String topicCmd = String("pillnow/") + DEVICE_ID + "/cmd";
@@ -129,6 +151,7 @@ void setup() {
   // Flash LED setup
   pinMode(FLASH_GPIO_NUM, OUTPUT);
   digitalWrite(FLASH_GPIO_NUM, LOW);
+  flashInit();
 
   ensureWifi();
 
@@ -166,12 +189,22 @@ static void ensureMqtt() {
     Serial.println("MQTT broker not reachable via TCP. Check broker IP, port 1883, and LAN/firewall.");
   }
   String clientId = String("esp32cam-") + DEVICE_ID + String("-") + String((uint32_t)ESP.getEfuseMac(), HEX);
+  Serial.print("MQTT Client ID: "); Serial.println(clientId);
+  Serial.print("Subscribing to topic: "); Serial.println(topicCmd);
+  
   int retries = 0;
   while (!mqttClient.connected() && retries < 10) {
     if (mqttClient.connect(clientId.c_str())) {
-      Serial.println(" connected");
-      mqttClient.subscribe(topicCmd.c_str());
+      Serial.println("✅ MQTT connected!");
+      Serial.print("📡 Subscribing to: "); Serial.println(topicCmd);
+      bool subOk = mqttClient.subscribe(topicCmd.c_str());
+      if (subOk) {
+        Serial.println("✅ Subscription successful");
+      } else {
+        Serial.println("❌ Subscription FAILED!");
+      }
       mqttClient.publish(topicStatus.c_str(), "{\"state\":\"online\"}");
+      Serial.println("📤 Published online status");
       return;
     } else {
       Serial.print('.');
@@ -180,6 +213,7 @@ static void ensureMqtt() {
     }
   }
   Serial.println();
+  Serial.println("❌ MQTT connection FAILED after 10 retries");
 }
 
 static bool testBrokerReachability() {
@@ -200,9 +234,22 @@ static void handleMqttMessage(char* topic, byte* payload, unsigned int length) {
   String msg;
   msg.reserve(length + 1);
   for (unsigned int i = 0; i < length; i++) msg += (char)payload[i];
-  Serial.print("MQTT "); Serial.print(topic); Serial.print(" "); Serial.println(msg);
+  
+  Serial.println("========================================");
+  Serial.println("📨 MQTT MESSAGE RECEIVED");
+  Serial.print("   Topic: "); Serial.println(topic);
+  Serial.print("   Length: "); Serial.println(length);
+  Serial.print("   Payload: "); Serial.println(msg);
+  Serial.println("========================================");
 
-  if (msg.indexOf("\"action\"\s*:\s*\"capture\"") >= 0 || msg.indexOf("\"action\":\"capture\"") >= 0) {
+  // Check for capture action (handle both with and without spaces)
+  bool hasCaptureAction = msg.indexOf("\"action\":\"capture\"") >= 0 || msg.indexOf("\"action\" : \"capture\"") >= 0;
+  
+  Serial.print("🔍 Checking for capture action... ");
+  if (hasCaptureAction) {
+    Serial.println("✅ FOUND!");
+    Serial.println("✅ CAPTURE COMMAND RECEIVED - Starting capture...");
+    
     // Extract container (fallback to DEVICE_ID if missing)
     String container = DEVICE_ID;
     int cidx = msg.indexOf("\"container\"");
@@ -243,32 +290,130 @@ static void handleMqttMessage(char* topic, byte* payload, unsigned int length) {
     mqttClient.publish(topicStatus.c_str(), "{\"state\":\"capturing\"}");
     bool ok = captureAndUpload(container.c_str(), expected.c_str());
     mqttClient.publish(topicStatus.c_str(), ok ? "{\"state\":\"uploaded\"}" : "{\"state\":\"error\"}");
+  } else {
+    Serial.println("❌ NOT FOUND");
+    Serial.println("   Message does not contain capture action, ignoring...");
+    return;
+  }
+}
+
+static void flashInit() {
+  if (!FLASH_ENABLED) return;
+  if (!FLASH_USE_PWM) {
+    flashPwmReady = false;
+    return;
+  }
+
+  // ESP32 Arduino core changed LEDC API in v3.x:
+  // - Removed: ledcSetup(), ledcAttachPin()
+  // - Use: ledcAttach(pin, freq, resolution) and ledcWrite(pin, duty)
+  //
+  // Support both APIs via version check.
+#if defined(ESP_ARDUINO_VERSION_MAJOR) && (ESP_ARDUINO_VERSION_MAJOR >= 3)
+  // New API (core v3+)
+  bool ok = ledcAttach((uint8_t)FLASH_GPIO_NUM, FLASH_PWM_FREQ_HZ, FLASH_PWM_RES_BITS);
+  if (ok) {
+    ledcWrite((uint8_t)FLASH_GPIO_NUM, 0);
+    flashPwmReady = true;
+    Serial.println("Flash PWM enabled (dimmable, core v3+)");
+  } else {
+    flashPwmReady = false;
+    Serial.println("Flash PWM attach failed; using ON/OFF flash");
+  }
+#else
+  // Old API (core v2.x)
+  bool ok = true;
+  ok = ok && ledcSetup(FLASH_PWM_CHANNEL, FLASH_PWM_FREQ_HZ, FLASH_PWM_RES_BITS);
+  if (ok) {
+    ledcAttachPin((uint8_t)FLASH_GPIO_NUM, FLASH_PWM_CHANNEL);
+    ledcWrite(FLASH_PWM_CHANNEL, 0);
+    flashPwmReady = true;
+    Serial.println("Flash PWM enabled (dimmable, core v2.x)");
+  } else {
+    flashPwmReady = false;
+    Serial.println("Flash PWM setup failed; using ON/OFF flash");
+  }
+#endif
+}
+
+static void flashOn() {
+  if (!FLASH_ENABLED) return;
+  if (flashPwmReady) {
+#if defined(ESP_ARDUINO_VERSION_MAJOR) && (ESP_ARDUINO_VERSION_MAJOR >= 3)
+    ledcWrite((uint8_t)FLASH_GPIO_NUM, FLASH_PWM_DUTY);
+#else
+    ledcWrite(FLASH_PWM_CHANNEL, FLASH_PWM_DUTY);
+#endif
+  } else {
+    digitalWrite(FLASH_GPIO_NUM, HIGH);
+  }
+}
+
+static void flashOff() {
+  if (!FLASH_ENABLED) return;
+  if (flashPwmReady) {
+#if defined(ESP_ARDUINO_VERSION_MAJOR) && (ESP_ARDUINO_VERSION_MAJOR >= 3)
+    ledcWrite((uint8_t)FLASH_GPIO_NUM, 0);
+#else
+    ledcWrite(FLASH_PWM_CHANNEL, 0);
+#endif
+  } else {
+    digitalWrite(FLASH_GPIO_NUM, LOW);
   }
 }
 
 static bool captureAndUpload(const char* container, const char* expectedJson) {
+  Serial.println("📸 Starting capture sequence...");
+  
   // Configure camera for flash photography before turning on flash
   sensor_t *s = esp_camera_sensor_get();
   if (s) {
-    // Reduce exposure and gain to prevent overexposure from flash
-    s->set_aec_value(s, 200);        // Lower AEC value = less exposure (prevents overexposure)
-    s->set_agc_gain(s, 5);           // Lower gain = less amplification (range: 0-30)
-    s->set_gainceiling(s, (gainceiling_t)4); // Lower gain ceiling = less max gain
-    s->set_ae_level(s, -1);         // Slightly darker exposure level
-    delay(50); // Allow sensor to adjust
+    Serial.println("⚙️ Configuring camera for pill detection...");
+    // Optimize exposure and gain for pill detection with flash
+    s->set_aec_value(s, 180);        // Lower AEC value = less exposure (prevents overexposure, better pill detail)
+    s->set_agc_gain(s, 8);           // Moderate gain for good contrast (range: 0-30)
+    s->set_gainceiling(s, (gainceiling_t)5); // Moderate gain ceiling
+    s->set_ae_level(s, -1);         // Slightly darker exposure level for better pill edge detection
+    s->set_contrast(s, 1);          // Slightly higher contrast for pill imprint visibility
+    delay(100); // Allow sensor to adjust
+    Serial.println("✅ Camera configured");
   }
   
-  // Turn on flash at reduced intensity (using PWM if possible, or just turn on)
-  // Note: GPIO_NUM_4 on ESP32-CAM is typically a simple digital pin, not PWM-capable
-  // For better control, you could use an external LED driver, but for now we'll use timing
-  digitalWrite(FLASH_GPIO_NUM, HIGH);
-  delay(200); // Allow flash to stabilize and camera to adjust exposure (increased from 150ms)
-  
-  // Capture frame
+  if (FLASH_ENABLED) {
+    Serial.print("💡 Turning on flash (PWM duty: ");
+    Serial.print(FLASH_PWM_DUTY);
+    Serial.println(")...");
+    // Turn on flash (dimmable if PWM is supported)
+    flashOn();
+    Serial.print("⏳ Stabilizing flash and sensor (");
+    Serial.print(FLASH_PRECAPTURE_MS);
+    Serial.println("ms)...");
+    delay(FLASH_PRECAPTURE_MS);
+  }
+
+  // Many ESP32-CAMs return an under/over-exposed first frame when lighting changes.
+  // Discard frames after enabling flash to stabilize exposure for better ML accuracy.
+  Serial.print("🔄 Discarding ");
+  Serial.print(FLASH_DISCARD_FRAMES);
+  Serial.println(" frames for exposure stabilization...");
+  for (uint8_t i = 0; i < FLASH_DISCARD_FRAMES; i++) {
+    camera_fb_t* tmp = esp_camera_fb_get();
+    if (tmp) {
+      esp_camera_fb_return(tmp);
+      Serial.print("  Discarded frame ");
+      Serial.println(i + 1);
+    }
+    delay(50); // Longer delay between discards for better stabilization
+  }
+
+  // Capture the "stable" frame
+  Serial.println("📷 Capturing final frame...");
   camera_fb_t* fb = esp_camera_fb_get();
-  
-  // Turn off flash immediately after capture
-  digitalWrite(FLASH_GPIO_NUM, LOW);
+
+  if (FLASH_ENABLED) {
+    delay(FLASH_POSTCAPTURE_MS);
+    flashOff();
+  }
   
   // Restore camera settings for normal operation
   if (s) {
@@ -295,6 +440,7 @@ static bool captureAndUpload(const char* container, const char* expectedJson) {
   }
 
   // Precompute sizes
+  // Fields expected by backend/server.js: image (file), meta (optional JSON string)
   String part1 = String("--") + boundary + "\r\n" +
                  "Content-Disposition: form-data; name=\"image\"; filename=\"capture.jpg\"\r\n" +
                  "Content-Type: image/jpeg\r\n\r\n";
@@ -317,22 +463,26 @@ static bool captureAndUpload(const char* container, const char* expectedJson) {
   wifiClient.write(fb->buf, fb->len);
   wifiClient.print(part2);
 
-  // Done with frame buffer
-  esp_camera_fb_return(fb);
-
   // Read response (basic)
   uint32_t start = millis();
+  bool localSuccess = false;
   while (wifiClient.connected() && millis() - start < 5000) {
     while (wifiClient.available()) {
       String line = wifiClient.readStringUntil('\n');
       // Optional: parse for HTTP/1.1 200 OK
       if (line.startsWith("HTTP/1.1")) {
         Serial.print("HTTP: "); Serial.println(line);
+        if (line.indexOf("200") >= 0) {
+          localSuccess = true;
+        }
       }
     }
   }
   wifiClient.stop();
-  return true;
-}
 
+  // Done with frame buffer
+  esp_camera_fb_return(fb);
+
+  return localSuccess;
+}
 
