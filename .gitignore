@@ -69,4 +69,13 @@ backend.log
 
 # Captured images (can be large)
 backend/captures/
+backend/verifier/*.jpg
+backend/verifier/*.png
 android/local.properties
+
+# Runtime state files
+backend/state.json
+backend/.pids/
+backend/*_runtime.log
+backend/verifier/*.log
+.pillnow_pids
