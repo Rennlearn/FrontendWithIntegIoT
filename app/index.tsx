@@ -5,6 +5,7 @@ import { NavigationContainer } from '@react-navigation/native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import LoginScreen from './LoginScreen';
 import FlashScreen from './FlashScreen';
+import BluetoothConnectionScreen from './BluetoothConnectionScreen';
 
 const Drawer = createDrawerNavigator();
 
@@ -33,6 +34,7 @@ export default function Index() {
 
   return (
     <Drawer.Navigator>
+      <Drawer.Screen name="BluetoothConnection" component={BluetoothConnectionScreen} />
       <Drawer.Screen name="Login" component={LoginScreen} />
     </Drawer.Navigator>
   );

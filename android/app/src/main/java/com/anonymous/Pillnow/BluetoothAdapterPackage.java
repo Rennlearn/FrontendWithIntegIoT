@@ -22,3 +22,4 @@ public class BluetoothAdapterPackage implements ReactPackage {
         return Collections.emptyList();
     }
 }
+

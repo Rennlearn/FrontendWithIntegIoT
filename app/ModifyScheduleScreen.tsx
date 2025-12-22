@@ -361,22 +361,38 @@ const ModifyScheduleScreen = () => {
 
   const savePillCount = async (containerNum: number, count: number) => {
     try {
-      // Save pill count to backend via /set-schedule endpoint
+      // Save pill count AND medication label to backend via /set-schedule endpoint
+      // This is critical for proper verification - verifier needs both COUNT and LABEL
       const containerId = `container${containerNum}`;
-      const response = await fetch('http://10.56.196.91:5001/set-schedule', {
+      
+      // Get the medication name for this container from schedules
+      const containerSchedules = schedulesByContainer[containerNum] || [];
+      const medicationLabel = containerSchedules[0]?.medicationName || undefined;
+      
+      // Build pill_config with count and optional label
+      const pillConfig: { count: number; label?: string } = { count };
+      if (medicationLabel && medicationLabel !== 'Unknown') {
+        pillConfig.label = medicationLabel;
+      }
+      
+      console.log(`[ModifySchedule] Saving pill config for ${containerId}:`, pillConfig);
+      
+      const response = await fetch('http://10.100.56.91:5001/set-schedule', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
           container_id: containerId,
-          pill_config: { count: count },
+          pill_config: pillConfig,
           times: [],
         }),
       });
       
       if (!response.ok) {
-        console.warn('Failed to save pill count to backend');
+        console.warn('Failed to save pill config to backend');
+      } else {
+        console.log(`[ModifySchedule] ✅ Saved pill config for ${containerId}: count=${count}, label=${medicationLabel || 'none'}`);
       }
       
       // Also sync to Arduino if Bluetooth is connected
@@ -385,13 +401,13 @@ const ModifyScheduleScreen = () => {
         if (isBluetoothActive) {
           // The pill count is used when triggering ESP32-CAM verification
           // Arduino doesn't need to know the count, it's just for verification
-          console.log(`Pill count for container ${containerNum} updated to ${count}`);
+          console.log(`[ModifySchedule] Pill count for container ${containerNum} updated to ${count}`);
         }
       } catch (btErr) {
         console.warn('Bluetooth sync failed for pill count:', btErr);
       }
     } catch (err) {
-      console.error('Error saving pill count:', err);
+      console.error('Error saving pill config:', err);
     }
   };
 

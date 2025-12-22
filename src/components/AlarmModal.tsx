@@ -10,11 +10,13 @@ interface AlarmModalProps {
   visible: boolean;
   container: number;
   time: string;
+  remainingAlarms?: number; // Number of additional alarms waiting in queue
   onDismiss: () => void;
   onStopAlarm?: (container: number) => Promise<void>;
+  onStopImmediate?: () => void; // Called immediately when stop button pressed (for UI updates)
 }
 
-const AlarmModal: React.FC<AlarmModalProps> = ({ visible, container, time, onDismiss, onStopAlarm }) => {
+const AlarmModal: React.FC<AlarmModalProps> = ({ visible, container, time, remainingAlarms = 0, onDismiss, onStopAlarm, onStopImmediate }) => {
   const { isDarkMode } = useTheme();
   const theme = isDarkMode ? darkTheme : lightTheme;
   const [pulseAnim] = useState(new Animated.Value(1));
@@ -41,9 +43,22 @@ const AlarmModal: React.FC<AlarmModalProps> = ({ visible, container, time, onDis
 
   const handleStopAlarm = async () => {
     try {
+      // Validate container number (1, 2, or 3)
+      if (container < 1 || container > 3) {
+        console.error(`[AlarmModal] ⚠️ Invalid container number: ${container}`);
+        Alert.alert('Error', `Invalid container number: ${container}. Please contact support.`);
+        return;
+      }
+      
+      // Call immediate callback for UI updates
+      if (onStopImmediate) {
+        onStopImmediate();
+      }
+      
       const isConnected = await BluetoothService.isConnectionActive();
       if (isConnected) {
-        console.log(`[AlarmModal] Stopping alarm for Container ${container} at ${time}`);
+        console.log(`[AlarmModal] 🛑 Stopping alarm for Container ${container} at ${time}`);
+        console.log(`[AlarmModal] 📊 Remaining alarms in queue: ${remainingAlarms}`);
         await BluetoothService.sendCommand('ALARMSTOP\n');
         
         // Mark the schedule as "Done" in the backend
@@ -136,9 +151,12 @@ const AlarmModal: React.FC<AlarmModalProps> = ({ visible, container, time, onDis
         
         // Show success message that schedule is marked as Done
         setTimeout(() => {
+          const moreAlarmsMsg = remainingAlarms > 0 
+            ? `\n\n${remainingAlarms} more medication${remainingAlarms > 1 ? 's' : ''} to take.`
+            : '';
           Alert.alert(
             'Alarm Stopped', 
-            'The alarm has been turned off. Schedule marked as Done. Verifying medication...',
+            `The alarm has been turned off. Schedule marked as Done. Verifying medication...${moreAlarmsMsg}`,
             [{ text: 'OK' }]
           );
         }, 500);
@@ -185,7 +203,16 @@ const AlarmModal: React.FC<AlarmModalProps> = ({ visible, container, time, onDis
           
           <Text style={[styles.title, { color: theme.secondary }]}>Time to Take Medication!</Text>
           <Text style={[styles.containerText, { color: theme.text }]}>Container {container}</Text>
-          <Text style={[styles.timeText, { color: theme.textSecondary }]}>{time}</Text>
+          <Text style={[styles.timeText, { color: theme.textSecondary, marginBottom: remainingAlarms > 0 ? 10 : 30 }]}>{time}</Text>
+          
+          {remainingAlarms > 0 && (
+            <View style={styles.remainingBadge}>
+              <Ionicons name="notifications" size={16} color="#fff" />
+              <Text style={styles.remainingText}>
+                +{remainingAlarms} more medication{remainingAlarms > 1 ? 's' : ''} to take
+              </Text>
+            </View>
+          )}
           
           <TouchableOpacity
             style={[styles.stopButton, { backgroundColor: theme.primary }]}
@@ -231,7 +258,22 @@ const styles = StyleSheet.create({
   },
   timeText: {
     fontSize: 16,
-    marginBottom: 30,
+    // marginBottom is set dynamically based on remainingAlarms
+  },
+  remainingBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#FF6B6B',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 15,
+    marginBottom: 20,
+    gap: 6,
+  },
+  remainingText: {
+    color: '#fff',
+    fontSize: 13,
+    fontWeight: '600',
   },
   stopButton: {
     flexDirection: 'row',

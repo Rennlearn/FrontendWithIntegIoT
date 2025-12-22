@@ -1009,7 +1009,7 @@ const MonitorManageScreen = () => {
 
     // Create schedule notification for alarm stopped
     try {
-      const notificationResponse = await fetch('http://10.56.196.91:5001/notifications/schedule', {
+      const notificationResponse = await fetch('http://10.100.56.91:5001/notifications/schedule', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1036,7 +1036,7 @@ const MonitorManageScreen = () => {
       // Get pill count from backend
       let pillCount = 0;
       try {
-        const configResponse = await fetch(`http://10.56.196.91:5001/get-pill-config/${containerId}`);
+        const configResponse = await fetch(`http://10.100.56.91:5001/get-pill-config/${containerId}`);
         if (configResponse.ok) {
           const configData = await configResponse.json();
           pillCount = configData.pill_config?.count || 0;
@@ -1214,7 +1214,7 @@ const MonitorManageScreen = () => {
               // Get pill count from backend
               let pillCount = 0;
               try {
-                const configResponse = await fetch(`http://10.56.196.91:5001/get-pill-config/${containerId}`, {
+                const configResponse = await fetch(`http://10.100.56.91:5001/get-pill-config/${containerId}`, {
                   method: 'GET',
                   headers: { 'Content-Type': 'application/json' },
                   signal: AbortSignal.timeout(5000) // 5 second timeout
@@ -1304,7 +1304,7 @@ const MonitorManageScreen = () => {
           
           // Create schedule notification
           try {
-            const notificationResponse = await fetch('http://10.56.196.91:5001/notifications/schedule', {
+            const notificationResponse = await fetch('http://10.100.56.91:5001/notifications/schedule', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({

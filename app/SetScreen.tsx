@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { View, Text, Image, TouchableOpacity, Modal, FlatList, ScrollView, StyleSheet, Platform, ActivityIndicator, Alert } from "react-native";
 import DateTimePicker from "@react-native-community/datetimepicker";
 import { useNavigation } from "@react-navigation/native";
@@ -42,6 +42,9 @@ const SetScreen = () => {
   const navigation = useNavigation();
   const { isDarkMode } = useTheme();
   const theme = isDarkMode ? darkTheme : lightTheme;
+  // Guard against setState / navigation after unmount (common "random white screen" source)
+  const isMountedRef = useRef(true);
+  const pendingTimeoutsRef = useRef<Array<ReturnType<typeof setTimeout>>>([]);
   const [pillModalVisible, setPillModalVisible] = useState(false);
   const [alarmModalVisible, setAlarmModalVisible] = useState(false);
   const [confirmModalVisible, setConfirmModalVisible] = useState(false);
@@ -75,6 +78,7 @@ const SetScreen = () => {
   // Remove useEffect that resets pill modal/alarm modal etc on mount
   // Only keep fetchMedications and initial setup that doesn't cause a jump or open modals
   useEffect(() => {
+    isMountedRef.current = true;
     fetchMedications();
     setSelectedPills({ 1: null, 2: null, 3: null });
     setAlarms({ 1: [], 2: [], 3: [] });
@@ -90,7 +94,22 @@ const SetScreen = () => {
     // Check monitoring status for caregivers
     checkMonitoringStatus();
     // do NOT open any modals
+    return () => {
+      isMountedRef.current = false;
+      for (const t of pendingTimeoutsRef.current) {
+        try { clearTimeout(t); } catch {}
+      }
+      pendingTimeoutsRef.current = [];
+    };
   }, []);
+
+  const safeSetTimeout = (fn: () => void, ms: number) => {
+    const t = setTimeout(() => {
+      if (!isMountedRef.current) return;
+      try { fn(); } catch (e) { console.error('[SetScreen] timer callback error', e); }
+    }, ms);
+    pendingTimeoutsRef.current.push(t);
+  };
 
   // Clear data when screen comes into focus
   useEffect(() => {
@@ -501,9 +520,23 @@ const SetScreen = () => {
                 'Authorization': `Bearer ${token.trim()}`
               };
               
-              const connectionCheck = await fetch(`https://pillnow-database.onrender.com/api/caregiver-connections?caregiver=${caregiverId}&elder=${selectedElderId}`, {
-                headers
-              });
+              // Add timeout to prevent hanging on cloud API calls
+              const controller = new AbortController();
+              const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
+              
+              let connectionCheck;
+              try {
+                connectionCheck = await fetch(`https://pillnow-database.onrender.com/api/caregiver-connections?caregiver=${caregiverId}&elder=${selectedElderId}`, {
+                  headers,
+                  signal: controller.signal,
+                });
+                clearTimeout(timeoutId);
+              } catch (err) {
+                clearTimeout(timeoutId);
+                console.warn('[SetScreen] Connection check fetch failed (non-critical):', err);
+                // Allow access - connection check is not critical
+                connectionCheck = { ok: false, status: 0 };
+              }
               
               if (connectionCheck.ok) {
                 const connData = await connectionCheck.json();
@@ -648,26 +681,51 @@ const SetScreen = () => {
       // Old schedules will only be deleted if they are explicitly marked as "Missed" or "Done" and are older than 5 minutes
       // (handled by MonitorManageScreen auto-deletion logic)
       
-      // Now send each new schedule record
-      const promises = scheduleRecords.map(record => 
-        fetch('https://pillnow-database.onrender.com/api/medication_schedules', {
+      // Now send each new schedule record with timeout
+      const promises = scheduleRecords.map(record => {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 15000); // 15 second timeout per request
+        
+        return fetch('https://pillnow-database.onrender.com/api/medication_schedules', {
           method: 'POST',
           headers,
           body: JSON.stringify(record),
-        })
-      );
+          signal: controller.signal,
+        }).then(response => {
+          clearTimeout(timeoutId);
+          return response;
+        }).catch(err => {
+          clearTimeout(timeoutId);
+          throw err;
+        });
+      });
       
-      const responses = await Promise.all(promises);
+      const responses = await Promise.allSettled(promises);
       
-      // Check if all requests were successful
-      const failedResponses = responses.filter(response => !response.ok);
+      // Check for failures
+      const failedResponses = responses.filter((result, index) => {
+        if (result.status === 'rejected') {
+          console.error(`[SetScreen] Schedule ${index} failed:`, result.reason);
+          return true;
+        }
+        if (!result.value.ok) {
+          console.error(`[SetScreen] Schedule ${index} returned ${result.value.status}`);
+          return true;
+        }
+        return false;
+      });
+      
       if (failedResponses.length > 0) {
-        const errorText = await failedResponses[0].text();
-        console.error('API Error Response:', errorText);
-        throw new Error(`HTTP error! status: ${failedResponses[0].status} - ${errorText}`);
+        console.warn(`[SetScreen] ⚠️ ${failedResponses.length} out of ${scheduleRecords.length} schedule saves failed, but continuing...`);
       }
       
-      const results = await Promise.all(responses.map(response => response.json()));
+      // Extract successful responses
+      const successfulResponses = responses
+        .filter((r): r is PromiseFulfilledResult<Response> => r.status === 'fulfilled' && r.value.ok)
+        .map(r => r.value);
+      
+      // Parse successful responses
+      const results = await Promise.all(successfulResponses.map(response => response.json()));
       
       // Log summary of saved schedules
       console.log(`[SetScreen] ✅ Successfully saved ${scheduleRecords.length} schedule records to backend:`);
@@ -720,24 +778,74 @@ const SetScreen = () => {
         console.warn('[SetScreen] Could not import expo-notifications, skipping local notification scheduling:', e);
       }
 
-      // Save pill counts to backend for each container
+      // Save pill counts, labels, AND schedules to backend for each container
+      // This is critical for proper verification AND alarm triggering
       for (let containerNum = 1; containerNum <= 3; containerNum++) {
-        if (pillCountsLocked[containerNum] && pillCounts[containerNum] > 0) {
+        const pillName = selectedPills[containerNum as PillSlot];
+        const pillCount = pillCounts[containerNum] || 0;
+        const containerAlarms = alarms[containerNum as PillSlot];
+        
+        // Save config if there's either a pill name or a locked count
+        if (pillName || (pillCountsLocked[containerNum] && pillCount > 0)) {
           try {
             const containerId = `container${containerNum}`;
-            await fetch('http://10.56.196.91:5001/set-schedule', {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-              },
-              body: JSON.stringify({
-                container_id: containerId,
-                pill_config: { count: pillCounts[containerNum] },
-                times: [],
-              }),
-            });
+            
+            // Build pill_config with both count AND label
+            const pillConfig: { count: number; label?: string } = { 
+              count: pillCount 
+            };
+            
+            // Add pill label if available (critical for type verification!)
+            if (pillName) {
+              pillConfig.label = pillName;
+              console.log(`[SetScreen] Container ${containerNum}: Saving pill "${pillName}" with count ${pillCount}`);
+            }
+            
+            // Build schedules array from alarm dates (for backend alarm scheduler)
+            const schedulesArray = containerAlarms.map(alarmDate => ({
+              date: alarmDate.getFullYear() + '-' + 
+                    String(alarmDate.getMonth() + 1).padStart(2, '0') + '-' + 
+                    String(alarmDate.getDate()).padStart(2, '0'), // YYYY-MM-DD
+              time: String(alarmDate.getHours()).padStart(2, '0') + ':' + 
+                    String(alarmDate.getMinutes()).padStart(2, '0') // HH:MM
+            }));
+            
+            // Also build legacy times array (for backward compatibility)
+            const timesArray = containerAlarms.map(alarmDate => 
+              String(alarmDate.getHours()).padStart(2, '0') + ':' + 
+              String(alarmDate.getMinutes()).padStart(2, '0')
+            );
+            
+            console.log(`[SetScreen] Saving schedules for ${containerId}: ${schedulesArray.length} schedule(s)`);
+            
+            // Add timeout to prevent hanging
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 5000); // 5 second timeout
+            
+            try {
+              await fetch('http://10.100.56.91:5001/set-schedule', {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                  container_id: containerId,
+                  pill_config: pillConfig,
+                  times: timesArray, // Legacy format
+                  schedules: schedulesArray, // Date-aware format (preferred by scheduler)
+                  replace_schedules: true, // Replace old schedules with new ones
+                  replace_times: true, // Replace old times with new ones
+                }),
+                signal: controller.signal,
+              });
+              clearTimeout(timeoutId);
+              console.log(`[SetScreen] ✅ Saved pill config and ${schedulesArray.length} schedule(s) for ${containerId}`);
+            } catch (err) {
+              clearTimeout(timeoutId);
+              throw err;
+            }
           } catch (err) {
-            console.warn(`Failed to save pill count for container ${containerNum}:`, err);
+            console.warn(`Failed to save pill config/schedules for container ${containerNum}:`, err);
           }
         }
       }
@@ -794,6 +902,41 @@ const SetScreen = () => {
         // Bluetooth errors are non-critical - ESP32-CAM verification works independently
         console.warn('Bluetooth schedule sync failed (non-critical):', btErr);
       }
+
+      // Trigger capture for each container that has a pill configured
+      // This ensures ESP32-CAM captures the current state after schedule is saved
+      console.log('[SetScreen] Triggering captures for configured containers...');
+      const capturePromises: Promise<void>[] = [];
+      
+      for (let containerNum = 1; containerNum <= 3; containerNum++) {
+        const pillName = selectedPills[containerNum as PillSlot];
+        const pillCount = pillCounts[containerNum] || 0;
+        
+        if (pillName && pillCount > 0) {
+          const containerId = `container${containerNum}`;
+          const pillConfig = { count: pillCount, label: pillName };
+          
+          console.log(`[SetScreen] 📸 Triggering capture for ${containerId} with config:`, pillConfig);
+          
+          // Trigger capture with proper error handling
+          const capturePromise = verificationService.triggerCapture(containerId, pillConfig)
+            .then(() => {
+              console.log(`[SetScreen] ✅ Capture triggered successfully for ${containerId}`);
+            })
+            .catch((err) => {
+              console.error(`[SetScreen] ❌ Failed to trigger capture for ${containerId}:`, err);
+            });
+          
+          capturePromises.push(capturePromise);
+          
+          // Small delay between triggers to avoid overwhelming MQTT
+          await new Promise(resolve => setTimeout(resolve, 500)); // Increased delay for better reliability
+        }
+      }
+      
+      // Wait for all captures to be triggered (but don't wait for completion)
+      await Promise.allSettled(capturePromises);
+      console.log('[SetScreen] ✅ All capture triggers sent');
 
       // Camera verification disabled - skipping ESP32-CAM verification
       // TODO: Re-enable when camera hardware is available
@@ -883,9 +1026,9 @@ const SetScreen = () => {
                   setConfirmModalVisible(false);
                   setWarningModalVisible(false);
                   resetAllData();
-                  // Navigate back with small delay
-                  setTimeout(() => {
-                    navigation.goBack();
+                  // Navigate back with small delay (guarded)
+                  safeSetTimeout(() => {
+                    try { navigation.goBack(); } catch (e) { console.warn('[SetScreen] goBack failed', e); }
                   }, 100);
                 }}
               ]
@@ -903,9 +1046,9 @@ const SetScreen = () => {
                   setConfirmModalVisible(false);
                   setWarningModalVisible(false);
                   resetAllData();
-                  // Navigate back with small delay
-                  setTimeout(() => {
-                    navigation.goBack();
+                  // Navigate back with small delay (guarded)
+                  safeSetTimeout(() => {
+                    try { navigation.goBack(); } catch (e) { console.warn('[SetScreen] goBack failed', e); }
                   }, 100);
                 }}
               ]
@@ -925,9 +1068,9 @@ const SetScreen = () => {
                 setConfirmModalVisible(false);
                 setWarningModalVisible(false);
                 resetAllData();
-                // Navigate back with small delay
-                setTimeout(() => {
-                  navigation.goBack();
+                // Navigate back with small delay (guarded)
+                safeSetTimeout(() => {
+                  try { navigation.goBack(); } catch (e) { console.warn('[SetScreen] goBack failed', e); }
                 }, 100);
               }}
             ]
@@ -998,9 +1141,9 @@ const SetScreen = () => {
             setWarningModalVisible(false);
             // Reset all data when going back to prevent modification
             resetAllData();
-            // Navigate back immediately (don't wait for async operations)
-            setTimeout(() => {
-              navigation.goBack();
+            // Navigate back immediately (guarded)
+            safeSetTimeout(() => {
+              try { navigation.goBack(); } catch (e) { console.warn('[SetScreen] goBack failed', e); }
             }, 0);
           }}
         >

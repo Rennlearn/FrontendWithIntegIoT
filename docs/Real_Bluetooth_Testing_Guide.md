@@ -110,7 +110,7 @@ Console Output:
 
 ### **User Experience:**
 - ✅ **Clear prompts** to turn on Bluetooth
-- ✅ **Real-time scanning** with progress
+- ✅ **Real-time scanning** with status updates
 - ✅ **Actual device discovery** results
 - ✅ **Real connection status** updates
 - ✅ **Hardware command feedback**

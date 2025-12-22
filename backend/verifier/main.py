@@ -1,7 +1,7 @@
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from io import BytesIO
 from PIL import Image
 import json
@@ -12,21 +12,23 @@ import numpy as np
 import time
 from ultralytics import YOLO
 from pathlib import Path
+from sklearn.neighbors import KNeighborsClassifier
 
 app = FastAPI(title="PillNow Verifier", version="0.1.0")
 
 # Load models on startup
 MODEL_DIR = Path(__file__).parent / "models"
-YOLO_MODEL_PATH = MODEL_DIR / "best.pt"
-KNN_MODEL_PATH = MODEL_DIR / "knn_pills_updated.pkl"
+YOLO_MODEL_PATH = MODEL_DIR / "best2.pt"
+KNN_MODEL_PATH = MODEL_DIR / "knn_pills_2.pkl"
 
 yolo_model = None
 knn_model = None
+knn_scaler = None  # Feature scaler if KNN model uses one
 
 @app.on_event("startup")
 async def load_models():
     """Load YOLOv8 and KNN models on server startup"""
-    global yolo_model, knn_model
+    global yolo_model, knn_model, knn_scaler
     try:
         # Load YOLOv8 model
         if YOLO_MODEL_PATH.exists():
@@ -39,9 +41,37 @@ async def load_models():
         # Load KNN classifier
         if KNN_MODEL_PATH.exists():
             print(f"Loading KNN model from {KNN_MODEL_PATH}")
-            with open(KNN_MODEL_PATH, 'rb') as f:
-                knn_model = pickle.load(f)
-            print("KNN model loaded successfully")
+            try:
+                # Some sklearn artifacts are saved with joblib, others with raw pickle.
+                # Your `knn_pills_2.pkl` loads via joblib but fails with pickle.
+                knn_data = None
+                try:
+                    with open(KNN_MODEL_PATH, 'rb') as f:
+                        knn_data = pickle.load(f)
+                except Exception as pickle_err:
+                    try:
+                        import joblib  # type: ignore
+                        knn_data = joblib.load(str(KNN_MODEL_PATH))
+                        print(f"KNN model loaded via joblib (pickle failed: {pickle_err})")
+                    except Exception as joblib_err:
+                        raise Exception(f"Failed to load KNN model. pickle_err={pickle_err} joblib_err={joblib_err}")
+
+                    # Handle different KNN model formats
+                    if isinstance(knn_data, dict):
+                        knn_model = knn_data.get('model') or knn_data.get('classifier') or knn_data.get('knn')
+                        knn_scaler = knn_data.get('scaler') or knn_data.get('feature_scaler')
+                        print(f"KNN model loaded: {type(knn_model)}")
+                        if knn_scaler:
+                            print("KNN scaler loaded")
+                    elif hasattr(knn_data, 'predict'):  # Direct KNN model
+                        knn_model = knn_data
+                        print("KNN model loaded (direct)")
+                    else:
+                        print(f"Warning: Unknown KNN model format: {type(knn_data)}")
+                        knn_model = None
+            except Exception as e:
+                print(f"Error loading KNN model: {e}")
+                knn_model = None
         else:
             print(f"Warning: KNN model not found at {KNN_MODEL_PATH}")
             
@@ -58,6 +88,103 @@ app.add_middleware(
 )
 
 
+def extract_pill_features(pill_roi: np.ndarray) -> Optional[np.ndarray]:
+    """
+    Extract features from a pill region for KNN classification.
+    Features include: color (mean RGB), shape (aspect ratio, area), texture (variance)
+    """
+    try:
+        # Be permissive: ESP32-CAM images can be blurry and YOLO boxes can be tight.
+        # If ROI is tiny, we can still extract coarse color/texture features after resizing.
+        if pill_roi.size == 0:
+            return None
+
+        # Ensure 3-channel BGR
+        if len(pill_roi.shape) == 2:
+            pill_roi = cv2.cvtColor(pill_roi, cv2.COLOR_GRAY2BGR)
+        elif pill_roi.shape[2] == 4:
+            pill_roi = cv2.cvtColor(pill_roi, cv2.COLOR_BGRA2BGR)
+
+        h0, w0 = pill_roi.shape[:2]
+        # If ROI is extremely small, upsample it so feature extraction is stable.
+        if h0 < 10 or w0 < 10:
+            target = 32
+            pill_roi = cv2.resize(pill_roi, (target, target), interpolation=cv2.INTER_LINEAR)
+
+        # Some trained KNN models expect a very high-dimensional feature vector.
+        # Your current `knn_pills_2.pkl` expects 2051 features (StandardScaler n_features_in_ = 2051).
+        # We support that by building:
+        #  - 3 color means (BGR)
+        #  - 2048 grayscale pixels from a fixed 32x64 resize (32*64=2048)
+        # Total = 2051 features.
+        expected_dim = None
+        try:
+            if 'knn_scaler' in globals() and knn_scaler is not None and hasattr(knn_scaler, 'n_features_in_'):
+                expected_dim = int(getattr(knn_scaler, 'n_features_in_', 0) or 0)
+            elif 'knn_model' in globals() and knn_model is not None and hasattr(knn_model, 'n_features_in_'):
+                expected_dim = int(getattr(knn_model, 'n_features_in_', 0) or 0)
+        except Exception:
+            expected_dim = None
+
+        if expected_dim and expected_dim >= 1000:
+            # High-dimensional feature mode (2051)
+            mean_bgr = np.mean(pill_roi.reshape(-1, 3), axis=0).astype(np.float32)  # 3
+            gray = cv2.cvtColor(pill_roi, cv2.COLOR_BGR2GRAY)
+            gray_rs = cv2.resize(gray, (64, 32), interpolation=cv2.INTER_LINEAR)  # (h=32,w=64) => 2048
+            flat = (gray_rs.reshape(-1).astype(np.float32) / 255.0)  # 2048
+            feats = np.concatenate([mean_bgr, flat], axis=0)  # 2051
+            # If model expects a slightly different dim, pad/trim.
+            if feats.shape[0] != expected_dim:
+                if feats.shape[0] > expected_dim:
+                    feats = feats[:expected_dim]
+                else:
+                    feats = np.pad(feats, (0, expected_dim - feats.shape[0]), mode='constant')
+            return feats.astype(np.float32)
+        
+        features = []
+        
+        # 1. Color features (mean RGB values)
+        mean_bgr = np.mean(pill_roi.reshape(-1, 3), axis=0)
+        features.extend(mean_bgr.tolist())  # B, G, R
+        
+        # 2. Color variance (texture indicator)
+        std_bgr = np.std(pill_roi.reshape(-1, 3), axis=0)
+        features.extend(std_bgr.tolist())  # B, G, R std
+        
+        # 3. Shape features
+        height, width = pill_roi.shape[:2]
+        aspect_ratio = width / height if height > 0 else 1.0
+        area = width * height
+        features.append(aspect_ratio)
+        features.append(area)
+        
+        # 4. Color histogram features (dominant colors)
+        # Convert to HSV for better color analysis
+        hsv = cv2.cvtColor(pill_roi, cv2.COLOR_BGR2HSV)
+        h_mean = np.mean(hsv[:, :, 0])
+        s_mean = np.mean(hsv[:, :, 1])
+        v_mean = np.mean(hsv[:, :, 2])
+        features.extend([h_mean, s_mean, v_mean])
+        
+        # 5. Edge features (texture)
+        gray = cv2.cvtColor(pill_roi, cv2.COLOR_BGR2GRAY)
+        edges = cv2.Canny(gray, 50, 150)
+        edge_density = np.sum(edges > 0) / (width * height) if (width * height) > 0 else 0
+        features.append(edge_density)
+        
+        # 6. Additional texture features (local binary pattern approximation)
+        # Simple variance of gray values as texture measure
+        gray_variance = np.var(gray)
+        features.append(gray_variance)
+        
+        # Total: 3 (BGR mean) + 3 (BGR std) + 2 (shape) + 3 (HSV) + 2 (texture) = 13 features
+        return np.array(features, dtype=np.float32)
+        
+    except Exception as e:
+        print(f"[KNN DEBUG] Error extracting features: {e}")
+        return None
+
+
 class ClassCount(BaseModel):
     label: str
     n: int
@@ -69,6 +196,7 @@ class VerifyResponse(BaseModel):
     classesDetected: List[ClassCount]
     confidence: float
     annotatedImagePath: Optional[str] = None
+    knnVerification: Optional[Dict[str, Any]] = None  # KNN verification results
 
 
 @app.post("/verify", response_model=VerifyResponse)
@@ -90,11 +218,25 @@ async def verify(image: UploadFile = File(...), expected: str = Form("{}")):
 
     # Get expected count from request
     expected_count = 0
+    expected_label = None
     if isinstance(expected_obj, dict) and "count" in expected_obj:
         try:
             expected_count = int(expected_obj["count"])
         except Exception:
             expected_count = 0
+    # Optional expected pill label/type (use any of these keys)
+    print(f"[YOLO DEBUG] Raw expected_obj: {expected_obj}")
+    if isinstance(expected_obj, dict):
+        expected_label = expected_obj.get("label") or expected_obj.get("pill") or expected_obj.get("pillType") or expected_obj.get("pill_name")
+        print(f"[YOLO DEBUG] Extracted expected_label (before processing): {expected_label}")
+        if expected_label:
+            expected_label_original = str(expected_label).strip()
+            expected_label = expected_label_original.lower()
+            print(f"[YOLO DEBUG] ✅ Expected pill label received: '{expected_label_original}' -> normalized to: '{expected_label}'")
+        else:
+            print(f"[YOLO DEBUG] ⚠️ No expected label found in expected_obj. Keys available: {list(expected_obj.keys())}")
+    else:
+        print(f"[YOLO DEBUG] ⚠️ expected_obj is not a dict, type: {type(expected_obj)}")
 
     # Run inference with YOLOv8 model
     detected_classes: List[ClassCount] = []
@@ -204,6 +346,7 @@ async def verify(image: UploadFile = File(...), expected: str = Form("{}")):
         detected_count = sum(detections_by_class.values())
         for label, count in detections_by_class.items():
             detected_classes.append(ClassCount(label=label, n=count))
+            print(f"[YOLO DEBUG] Detected class: '{label}' (count: {count})")
         
         # Calculate average confidence
         confidence = np.mean(all_confidences) if all_confidences else 0.0
@@ -262,13 +405,241 @@ async def verify(image: UploadFile = File(...), expected: str = Form("{}")):
             print(f"[YOLO DEBUG] Failed to save annotated image: {e}")
         
         # Determine if verification passes
-        # Pass ONLY if detected count exactly matches expected count when provided
-        count_match = (detected_count == expected_count) if expected_count > 0 else True
-        confidence_threshold = 0.5  # Minimum confidence threshold
-        pass_ = count_match and confidence >= confidence_threshold
+        # PillNow requirement: alert when pill TYPE is wrong OR pill COUNT is wrong.
+        # IMPORTANT: If container should have ONLY one type of pill, ANY foreign pill = MISMATCH
+        confidence_threshold = 0.3  # Lower threshold to allow more detections
         
-        # If KNN model is available, we could use it for additional classification
-        # For now, YOLOv8 provides both detection and classification
+        # Initialize pass_ based on confidence and basic detection
+        pass_ = detected_count > 0 and confidence >= confidence_threshold
+        
+        # Pill type + count validation
+        if expected_label:
+            detected_labels = {c.label.lower() for c in detected_classes}
+            # Get count of expected type pills vs foreign type pills
+            expected_type_count = sum(c.n for c in detected_classes if c.label.lower() == expected_label)
+            foreign_type_count = sum(c.n for c in detected_classes if c.label.lower() != expected_label)
+            foreign_types = [c.label for c in detected_classes if c.label.lower() != expected_label]
+            
+            print(f"[YOLO DEBUG] ========== PILL TYPE CHECK ==========")
+            print(f"   Expected label (lowercase): '{expected_label}'")
+            print(f"   Expected count: {expected_count}")
+            print(f"   Detected labels (lowercase): {detected_labels}")
+            print(f"   Detected classes: {[(c.label, c.n) for c in detected_classes]}")
+            print(f"   Pills of expected type: {expected_type_count}")
+            print(f"   Foreign pills detected: {foreign_type_count} ({foreign_types})")
+            
+            # Check 1: No foreign pill types allowed in container
+            has_foreign_pills = foreign_type_count > 0
+            
+            # Check 2: Expected pill type must exist
+            has_expected_type = expected_label in detected_labels
+            
+            # Check 3: Count of expected type pills should match (if count specified)
+            count_match = (expected_type_count == expected_count) if expected_count > 0 else True
+
+            if has_foreign_pills:
+                print(f"[YOLO DEBUG] ❌❌❌ FOREIGN PILL TYPE DETECTED ❌❌❌")
+                print(f"   Container should only have '{expected_label}'")
+                print(f"   But found foreign pills: {foreign_types} (count: {foreign_type_count})")
+                print(f"   This is a MISMATCH - wrong pill in container!")
+                pass_ = False  # Foreign pill type = fail, trigger alert
+            elif not has_expected_type:
+                print(f"[YOLO DEBUG] ❌❌❌ EXPECTED PILL TYPE NOT FOUND ❌❌❌")
+                print(f"   Expected '{expected_label}' but got {detected_labels}")
+                print(f"   Setting pass_ = False (will trigger buzzer alarm)")
+                pass_ = False  # Expected pill type not found = fail
+            elif not count_match:
+                print(f"[YOLO DEBUG] ❌❌❌ PILL COUNT MISMATCH ❌❌❌")
+                print(f"   Expected {expected_count} x '{expected_label}' but detected {expected_type_count}")
+                print(f"   Setting pass_ = False (will trigger buzzer alarm)")
+                pass_ = False  # Wrong count = fail, trigger alert
+            else:
+                print(f"[YOLO DEBUG] ✅✅✅ PILL TYPE + COUNT MATCH ✅✅✅")
+                print(f"   Expected '{expected_label}' x {expected_count} - VERIFIED")
+                print(f"   No foreign pills detected")
+                pass_ = True
+        else:
+            # No expected label provided - use count/confidence check
+            print(f"[YOLO DEBUG] No expected label provided - using count/confidence check")
+            count_match = (detected_count == expected_count) if expected_count > 0 else True
+            pass_ = count_match and confidence >= confidence_threshold
+            print(f"[YOLO DEBUG] Count/confidence check: count_match={count_match}, confidence={confidence:.2f}")
+        
+        print(f"[YOLO DEBUG] ========== FINAL RESULT ==========")
+        print(f"   pass_ = {pass_}")
+        print(f"   detected_count = {detected_count}")
+        print(f"   expected_count = {expected_count}")
+        print(f"   confidence = {confidence:.2f}")
+        print(f"   ==========================================")
+        
+        # KNN verification: Use KNN as secondary verification if available
+        # KNN provides additional confidence by analyzing pill features (color, shape, texture)
+        #
+        # We track:
+        # - attempted: number of YOLO ROIs we attempted to classify
+        # - successful: number of ROIs that produced a KNN class prediction
+        # - results: detailed per-ROI outcomes (including skipped reasons)
+        knn_verification_results = []
+        knn_foreign_pills = []  # Track foreign pills detected by KNN
+        knn_attempted = 0
+        knn_successful = 0
+        
+        if knn_model is not None and len(filtered_detections) > 0:
+            print(f"[KNN DEBUG] ========== KNN VERIFICATION ==========")
+            print(f"[KNN DEBUG] Expected pill type: '{expected_label or 'any'}'")
+            try:
+                for i, det in enumerate(filtered_detections):
+                    x1, y1, x2, y2 = det['box']
+                    # Extract pill region (robust crop with padding + bounds clamp)
+                    ih, iw = img_cv.shape[:2]
+                    pad = 6  # pixels of padding around YOLO box to preserve pill edges
+                    x1i = max(0, int(x1) - pad)
+                    y1i = max(0, int(y1) - pad)
+                    x2i = min(iw, int(x2) + pad)
+                    y2i = min(ih, int(y2) + pad)
+                    knn_attempted += 1
+                    if x2i <= x1i or y2i <= y1i:
+                        print(f"[KNN DEBUG] Skipping invalid ROI for detection {i}: ({x1i},{y1i})-({x2i},{y2i})")
+                        knn_verification_results.append({
+                            'detection_index': i,
+                            'yolo_class': det.get('class_name'),
+                            'yolo_confidence': det.get('confidence'),
+                            'knn_class': None,
+                            'knn_confidence': 0.0,
+                            'matches_yolo': False,
+                            'matches_expected': False if expected_label else True,
+                            'status': 'skipped_invalid_roi',
+                        })
+                        continue
+                    pill_roi = img_cv[y1i:y2i, x1i:x2i]
+                    
+                    if pill_roi.size == 0:
+                        print(f"[KNN DEBUG] Skipping empty ROI for detection {i}")
+                        knn_verification_results.append({
+                            'detection_index': i,
+                            'yolo_class': det.get('class_name'),
+                            'yolo_confidence': det.get('confidence'),
+                            'knn_class': None,
+                            'knn_confidence': 0.0,
+                            'matches_yolo': False,
+                            'matches_expected': False if expected_label else True,
+                            'status': 'skipped_empty_roi',
+                        })
+                        continue
+                    
+                    # Extract features from pill region
+                    features = extract_pill_features(pill_roi)
+                    if features is None:
+                        print(f"[KNN DEBUG] Failed to extract features for detection {i}")
+                        knn_verification_results.append({
+                            'detection_index': i,
+                            'yolo_class': det.get('class_name'),
+                            'yolo_confidence': det.get('confidence'),
+                            'knn_class': None,
+                            'knn_confidence': 0.0,
+                            'matches_yolo': False,
+                            'matches_expected': False if expected_label else True,
+                            'status': 'feature_extract_failed',
+                        })
+                        continue
+                    
+                    # Scale features if scaler is available
+                    if knn_scaler is not None:
+                        features = knn_scaler.transform([features])[0]
+                    
+                    # Predict with KNN
+                    try:
+                        knn_prediction = knn_model.predict([features])[0]
+                        knn_class = str(knn_prediction).lower()
+                        knn_proba = None
+                        max_proba = 0.5
+                        
+                        if hasattr(knn_model, 'predict_proba'):
+                            knn_proba = knn_model.predict_proba([features])[0]
+                            max_proba = np.max(knn_proba)
+                        
+                        # Check if this pill matches expected type
+                        matches_expected = (knn_class == expected_label) if expected_label else True
+                        matches_yolo = det['class_name'].lower() == knn_class
+                        
+                        print(f"[KNN DEBUG] Pill {i+1}: YOLO='{det['class_name']}' KNN='{knn_class}' (conf: {max_proba:.2f}) " +
+                              f"{'✅ matches expected' if matches_expected else '❌ FOREIGN PILL!'}")
+                        
+                        knn_verification_results.append({
+                            'detection_index': i,
+                            'yolo_class': det['class_name'],
+                            'yolo_confidence': det['confidence'],
+                            'knn_class': knn_class,
+                            'knn_confidence': float(max_proba),
+                            'matches_yolo': matches_yolo,
+                            'matches_expected': matches_expected
+                        })
+                        knn_successful += 1
+                        
+                        # Track foreign pills (KNN says it's different from expected)
+                        if expected_label and not matches_expected:
+                            knn_foreign_pills.append({
+                                'index': i,
+                                'expected': expected_label,
+                                'detected_knn': knn_class,
+                                'detected_yolo': det['class_name'],
+                                'confidence': max_proba
+                            })
+                            
+                    except Exception as e:
+                        print(f"[KNN DEBUG] Error during KNN prediction: {e}")
+                        knn_verification_results.append({
+                            'detection_index': i,
+                            'yolo_class': det.get('class_name'),
+                            'yolo_confidence': det.get('confidence'),
+                            'knn_class': None,
+                            'knn_confidence': 0.0,
+                            'matches_yolo': False,
+                            'matches_expected': False if expected_label else True,
+                            'status': f'knn_predict_failed: {str(e)}',
+                        })
+                        continue
+                
+                # Analyze KNN results
+                if knn_verification_results:
+                    yolo_knn_matches = sum(1 for r in knn_verification_results if r['matches_yolo'])
+                    expected_matches = sum(1 for r in knn_verification_results if r['matches_expected'])
+                    total = len(knn_verification_results)
+                    yolo_match_rate = yolo_knn_matches / total if total > 0 else 0
+                    expected_match_rate = expected_matches / total if total > 0 else 0
+                    
+                    print(f"[KNN DEBUG] ========== KNN Summary ==========")
+                    print(f"   ROIs attempted: {knn_attempted}")
+                    print(f"   ROIs classified: {knn_successful}")
+                    print(f"   Results recorded: {total}")
+                    print(f"   YOLO-KNN agreement: {yolo_knn_matches}/{total} ({yolo_match_rate*100:.1f}%)")
+                    if expected_label:
+                        print(f"   Pills matching expected '{expected_label}': {expected_matches}/{total} ({expected_match_rate*100:.1f}%)")
+                        print(f"   Foreign pills detected by KNN: {len(knn_foreign_pills)}")
+                    
+                    # KNN can override YOLO decision if it detects foreign pills
+                    if expected_label and len(knn_foreign_pills) > 0:
+                        print(f"[KNN DEBUG] ❌❌❌ KNN DETECTED FOREIGN PILLS ❌❌❌")
+                        for fp in knn_foreign_pills:
+                            print(f"   Pill {fp['index']+1}: Expected '{fp['expected']}' but KNN detected '{fp['detected_knn']}' (conf: {fp['confidence']:.2f})")
+                        print(f"[KNN DEBUG] Setting pass_ = False due to KNN foreign pill detection")
+                        pass_ = False
+                    elif yolo_match_rate < 0.5:
+                        # Low YOLO-KNN agreement - reduce confidence but don't fail
+                        print(f"[KNN DEBUG] ⚠️ Low YOLO-KNN agreement ({yolo_match_rate*100:.1f}%) - reducing confidence")
+                        confidence = confidence * 0.7
+                    else:
+                        print(f"[KNN DEBUG] ✅ KNN verification passed")
+                        
+            except Exception as e:
+                print(f"[KNN DEBUG] Error during KNN verification: {e}")
+                import traceback
+                print(traceback.format_exc())
+        else:
+            if knn_model is None:
+                print(f"[KNN DEBUG] KNN model not available - using YOLO only")
+            else:
+                print(f"[KNN DEBUG] No detections to verify with KNN")
         
     except Exception as e:
         import traceback
@@ -283,12 +654,50 @@ async def verify(image: UploadFile = File(...), expected: str = Form("{}")):
             annotatedImagePath=None,
         )
 
+    # Prepare KNN verification data for response
+    knn_verification_data = None
+    if knn_verification_results:
+        expected_matches = sum(1 for r in knn_verification_results if r.get('matches_expected', True))
+        yolo_matches = sum(1 for r in knn_verification_results if r.get('matches_yolo', False))
+        total = len(knn_verification_results)
+        
+        knn_verification_data = {
+            'enabled': True,
+            # attempted/successful count is more meaningful than total results
+            'attempted': int(knn_attempted) if 'knn_attempted' in locals() else total,
+            'successful': int(knn_successful) if 'knn_successful' in locals() else 0,
+            # Keep legacy key name used by app; map it to "successful" classifications
+            'total_verified': int(knn_successful) if 'knn_successful' in locals() else total,
+            'yolo_knn_matches': yolo_matches,
+            'yolo_knn_match_rate': yolo_matches / total if total > 0 else 0,
+            'expected_matches': expected_matches,
+            'expected_match_rate': expected_matches / total if total > 0 else 0,
+            'foreign_pills_detected': len(knn_foreign_pills) if 'knn_foreign_pills' in dir() else 0,
+            'foreign_pills': knn_foreign_pills if 'knn_foreign_pills' in dir() else [],
+            'results': knn_verification_results
+        }
+    else:
+        knn_verification_data = {
+            'enabled': knn_model is not None,
+            'attempted': 0,
+            'successful': 0,
+            'total_verified': 0,
+            'yolo_knn_matches': 0,
+            'yolo_knn_match_rate': 0,
+            'expected_matches': 0,
+            'expected_match_rate': 0,
+            'foreign_pills_detected': 0,
+            'foreign_pills': [],
+            'results': []
+        }
+    
     return VerifyResponse(
         pass_=pass_,
         count=detected_count,
         classesDetected=detected_classes,
         confidence=float(confidence),
         annotatedImagePath=annotated_path,
+        knnVerification=knn_verification_data,
     )
 
 

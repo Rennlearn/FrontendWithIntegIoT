@@ -7,7 +7,7 @@ import { lightTheme, darkTheme } from '@/styles/theme';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { jwtDecode } from 'jwt-decode';
 
-const BACKEND_URL = 'http://10.56.196.91:5001';
+const BACKEND_URL = 'http://10.100.56.91:5001';
 const API_BASE_URL = 'https://pillnow-database.onrender.com/api';
 
 interface DecodedToken {
