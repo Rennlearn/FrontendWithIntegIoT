@@ -19,15 +19,15 @@ import { lightTheme, darkTheme } from "@/styles/theme";
  * ForgotPassword Screen
  * 
  * Flow:
- * 1. User enters phone number
- * 2. Backend sends OTP via SMS (using configured SMS service: HTTP/Serial/Queue)
+ * 1. User enters email
+ * 2. Backend sends OTP via email (SendGrid on server)
  * 3. User enters OTP
  * 4. Backend verifies OTP
  * 5. User navigates to ResetPassword screen
  * 
  * Backend API Endpoints:
- * - POST /api/users/forgot-password { phone: string } → Sends OTP via SMS
- * - POST /api/users/verify-otp { phone: string, otp: string } → Verifies OTP
+ * - POST /api/users/forgot-password { email: string } → Sends OTP via email
+ * - POST /api/users/verify-otp { email: string, otp: string } → Verifies OTP
  */
 
 const ForgotPassword = () => {
@@ -35,7 +35,7 @@ const ForgotPassword = () => {
   const { isDarkMode } = useTheme();
   const theme = isDarkMode ? darkTheme : lightTheme;
 
-  const [phone, setPhone] = useState("");
+  const [email, setEmail] = useState("");
   const [otp, setOtp] = useState("");
   const [loading, setLoading] = useState(false);
   const [sendingOTP, setSendingOTP] = useState(false);
@@ -44,17 +44,17 @@ const ForgotPassword = () => {
   const [otpVerified, setOtpVerified] = useState(false);
   const [resendCooldown, setResendCooldown] = useState(0);
 
-  // Send OTP to phone number
+  // Send OTP to email
   const handleSendOTP = async () => {
-    if (!phone.trim()) {
-      Alert.alert("Error", "Please enter your phone number.");
+    if (!email.trim()) {
+      Alert.alert("Error", "Please enter your email address.");
       return;
     }
 
-    // Basic phone number validation
-    const phoneRegex = /^[+]?[(]?[0-9]{1,4}[)]?[-\s.]?[(]?[0-9]{1,4}[)]?[-\s.]?[0-9]{1,9}$/;
-    if (!phoneRegex.test(phone.trim())) {
-      Alert.alert("Error", "Please enter a valid phone number.");
+    // Basic email validation
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email.trim())) {
+      Alert.alert("Error", "Please enter a valid email address.");
       return;
     }
 
@@ -62,7 +62,7 @@ const ForgotPassword = () => {
     try {
       const response = await axios.post(
         "https://pillnow-database.onrender.com/api/users/forgot-password",
-        { phone: phone.trim() }
+        { email: email.trim() }
       );
 
       if (response.data && response.data.success) {
@@ -82,7 +82,7 @@ const ForgotPassword = () => {
 
         Alert.alert(
           "OTP Sent",
-          `A verification code has been sent to ${phone.trim()}. Please check your messages and enter the code below.`
+          `A verification code has been sent to ${email.trim()}. Please check your email and enter the code below.`
         );
       } else {
         Alert.alert(
@@ -95,7 +95,7 @@ const ForgotPassword = () => {
       const errorMessage =
         error.response?.data?.message ||
         error.message ||
-        "Failed to send OTP. Please check your phone number and try again.";
+        "Failed to send OTP. Please check your email and try again.";
       Alert.alert("Error", errorMessage);
     } finally {
       setSendingOTP(false);
@@ -119,7 +119,7 @@ const ForgotPassword = () => {
       const response = await axios.post(
         "https://pillnow-database.onrender.com/api/users/verify-otp",
         {
-          phone: phone.trim(),
+          email: email.trim(),
           otp: otp.trim(),
         }
       );
@@ -128,16 +128,16 @@ const ForgotPassword = () => {
         setOtpVerified(true);
         Alert.alert(
           "Verification Successful",
-          "Your phone number has been verified. You can now reset your password.",
+          "Your email has been verified. You can now reset your password.",
           [
             {
               text: "OK",
               onPress: () => {
-                // Navigate to reset password screen with phone number
+                // Navigate to reset password screen with email
                 router.push({
                   pathname: "/ResetPassword",
                   params: { 
-                    phone: phone.trim(),
+                    email: email.trim(),
                     otpVerified: "true"
                   },
                 });
@@ -208,35 +208,35 @@ const ForgotPassword = () => {
         </Text>
         <Text style={[styles.subtitle, { color: theme.textSecondary }]}>
           {!otpSent
-            ? "Enter your phone number to receive a verification code."
+            ? "Enter your email to receive a verification code."
             : otpVerified
-            ? "Phone number verified. You can now reset your password."
-            : "Enter the verification code sent to your phone number."}
+            ? "Email verified. You can now reset your password."
+            : "Enter the verification code sent to your email."}
         </Text>
 
-        {/* Phone Number Input */}
+        {/* Email Input */}
         <View style={styles.inputContainer}>
           <Ionicons
-            name="call-outline"
+            name="mail-outline"
             size={20}
             color={theme.textSecondary}
             style={styles.inputIcon}
           />
           <TextInput
             style={[styles.input, { color: theme.text, borderColor: theme.border }]}
-            placeholder="Enter your phone number"
+            placeholder="Enter your email address"
             placeholderTextColor={theme.textSecondary}
-            value={phone}
+            value={email}
             onChangeText={(text) => {
-              setPhone(text);
-              // Reset OTP state if phone number changes
+              setEmail(text);
+              // Reset OTP state if email changes
               if (otpSent) {
                 setOtpSent(false);
                 setOtpVerified(false);
                 setOtp("");
               }
             }}
-            keyboardType="phone-pad"
+            keyboardType="email-address"
             autoCapitalize="none"
             autoCorrect={false}
             editable={!otpSent || otpVerified}
@@ -249,10 +249,10 @@ const ForgotPassword = () => {
             style={[
               styles.submitButton,
               { backgroundColor: theme.primary },
-              (sendingOTP || !phone.trim()) && styles.submitButtonDisabled,
+              (sendingOTP || !email.trim()) && styles.submitButtonDisabled,
             ]}
             onPress={handleSendOTP}
-            disabled={sendingOTP || !phone.trim()}
+            disabled={sendingOTP || !email.trim()}
           >
             {sendingOTP ? (
               <ActivityIndicator size="small" color={theme.card} />

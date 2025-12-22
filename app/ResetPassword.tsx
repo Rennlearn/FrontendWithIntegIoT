@@ -21,12 +21,12 @@ import { lightTheme, darkTheme } from "@/styles/theme";
  * Flow:
  * 1. Requires OTP verification (from ForgotPassword screen)
  * 2. User enters new password
- * 3. Backend resets password using phone number to find account
+ * 3. Backend resets password using email to find account
  * 
  * Backend API Endpoints:
- * - POST /api/users/reset-password { phone: string, newPassword: string } → Resets password
+ * - POST /api/users/reset-password { email: string, newPassword: string } → Resets password
  * 
- * Note: Phone number is used to find the account, not a reset token
+ * Note: Email is used to find the account, not a reset token
  */
 
 const ResetPassword = () => {
@@ -35,7 +35,7 @@ const ResetPassword = () => {
   const { isDarkMode } = useTheme();
   const theme = isDarkMode ? darkTheme : lightTheme;
 
-  const [phone, setPhone] = useState((params.phone as string) || "");
+  const [email, setEmail] = useState((params.email as string) || "");
   const [otpVerified, setOtpVerified] = useState(params.otpVerified === "true");
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -44,9 +44,9 @@ const ResetPassword = () => {
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    // If phone and OTP verification status are passed, use them
-    if (params.phone) {
-      setPhone(params.phone as string);
+    // If email and OTP verification status are passed, use them
+    if (params.email) {
+      setEmail(params.email as string);
     }
     if (params.otpVerified === "true") {
       setOtpVerified(true);
@@ -56,7 +56,7 @@ const ResetPassword = () => {
     if (!params.otpVerified || params.otpVerified !== "true") {
       Alert.alert(
         "Verification Required",
-        "Please verify your phone number first before resetting your password.",
+        "Please verify your email first before resetting your password.",
         [
           {
             text: "OK",
@@ -70,9 +70,9 @@ const ResetPassword = () => {
   }, [params]);
 
   const handleSubmit = async () => {
-    // Validate phone number
-    if (!phone.trim()) {
-      Alert.alert("Error", "Phone number is missing. Please start over.");
+    // Validate email
+    if (!email.trim()) {
+      Alert.alert("Error", "Email is missing. Please start over.");
       router.replace("/ForgotPassword");
       return;
     }
@@ -81,7 +81,7 @@ const ResetPassword = () => {
     if (!otpVerified) {
       Alert.alert(
         "Verification Required",
-        "Please verify your phone number first before resetting your password.",
+        "Please verify your email first before resetting your password.",
         [
           {
             text: "OK",
@@ -111,11 +111,11 @@ const ResetPassword = () => {
 
     setLoading(true);
     try {
-      // Use phone number to find and reset the account password
+      // Use email to find and reset the account password
       const response = await axios.post(
         "https://pillnow-database.onrender.com/api/users/reset-password",
         {
-          phone: phone.trim(),
+          email: email.trim(),
           newPassword: newPassword.trim(),
         }
       );
@@ -144,7 +144,7 @@ const ResetPassword = () => {
       const errorMessage =
         error.response?.data?.message ||
         error.message ||
-        "Failed to reset password. The phone number may be invalid or the account may not exist. Please try again.";
+        "Failed to reset password. The email may be invalid or the account may not exist. Please try again.";
       Alert.alert("Error", errorMessage);
     } finally {
       setLoading(false);
@@ -169,7 +169,7 @@ const ResetPassword = () => {
             Verification Required
           </Text>
           <Text style={[styles.subtitle, { color: theme.textSecondary }]}>
-            Please verify your phone number first before resetting your password.
+            Please verify your email first before resetting your password.
           </Text>
           <TouchableOpacity
             style={[styles.submitButton, { backgroundColor: theme.primary }]}
@@ -217,16 +217,16 @@ const ResetPassword = () => {
           Enter your new password below. Make sure it's at least 6 characters long.
         </Text>
 
-        {/* Phone Number Display (read-only) */}
+        {/* Email Display (read-only) */}
         <View style={[styles.inputContainer, { backgroundColor: theme.background }]}>
           <Ionicons
-            name="call-outline"
+            name="mail-outline"
             size={20}
             color={theme.textSecondary}
             style={styles.inputIcon}
           />
-          <Text style={[styles.phoneDisplay, { color: theme.textSecondary }]}>
-            {phone || "Phone number"}
+          <Text style={[styles.emailDisplay, { color: theme.textSecondary }]}>
+            {email || "Email"}
           </Text>
           <Ionicons
             name="checkmark-circle"
@@ -440,7 +440,7 @@ const styles = StyleSheet.create({
     flex: 1,
     fontSize: 16,
   },
-  phoneDisplay: {
+  emailDisplay: {
     flex: 1,
     fontSize: 16,
   },
