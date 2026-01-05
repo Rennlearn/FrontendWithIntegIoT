@@ -2,10 +2,11 @@ fastapi==0.115.0
 uvicorn==0.32.0
 pydantic==2.9.2
 Pillow==10.4.0
-numpy==2.0.2
+numpy<2.0.0,>=1.23.0
 ultralytics==8.3.0
 scikit-learn==1.5.2
 opencv-python==4.10.0.84
 torch==2.2.2
 torchvision==0.17.2
+python-multipart==0.0.9
 

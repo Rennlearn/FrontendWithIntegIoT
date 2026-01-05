@@ -66,12 +66,6 @@ const imageHistory = {};
 // Store notifications (key: container, value: array of notifications)
 const notifications = {};
 
-// Store before/after images for comparison (key: container, value: { before: path, after: path, timestamp })
-const imageHistory = {};
-
-// Store notifications (key: container, value: array of notifications)
-const notifications = {};
-
 // 2. Schedule confirmation handler
 app.post('/set-schedule', async (req, res) => {
   const { container_id, pill_config, times } = req.body;
