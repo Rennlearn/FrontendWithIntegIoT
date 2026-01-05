@@ -124,6 +124,14 @@ function normalizeContainerId(id) {
   return s;
 }
 
+// If you only have one ESP32-CAM, set SINGLE_CAMERA_DEVICE_ID in backend.env (e.g., "container2")
+// All MQTT publishes will target that device's topic while preserving the logical container in payloads.
+function resolveDeviceId(containerId) {
+  const single = String(process.env.SINGLE_CAMERA_DEVICE_ID || "").trim();
+  if (single) return normalizeContainerId(single);
+  return normalizeContainerId(containerId);
+}
+
 function hhmmNowLocal() {
   const d = new Date();
   const hh = String(d.getHours()).padStart(2, "0");
@@ -185,25 +193,31 @@ mqttClient.on("error", (err) => {
 function publishCmd(deviceId, payload) {
   const topic = `pillnow/${deviceId}/cmd`;
   const msg = JSON.stringify(payload);
-  
+
   // Check if MQTT client is connected
   if (!mqttClient.connected) {
     console.error(`[backend] ❌ MQTT NOT CONNECTED - Cannot publish to ${topic}`);
     console.error(`[backend] MQTT connection status: ${mqttClient.connected}`);
-    return;
+    return false;
   }
-  
+
   console.log(`[backend] 📤 Publishing MQTT message:`);
   console.log(`[backend]    Topic: ${topic}`);
   console.log(`[backend]    Payload: ${msg}`);
-  
-  mqttClient.publish(topic, msg, { qos: 0 }, (err) => {
-    if (err) {
-      console.error(`[backend] ❌ MQTT publish failed for ${topic}:`, err?.message || err);
-    } else {
-      console.log(`[backend] ✅ MQTT message published successfully to ${topic}`);
-    }
-  });
+
+  try {
+    mqttClient.publish(topic, msg, { qos: 0 }, (err) => {
+      if (err) {
+        console.error(`[backend] ❌ MQTT publish failed for ${topic}:`, err?.message || err);
+      } else {
+        console.log(`[backend] ✅ MQTT message published successfully to ${topic}`);
+      }
+    });
+    return true;
+  } catch (e) {
+    console.error(`[backend] ❌ MQTT publish exception for ${topic}:`, e?.message || e);
+    return false;
+  }
 }
 
 async function sendEmail({ to, subject, text }) {
@@ -301,6 +315,40 @@ app.use(express.urlencoded({ extended: true }));
 
 // Serve captures for quick inspection (optional)
 app.use("/captures", express.static(CAPTURES_DIR));
+
+// Endpoint: list captures (most recent first)
+app.get('/captures/list', (req, res) => {
+  try {
+    const files = fs.readdirSync(CAPTURES_DIR).map((name) => {
+      const stat = fs.statSync(path.join(CAPTURES_DIR, name));
+      return { name, mtime: stat.mtimeMs, size: stat.size, url: `/captures/${encodeURIComponent(name)}` };
+    }).sort((a, b) => b.mtime - a.mtime);
+    return res.json({ ok: true, files });
+  } catch (e) {
+    console.warn('[backend] Failed to list captures:', e?.message || e);
+    return res.status(500).json({ ok: false, message: 'Failed to list captures' });
+  }
+});
+
+// Endpoint: latest capture for a container (raw + annotated if available)
+app.get('/captures/latest/:container', (req, res) => {
+  try {
+    const container = normalizeContainerId(req.params.container);
+    const all = fs.readdirSync(CAPTURES_DIR);
+    // Raw files follow pattern: device_container_ts.jpg (e.g., container1_container1_1766...)
+    const rawMatches = all.filter(n => n.includes(`_${container}_`)).map((name) => ({ name, mtime: fs.statSync(path.join(CAPTURES_DIR, name)).mtimeMs }));
+    rawMatches.sort((a,b) => b.mtime - a.mtime);
+    const latestRaw = rawMatches[0] ? rawMatches[0].name : null;
+    // Annotated images include 'annotated_' prefix; pick the most recent annotated file
+    const annotatedMatches = all.filter(n => n.startsWith('annotated_')).map((name) => ({ name, mtime: fs.statSync(path.join(CAPTURES_DIR, name)).mtimeMs }));
+    annotatedMatches.sort((a,b) => b.mtime - a.mtime);
+    const latestAnnotated = annotatedMatches[0] ? annotatedMatches[0].name : null;
+    return res.json({ ok: true, latest: { raw: latestRaw ? `/captures/${encodeURIComponent(latestRaw)}` : null, annotated: latestAnnotated ? `/captures/${encodeURIComponent(latestAnnotated)}` : null } });
+  } catch (e) {
+    console.warn('[backend] Failed to get latest capture:', e?.message || e);
+    return res.status(500).json({ ok: false, message: 'Failed to get latest capture' });
+  }
+});
 
 // Rate limit capture triggers (avoid spamming devices)
 // Increased limit to allow pre/post alarm captures and multiple containers
@@ -715,19 +763,27 @@ app.get("/get-pill-config/:containerId", (req, res) => {
  */
 app.post("/trigger-capture/:containerId", triggerLimiter, (req, res) => {
   const containerId = normalizeContainerId(req.params.containerId);
-  const deviceId = normalizeContainerId(req.body?.deviceId || containerId);
+  const deviceId = req.body?.deviceId ? normalizeContainerId(req.body.deviceId) : resolveDeviceId(containerId);
 
   const expectedFromBody = req.body?.expected;
   const expectedFromState = state.containers?.[containerId]?.pill_config;
   const expected = expectedFromBody || expectedFromState || { count: 0 };
 
-  publishCmd(deviceId, {
+  const published = publishCmd(deviceId, {
     action: "capture",
     container: containerId,
     expected,
   });
 
-  console.log(`[backend] trigger-capture: device=${deviceId} container=${containerId} expected=${JSON.stringify(expected)}`);
+  console.log(`[backend] trigger-capture: device=${deviceId} container=${containerId} expected=${JSON.stringify(expected)} publish_ok=${Boolean(published)}`);
+
+  if (!published) {
+    const note = { type: 'error', message: `MQTT not connected - failed to request capture for ${containerId}`, container: containerId, timestamp: new Date().toISOString() };
+    state.notifications.push(note);
+    saveStateSoon();
+    return res.status(502).json({ ok: false, message: 'MQTT not connected' });
+  }
+
   return res.json({ ok: true, message: "Capture requested", deviceId, container: containerId });
 });
 
@@ -814,6 +870,7 @@ app.post("/ingest/:deviceId/:container", upload.single("image"), async (req, res
   const rawPath = path.join(CAPTURES_DIR, rawName);
   try {
     fs.writeFileSync(rawPath, req.file.buffer);
+    console.log(`[backend] ✅ Raw capture saved to: ${rawPath}`);
   } catch (e) {
     console.warn("[backend] Failed to save raw capture:", e?.message || e);
   }
@@ -863,6 +920,23 @@ app.post("/ingest/:deviceId/:container", upload.single("image"), async (req, res
     expected,
     expectedLabel: expected?.label || expected?.pill || expected?.pillType || expected?.pill_name || null,
   };
+
+  // If the verifier returned an annotated image path, make sure it is available under CAPTURES_DIR and expose a web path
+  try {
+    if (verifierJson?.annotatedImagePath) {
+      const annPath = String(verifierJson.annotatedImagePath);
+      const annBase = path.basename(annPath);
+      const target = path.join(CAPTURES_DIR, annBase);
+      if (!fs.existsSync(target) && fs.existsSync(annPath)) {
+        fs.copyFileSync(annPath, target);
+        console.log(`[backend] Copied annotated image to captures dir: ${target}`);
+      }
+      // Prefer web-accessible path
+      resultPayload.annotatedImagePath = fs.existsSync(target) ? `/captures/${encodeURIComponent(annBase)}` : `/captures/${encodeURIComponent(path.basename(String(verifierJson.annotatedImagePath)))}`;
+    }
+  } catch (e) {
+    console.warn('[backend] Failed to ensure annotated image is in captures dir:', e?.message || e);
+  }
 
   const payload = {
     success: true,
@@ -966,21 +1040,44 @@ setInterval(() => {
     console.log(`[backend] 📋 Containers: ${containersToFire.map(c => c.containerId).join(', ')}`);
     console.log(`[backend] ⏱️ Staggering alarms by 500ms each to prevent overwhelming...`);
   }
-  
+
+  // Optional: environment toggle to request an automatic capture when an alarm fires
+  const AUTO_CAPTURE_ON_ALARM = String(process.env.AUTO_CAPTURE_ON_ALARM || "").toLowerCase() === "true";
+  const AUTO_CAPTURE_DELAY_MS = Number(process.env.AUTO_CAPTURE_DELAY_MS || 5000);
+
   containersToFire.forEach(({ containerId, cfg, key }, index) => {
     const delay = index * 500; // 0ms, 500ms, 1000ms, etc.
-    
+
     setTimeout(() => {
       firedKeys.set(key, Date.now());
 
       // Publish alarm trigger (bridge will forward to Arduino, app will show AlarmModal)
-      publishCmd(containerId, {
+      const alarmPublished = publishCmd(resolveDeviceId(containerId), {
         action: "alarm_triggered",
         container: containerId,
         date,
         time: hhmm,
       });
-      console.log(`[backend] ⏰ alarm_triggered published for ${containerId} at ${hhmm} (${containersToFire.length} containers at same time, delay=${delay}ms, position ${index + 1}/${containersToFire.length})`);
+
+      console.log(`[backend] ⏰ alarm_triggered published for ${containerId} at ${hhmm} (published=${Boolean(alarmPublished)}) (${containersToFire.length} containers at same time, delay=${delay}ms, position ${index + 1}/${containersToFire.length})`);
+
+      // If configured, automatically request a capture after a short delay
+      if (AUTO_CAPTURE_ON_ALARM) {
+        setTimeout(() => {
+          const expected = cfg?.pill_config || { count: 0 };
+          const capturePublished = publishCmd(resolveDeviceId(containerId), {
+            action: "capture",
+            container: containerId,
+            expected,
+          });
+          console.log(`[backend] 🤖 AUTO_CAPTURE_ON_ALARM: requested capture for ${containerId}, published=${Boolean(capturePublished)}`);
+          if (!capturePublished) {
+            const note = { type: 'error', message: `AUTO_CAPTURE failed (MQTT) for ${containerId}`, container: containerId, timestamp: new Date().toISOString() };
+            state.notifications.push(note);
+            saveStateSoon();
+          }
+        }, AUTO_CAPTURE_DELAY_MS + delay);
+      }
 
       // Optional email reminder
       const to = cfg?.notify_email || EMAIL_TO;

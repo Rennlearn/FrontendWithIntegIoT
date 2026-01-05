@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { View, Text, TouchableOpacity, Modal, StyleSheet, Animated, Alert } from 'react-native';
+import { View, Text, TouchableOpacity, Modal, StyleSheet, Animated, Alert, Image } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useTheme } from '@/context/ThemeContext';
 import { lightTheme, darkTheme } from '@/styles/theme';
@@ -14,12 +14,21 @@ interface AlarmModalProps {
   onDismiss: () => void;
   onStopAlarm?: (container: number) => Promise<void>;
   onStopImmediate?: () => void; // Called immediately when stop button pressed (for UI updates)
+  // New optional props to support verification display (compatible with app/components/AlarmModal)
+  onStop?: (container: number) => Promise<any | null>;
+  externalVerification?: any | null;
 }
 
-const AlarmModal: React.FC<AlarmModalProps> = ({ visible, container, time, remainingAlarms = 0, onDismiss, onStopAlarm, onStopImmediate }) => {
+const AlarmModal: React.FC<AlarmModalProps> = ({ visible, container, time, remainingAlarms = 0, onDismiss, onStopAlarm, onStopImmediate, onStop, externalVerification }) => {
   const { isDarkMode } = useTheme();
   const theme = isDarkMode ? darkTheme : lightTheme;
   const [pulseAnim] = useState(new Animated.Value(1));
+  const [loading, setLoading] = useState(false);
+  const [verification, setVerification] = useState<any | null>(externalVerification || null);
+
+  useEffect(() => {
+    setVerification(externalVerification || null);
+  }, [externalVerification]);
 
   useEffect(() => {
     if (visible) {
@@ -143,7 +152,19 @@ const AlarmModal: React.FC<AlarmModalProps> = ({ visible, container, time, remai
         onDismiss();
         
         // Trigger camera capture / verification if provided (non-blocking)
-        if (onStopAlarm) {
+        if (onStop) {
+          // Prefer the newer onStop prop (returns verification data)
+          setLoading(true);
+          try {
+            const v = await onStop(container);
+            if (v) setVerification(v);
+          } catch (err) {
+            console.warn('[AlarmModal] onStop callback failed:', err);
+          } finally {
+            setLoading(false);
+          }
+        } else if (onStopAlarm) {
+          // Backward compatible: call legacy onStopAlarm (no verification data)
           onStopAlarm(container).catch((err) => {
             console.warn('[AlarmModal] onStopAlarm callback failed:', err);
           });
@@ -213,14 +234,41 @@ const AlarmModal: React.FC<AlarmModalProps> = ({ visible, container, time, remai
               </Text>
             </View>
           )}
-          
-          <TouchableOpacity
-            style={[styles.stopButton, { backgroundColor: theme.primary }]}
-            onPress={handleStopAlarm}
-          >
-            <Ionicons name="stop-circle" size={24} color={theme.card} />
-            <Text style={[styles.stopButtonText, { color: theme.card }]}>Stop Alarm</Text>
-          </TouchableOpacity>
+
+          {!verification && (
+            <TouchableOpacity
+              style={[styles.stopButton, { backgroundColor: theme.primary }]}
+              onPress={handleStopAlarm}
+              disabled={loading}
+            >
+              <Ionicons name="stop-circle" size={24} color={theme.card} />
+              <Text style={[styles.stopButtonText, { color: theme.card }]}>{loading ? 'Stopping...' : 'Stop Alarm'}</Text>
+            </TouchableOpacity>
+          )}
+
+          {verification && (
+            <View style={{ marginTop: 12, alignItems: 'center', width: '100%' }}>
+              <Text style={{ fontWeight: '700', marginBottom: 8 }}>{verification.success ? '✅ Verified' : '⚠️ Verification'}</Text>
+              {verification.result && (
+                <Text style={{ marginBottom: 6, color: '#666' }}>Confidence: {(Number(verification.result.confidence || 0) * 100).toFixed(1)}%</Text>
+              )}
+
+              {verification.annotatedUrl ? (
+                <View style={{ width: '100%', height: 240, backgroundColor: '#eee', marginBottom: 8 }}>
+                  <Image source={{ uri: verification.annotatedUrl }} style={{ width: '100%', height: '100%', resizeMode: 'cover' }} />
+                </View>
+              ) : (
+                <Text style={{ color: '#666', marginBottom: 8 }}>No annotated image available</Text>
+              )}
+
+              <TouchableOpacity
+                style={[styles.stopButton, { backgroundColor: '#28a745' }]}
+                onPress={onDismiss}
+              >
+                <Text style={[styles.stopButtonText, { color: '#fff' }]}>Done</Text>
+              </TouchableOpacity>
+            </View>
+          )}
         </View>
       </View>
     </Modal>

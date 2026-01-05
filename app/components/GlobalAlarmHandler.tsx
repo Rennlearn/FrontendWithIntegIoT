@@ -360,6 +360,9 @@ export default function GlobalAlarmHandler() {
     }
   };
 
+  const [alarmVerification, setAlarmVerification] = useState<any | null>(null);
+  const stopInFlightRef = useRef<boolean>(false);
+
   const triggerCaptureForContainer = async (containerNum: number) => {
     // Validate container number (1, 2, or 3)
     if (containerNum < 1 || containerNum > 3) {
@@ -372,7 +375,9 @@ export default function GlobalAlarmHandler() {
     
     // We try to include expected config from backend; if it fails, capture still triggers.
     try {
-      const cfgResp = await fetch(`http://10.100.56.91:5001/get-pill-config/${containerId}`);
+      // Use verificationService.getBackendUrl (supports runtime override) instead of hardcoded IP
+      const base = await verificationService.getBackendUrl();
+      const cfgResp = await fetch(`${base}/get-pill-config/${containerId}`);
       if (cfgResp.ok) {
         const cfg = await cfgResp.json();
         const expected = cfg?.pill_config || { count: 0 };
@@ -396,6 +401,65 @@ export default function GlobalAlarmHandler() {
     const result = await verificationService.triggerCapture(containerId, { count: 0 });
     if (result.ok) {
       console.log(`[GlobalAlarmHandler] ✅ Capture triggered successfully for ${containerId} (default config)`);
+    }
+  };
+
+  // Triggers a capture and polls for verification result, returning a structured object for the modal
+  const fetchVerificationAfterCapture = async (containerNum: number, timeoutMs = 20000) => {
+    if (stopInFlightRef.current) {
+      console.log(`[GlobalAlarmHandler] ⏳ Stop already in flight for container ${containerNum}, reusing existing operation`);
+      return null;
+    }
+    stopInFlightRef.current = true;
+    setAlarmVerification(null);
+
+    const containerId = `container${containerNum}`;
+    try {
+      // Trigger capture using the same flow to fetch expected config
+      try {
+        const base = await verificationService.getBackendUrl();
+        const cfgResp = await fetch(`${base}/get-pill-config/${containerId}`);
+        if (cfgResp.ok) {
+          const cfg = await cfgResp.json();
+          const expected = cfg?.pill_config || { count: 0 };
+          await verificationService.triggerCapture(containerId, expected);
+        } else {
+          await verificationService.triggerCapture(containerId, { count: 0 });
+        }
+      } catch (err) {
+        console.warn('[GlobalAlarmHandler] Fetch config failed, triggering with default', err);
+        await verificationService.triggerCapture(containerId, { count: 0 });
+      }
+
+      // Poll for verification result
+      const start = Date.now();
+      while (Date.now() - start < timeoutMs) {
+        try {
+          const result = await verificationService.getVerificationResult(containerId);
+          if (result && result.success && result.result) {
+            const base = await verificationService.getBackendUrl();
+            const annotated = (result as any)?.result?.annotatedImagePath || (result as any)?.annotatedImagePath || null;
+            const annotatedUrl = annotated ? (annotated.startsWith('http') ? annotated : `${base}${annotated}`) : null;
+            const verification = { success: result.success, result: result.result, annotatedUrl };
+            setAlarmVerification(verification);
+            console.log('[GlobalAlarmHandler] ✅ Verification obtained:', verification);
+            stopInFlightRef.current = false;
+            return verification;
+          }
+        } catch (err) {
+          console.warn('[GlobalAlarmHandler] getVerificationResult polling error:', err);
+        }
+        // wait 2s
+        // eslint-disable-next-line no-await-in-loop
+        await new Promise((r) => setTimeout(r, 2000));
+      }
+
+      // timeout
+      console.warn('[GlobalAlarmHandler] ⚠️ Verification polling timed out');
+      stopInFlightRef.current = false;
+      return { success: false, message: 'timeout', annotatedUrl: null };
+    } finally {
+      stopInFlightRef.current = false;
     }
   };
 
@@ -493,7 +557,6 @@ export default function GlobalAlarmHandler() {
         const container = m ? parseInt(m[1]) : alarmContainerRef.current;
 
         console.log(`[GlobalAlarmHandler] 🛑 Alarm stopped for Container ${container}`);
-        setAlarmVisibleSafe(false);
 
         // Cancel any pending mismatch timer/candidate to avoid duplicates after stop.
         if (pendingMismatchTimerRef.current) {
@@ -502,39 +565,48 @@ export default function GlobalAlarmHandler() {
         }
         pendingMismatchCandidateRef.current = null;
 
-        // Auto capture post-pill ONLY for schedule alarm sessions (not for mismatch buzzer stops).
-        if (alarmSessionActiveRef.current) {
+        // If a stop is already in flight (e.g., user pressed Stop inside modal and modal's onStop is handling capture), don't double-trigger
+        if (stopInFlightRef.current) {
+          console.log('[GlobalAlarmHandler] ⏳ Stop already in flight, skipping duplicate ALARM_STOPPED handling');
+        } else if (alarmSessionActiveRef.current) {
+          // Start post-pill capture + verification and show result in modal
           alarmSessionActiveRef.current = false;
-          setTimeout(() => {
-            triggerCaptureForContainer(container).catch(() => {});
-          }, 800);
-        }
 
-        // If we had a pending mismatch queued while alarm was visible, show it now
-        const pending = pendingMismatchRef.current;
-        pendingMismatchRef.current = null;
-        if (pending && pending.container === container) {
-          setTimeout(() => {
-            showMismatchForContainer(container).catch(() => {});
-          }, 2000);
-        }
+          (async () => {
+            // Re-open modal so user can see 'verifying' and then the annotated image
+            setAlarmContainerSafe(container);
+            setAlarmVisibleSafe(true);
 
-        // IMPROVED: Check if there are more alarms in the queue
-        // This handles the case when 3 containers fire at the same time:
-        // 1. User stops Container 1 alarm → shows Container 2 alarm
-        // 2. User stops Container 2 alarm → shows Container 3 alarm
-        // 3. User stops Container 3 alarm → all done
-        if (alarmQueueRef.current.length > 0) {
-          const remaining = alarmQueueRef.current.length;
-          console.log(`[GlobalAlarmHandler] 🔔 More alarms in queue (${remaining} remaining), showing next in 1.5s...`);
-          console.log(`[GlobalAlarmHandler] 📋 Next alarms: ${alarmQueueRef.current.map(a => `Container ${a.container}@${a.time}`).join(', ')}`);
-          // Short delay before showing next alarm to let user see the transition
-          setTimeout(() => {
-            showNextAlarmFromQueue();
-          }, 1500);
+            const verification = await fetchVerificationAfterCapture(container);
+            if (verification) {
+              // setAlarmVerification will cause AlarmModal to display the annotated image
+              setAlarmVerification(verification);
+            }
+
+            // If there was a pending mismatch queued while alarm was visible, show it now (after verification)
+            const pending = pendingMismatchRef.current;
+            pendingMismatchRef.current = null;
+            if (pending && pending.container === container) {
+              setTimeout(() => {
+                showMismatchForContainer(container).catch(() => {});
+              }, 2000);
+            }
+
+            // Show next queued alarm if any
+            if (alarmQueueRef.current.length > 0) {
+              const remaining = alarmQueueRef.current.length;
+              console.log(`[GlobalAlarmHandler] 🔔 More alarms in queue (${remaining} remaining), showing next in 1.5s...`);
+              setTimeout(() => {
+                showNextAlarmFromQueue();
+              }, 1500);
+            } else {
+              console.log(`[GlobalAlarmHandler] ✅ All alarms processed - queue is empty`);
+              setRemainingAlarms(0);
+            }
+          })();
         } else {
-          console.log(`[GlobalAlarmHandler] ✅ All alarms processed - queue is empty`);
-          setRemainingAlarms(0);
+          // Not a schedule session; just dismiss any visible alarm UI
+          setAlarmVisibleSafe(false);
         }
 
         return;
@@ -606,11 +678,20 @@ export default function GlobalAlarmHandler() {
         container={alarmContainer}
         time={alarmTime}
         remainingAlarms={remainingAlarms}
-        onDismiss={() => setAlarmVisibleSafe(false)}
+        onDismiss={() => {
+          setAlarmVisibleSafe(false);
+          setAlarmVerification(null);
+        }}
         onStopImmediate={() => {
           // Make UI status update immediate when user hits Stop Alarm
           DeviceEventEmitter.emit('pillnow:scheduleStatus', { container: alarmContainerRef.current, time: alarmTime, status: 'Done' });
         }}
+        onStop={async (containerNum: number) => {
+          // Called when user presses Stop inside the modal
+          const v = await fetchVerificationAfterCapture(containerNum);
+          return v;
+        }}
+        externalVerification={alarmVerification}
       />
 
       <PillMismatchModal

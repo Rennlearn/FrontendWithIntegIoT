@@ -10,6 +10,8 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { jwtDecode } from "jwt-decode";
 import verificationService from '@/services/verificationService';
 
+import { BACKEND_URL } from '@/config';
+
 // Interface for decoded JWT token
 interface DecodedToken {
   id: string;
@@ -823,7 +825,7 @@ const SetScreen = () => {
             const timeoutId = setTimeout(() => controller.abort(), 5000); // 5 second timeout
             
             try {
-              await fetch('http://10.100.56.91:5001/set-schedule', {
+              await fetch(`${BACKEND_URL}/set-schedule`, {
                 method: 'POST',
                 headers: {
                   'Content-Type': 'application/json',
@@ -938,11 +940,8 @@ const SetScreen = () => {
       await Promise.allSettled(capturePromises);
       console.log('[SetScreen] ✅ All capture triggers sent');
 
-      // Camera verification disabled - skipping ESP32-CAM verification
-      // TODO: Re-enable when camera hardware is available
       // Trigger ESP32-CAM verification for containers with pills
       // This works independently of Bluetooth - ESP32-CAMs connect via WiFi/MQTT
-      /*
       const containersToVerify: number[] = [];
       for (let containerNum = 1; containerNum <= 3; containerNum++) {
         if (selectedPills[containerNum as PillSlot]) {
@@ -977,6 +976,19 @@ const SetScreen = () => {
                   message: 'Backend unreachable - ESP32-CAM may still capture via MQTT' 
                 }
               }));
+
+              // Notify user with actionable hint
+              if (captureResult.message && captureResult.message.toLowerCase().includes('backend unreachable')) {
+                Alert.alert(
+                  'Backend Unreachable',
+                  'The backend could not be reached. You can set a backend override in the Monitor screen (DEV) or ensure the backend is running on your machine (port 5001).',
+                  [
+                    { text: 'Open Monitor', onPress: () => { try { navigation.navigate('MonitorManageScreen' as never); } catch (e) { } } },
+                    { text: 'OK' }
+                  ]
+                );
+              }
+
               // Don't try to check result if capture failed
               return { containerNum, success: false, message: captureResult.message };
             }
@@ -1085,7 +1097,6 @@ const SetScreen = () => {
         }}
       ]);
       }
-      */
       
       // Build summary of alarms set per container
       const alarmsSummary: string[] = [];

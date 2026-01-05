@@ -1,6 +1,15 @@
 #include <WiFi.h>
 #include <PubSubClient.h>
 #include "esp_camera.h"
+#include <Preferences.h>
+
+// Persistent runtime configuration (overrides the compile-time constants below)
+Preferences prefs;
+String cfgMqttHost;
+uint16_t cfgMqttPort = 1883;
+String cfgBackendHost;
+uint16_t cfgBackendPort = 5001;
+String topicConfig;
 
 // ================== USER CONFIG ==================
 // Fill these with your network and server settings
@@ -8,12 +17,12 @@ static const char* WIFI_SSID = "YOUR_WIFI_SSID";      // <-- set this to your Wi
 static const char* WIFI_PASS = "YOUR_WIFI_PASSWORD";  // <-- set this to your WiFi password
 
 // IMPORTANT: Use your Mac's current LAN IP so ESP32-CAM can reach it.
-// Mac LAN IP (en0): 10.100.56.91 (UPDATE THIS if your Mac's IP changes!)
-static const char* MQTT_HOST = "10.100.56.91";    // Mosquitto/Broker host
+// Mac LAN IP (en0): 10.128.151.91 (UPDATE THIS if your Mac's IP changes!)
+static const char* MQTT_HOST = "10.128.151.91";    // Mosquitto/Broker host
 static const uint16_t MQTT_PORT = 1883;
 
 // Node backend (uploads to /ingest/:deviceId/:container)
-static const char* BACKEND_HOST = "10.100.56.91"; // Node backend host
+static const char* BACKEND_HOST = "10.128.151.91"; // Node backend host
 static const uint16_t BACKEND_PORT = 5001;         // Node backend port (avoid AirTunes conflict)
 
 static const char* DEVICE_ID = "container2";         // Unique per ESP32-CAM: container1|container2|container3
@@ -155,7 +164,16 @@ void setup() {
 
   ensureWifi();
 
-  mqttClient.setServer(MQTT_HOST, MQTT_PORT);
+  // Load persisted config (if any) and fall back to compile-time constants
+  prefs.begin("pillcfg", false);
+  cfgMqttHost = prefs.getString("mqtt_host", String(MQTT_HOST));
+  cfgMqttPort = (uint16_t) prefs.getString("mqtt_port", String(MQTT_PORT)).toInt();
+  cfgBackendHost = prefs.getString("backend_host", String(BACKEND_HOST));
+  cfgBackendPort = (uint16_t) prefs.getString("backend_port", String(BACKEND_PORT)).toInt();
+  topicConfig = String("pillnow/") + DEVICE_ID + "/config";
+
+  // Configure MQTT client using runtime config
+  mqttClient.setServer(cfgMqttHost.c_str(), cfgMqttPort);
   mqttClient.setCallback(handleMqttMessage);
 }
 
@@ -183,10 +201,10 @@ static void ensureWifi() {
 
 static void ensureMqtt() {
   if (mqttClient.connected()) return;
-  Serial.print("Connecting MQTT to "); Serial.print(MQTT_HOST); Serial.print(":"); Serial.println(MQTT_PORT);
+  Serial.print("Connecting MQTT to "); Serial.print(cfgMqttHost); Serial.print(":"); Serial.println(cfgMqttPort);
   // Quick TCP reachability test to help diagnose network issues
   if (!testBrokerReachability()) {
-    Serial.println("MQTT broker not reachable via TCP. Check broker IP, port 1883, and LAN/firewall.");
+    Serial.println("MQTT broker not reachable via TCP. Check broker IP/port and LAN/firewall.");
   }
   String clientId = String("esp32cam-") + DEVICE_ID + String("-") + String((uint32_t)ESP.getEfuseMac(), HEX);
   Serial.print("MQTT Client ID: "); Serial.println(clientId);
@@ -203,8 +221,17 @@ static void ensureMqtt() {
       } else {
         Serial.println("❌ Subscription FAILED!");
       }
-      mqttClient.publish(topicStatus.c_str(), "{\"state\":\"online\"}");
-      Serial.println("📤 Published online status");
+      // Also subscribe to retained config topic so device can receive runtime config
+      Serial.print("📡 Subscribing to config: "); Serial.println(topicConfig);
+      bool subCfg = mqttClient.subscribe(topicConfig.c_str());
+      if (subCfg) Serial.println("✅ Config subscription successful"); else Serial.println("❌ Config subscription FAILED");
+
+      // Publish online status and current config for visibility
+      char statusBuf[256];
+      snprintf(statusBuf, sizeof(statusBuf), "{\"state\":\"online\",\"mqtt_host\":\"%s\",\"mqtt_port\":%u,\"backend_host\":\"%s\",\"backend_port\":%u}",
+               cfgMqttHost.c_str(), cfgMqttPort, cfgBackendHost.c_str(), cfgBackendPort);
+      mqttClient.publish(topicStatus.c_str(), statusBuf);
+      Serial.println("📤 Published online status + config");
       return;
     } else {
       Serial.print('.');
@@ -218,13 +245,13 @@ static void ensureMqtt() {
 
 static bool testBrokerReachability() {
   WiFiClient probe;
-  bool ok = probe.connect(MQTT_HOST, MQTT_PORT);
+  bool ok = probe.connect(cfgMqttHost.c_str(), cfgMqttPort);
   if (ok) {
-    Serial.println("TCP test: connected to broker port 1883");
+    Serial.println("TCP test: connected to broker");
     probe.stop();
     return true;
   } else {
-    Serial.println("TCP test: FAILED to connect to broker port 1883");
+    Serial.println("TCP test: FAILED to connect to broker");
     return false;
   }
 }
@@ -241,6 +268,78 @@ static void handleMqttMessage(char* topic, byte* payload, unsigned int length) {
   Serial.print("   Length: "); Serial.println(length);
   Serial.print("   Payload: "); Serial.println(msg);
   Serial.println("========================================");
+
+  // First, check if this is a runtime config message (topic: pillnow/<id>/config)
+  String topicStr = String(topic);
+  if (topicStr.endsWith("/config")) {
+    Serial.println("📥 Received config message — parsing and applying (persisting)");
+    // parse minimal JSON fields: mqtt_host, mqtt_port, backend_host, backend_port
+    auto parseQuoted = [&](const char* key)->String{
+      String k = String("\"") + key + String("\"");
+      int kidx = msg.indexOf(k);
+      if (kidx < 0) return String();
+      int colon = msg.indexOf(':', kidx);
+      if (colon < 0) return String();
+      int q1 = msg.indexOf('"', colon);
+      if (q1 < 0) return String();
+      int q2 = msg.indexOf('"', q1 + 1);
+      if (q2 < 0) return String();
+      return msg.substring(q1 + 1, q2);
+    };
+    auto parseNumber = [&](const char* key)->long{
+      String k = String("\"") + key + String("\"");
+      int kidx = msg.indexOf(k);
+      if (kidx < 0) return -1;
+      int colon = msg.indexOf(':', kidx);
+      if (colon < 0) return -1;
+      // read digits after colon
+      int i = colon + 1;
+      // skip whitespace
+      while (i < (int)msg.length() && (msg[i] == ' ' || msg[i] == '"')) i++;
+      long val = 0;
+      bool found = false;
+      while (i < (int)msg.length() && isDigit(msg[i])) { found = true; val = val * 10 + (msg[i] - '0'); i++; }
+      if (found) return val; else return -1;
+    };
+
+    String newMqttHost = parseQuoted("mqtt_host");
+    long newMqttPortL = parseNumber("mqtt_port");
+    String newBackendHost = parseQuoted("backend_host");
+    long newBackendPortL = parseNumber("backend_port");
+
+    bool changed = false;
+    if (newMqttHost.length() > 0 && newMqttHost != cfgMqttHost) {
+      cfgMqttHost = newMqttHost;
+      prefs.putString("mqtt_host", cfgMqttHost);
+      changed = true;
+    }
+    if (newMqttPortL > 0 && (uint16_t)newMqttPortL != cfgMqttPort) {
+      cfgMqttPort = (uint16_t)newMqttPortL;
+      prefs.putString("mqtt_port", String(cfgMqttPort));
+      changed = true;
+    }
+    if (newBackendHost.length() > 0 && newBackendHost != cfgBackendHost) {
+      cfgBackendHost = newBackendHost;
+      prefs.putString("backend_host", cfgBackendHost);
+      changed = true;
+    }
+    if (newBackendPortL > 0 && (uint16_t)newBackendPortL != cfgBackendPort) {
+      cfgBackendPort = (uint16_t)newBackendPortL;
+      prefs.putString("backend_port", String(cfgBackendPort));
+      changed = true;
+    }
+
+    if (changed) {
+      // Apply changes by updating MQTT server and forcing reconnect
+      Serial.println("🔧 Config changed — applying and reconnecting MQTT");
+      mqttClient.disconnect();
+      mqttClient.setServer(cfgMqttHost.c_str(), cfgMqttPort);
+      // publish new status (done when reconnected in ensureMqtt)
+    } else {
+      Serial.println("ℹ️ Config message received but no change detected");
+    }
+    return;
+  }
 
   // Check for capture action (handle both with and without spaces)
   bool hasCaptureAction = msg.indexOf("\"action\":\"capture\"") >= 0 || msg.indexOf("\"action\" : \"capture\"") >= 0;
@@ -433,8 +532,8 @@ static bool captureAndUpload(const char* container, const char* expectedJson) {
   String boundary = "----pillnowBoundary7MA4YWxkTrZu0gW";
   String path = String("/ingest/") + DEVICE_ID + "/" + container;
 
-  if (!wifiClient.connect(BACKEND_HOST, BACKEND_PORT)) {
-    Serial.println("HTTP connect failed");
+  if (!wifiClient.connect(cfgBackendHost.c_str(), cfgBackendPort)) {
+    Serial.println("HTTP connect failed (backend host reachable?)");
     esp_camera_fb_return(fb);
     return false;
   }
@@ -453,7 +552,7 @@ static bool captureAndUpload(const char* container, const char* expectedJson) {
 
   // Send request headers
   wifiClient.printf("POST %s HTTP/1.1\r\n", path.c_str());
-  wifiClient.printf("Host: %s:%u\r\n", BACKEND_HOST, BACKEND_PORT);
+  wifiClient.printf("Host: %s:%u\r\n", cfgBackendHost.c_str(), cfgBackendPort);
   wifiClient.println("Connection: close");
   wifiClient.printf("Content-Type: multipart/form-data; boundary=%s\r\n", boundary.c_str());
   wifiClient.printf("Content-Length: %u\r\n\r\n", (unsigned)contentLength);

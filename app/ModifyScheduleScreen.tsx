@@ -9,6 +9,8 @@ import { lightTheme, darkTheme } from '@/styles/theme';
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { jwtDecode } from "jwt-decode";
 
+import { BACKEND_URL } from '@/config';
+
 // Interface for decoded JWT token
 interface DecodedToken {
   id: string;
@@ -377,7 +379,7 @@ const ModifyScheduleScreen = () => {
       
       console.log(`[ModifySchedule] Saving pill config for ${containerId}:`, pillConfig);
       
-      const response = await fetch('http://10.100.56.91:5001/set-schedule', {
+      const response = await fetch(`${BACKEND_URL}/set-schedule`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

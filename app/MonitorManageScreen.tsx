@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { 
-  View, Text, StyleSheet, TouchableOpacity, ScrollView, Alert, ActivityIndicator, Platform 
+  View, Text, StyleSheet, TouchableOpacity, ScrollView, Alert, ActivityIndicator, Platform, Modal, TextInput 
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useNavigation } from '@react-navigation/native';
@@ -12,6 +12,8 @@ import { jwtDecode } from 'jwt-decode';
 import BluetoothService from '@/services/BluetoothService';
 import verificationService, { VerificationResult } from '@/services/verificationService';
 import AlarmModal from '@/components/AlarmModal';
+import { BACKEND_URL, testBackendReachable } from '@/config';
+
 
 // Interface for decoded JWT token
 interface DecodedToken {
@@ -44,6 +46,12 @@ const MonitorManageScreen = () => {
   const [refreshing, setRefreshing] = useState(false);
   const [deletingAll, setDeletingAll] = useState(false);
   const [navigating, setNavigating] = useState<string | null>(null);
+
+  // Dev/back-end override controls
+  const [backendOverride, setBackendOverride] = useState<string | null>(null);
+  const [backendReachable, setBackendReachable] = useState<boolean | null>(null);
+  const [backendModalVisible, setBackendModalVisible] = useState(false);
+  const [backendInput, setBackendInput] = useState('');
   
   // Alarm modal state
   const [alarmVisible, setAlarmVisible] = useState(false);
@@ -923,6 +931,53 @@ const MonitorManageScreen = () => {
     return unsubscribe;
   }, [navigation, loadScheduleData, loadVerifications, getSelectedElderId, getUserRole, checkCaregiverConnection]);
 
+  // Load backend override and reachability (dev helper)
+  useEffect(() => {
+    let mounted = true;
+    const load = async () => {
+      try {
+        const override = await AsyncStorage.getItem('backend_url_override');
+        if (!mounted) return;
+        setBackendOverride(override);
+        const reachable = await testBackendReachable(3000);
+        if (!mounted) return;
+        setBackendReachable(reachable);
+      } catch (e) {
+        if (!mounted) return;
+        setBackendReachable(false);
+      }
+    };
+    load();
+    return () => { mounted = false; };
+  }, []);
+
+  const saveBackendOverride = async (url: string | null) => {
+    try {
+      if (url && url.trim()) {
+        await AsyncStorage.setItem('backend_url_override', url.trim());
+        setBackendOverride(url.trim());
+      } else {
+        await AsyncStorage.removeItem('backend_url_override');
+        setBackendOverride(null);
+      }
+      const reachable = await testBackendReachable(3000);
+      setBackendReachable(reachable);
+      setBackendModalVisible(false);
+    } catch (e) {
+      console.warn('[MonitorManageScreen] Failed to save backend override:', e);
+    }
+  };
+
+  const clearBackendOverride = async () => {
+    try {
+      await AsyncStorage.removeItem('backend_url_override');
+      setBackendOverride(null);
+      setBackendReachable(await testBackendReachable(3000));
+    } catch (e) {
+      console.warn('[MonitorManageScreen] Failed to clear backend override:', e);
+    }
+  };
+
   // Periodically refresh derived statuses (Pending -> Missed once time passes)
   // Also auto-delete schedules missed for more than 5 minutes
   // Note: We reload data but don't sync to Arduino to avoid constant re-syncing
@@ -1009,22 +1064,29 @@ const MonitorManageScreen = () => {
 
     // Create schedule notification for alarm stopped
     try {
-      const notificationResponse = await fetch('http://10.100.56.91:5001/notifications/schedule', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          type: 'alarm_stopped',
-          container: `container${container}`,
-          message: `Alarm stopped for Container ${container}. Verifying medication...`,
-          scheduleId: null,
-          source,
-        })
-      });
-      if (notificationResponse.ok) {
-        console.log('[MonitorManageScreen] ✅ Created schedule notification for alarm stopped');
+      const base = await verificationService.getBackendUrl();
+      try {
+        const notificationResponse = await fetch(`${base}/notifications/schedule`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            type: 'alarm_stopped',
+            container: `container${container}`,
+            message: `Alarm stopped for Container ${container}. Verifying medication...`,
+            scheduleId: null,
+            source,
+          })
+        });
+        if (notificationResponse.ok) {
+          console.log('[MonitorManageScreen] ✅ Created schedule notification for alarm stopped');
+        } else {
+          console.warn('[MonitorManageScreen] ⚠️ Schedule notification returned status', notificationResponse.status);
+        }
+      } catch (notifErr) {
+        console.warn('[MonitorManageScreen] Failed to create schedule notification:', notifErr);
       }
-    } catch (notifErr) {
-      console.warn('[MonitorManageScreen] Failed to create schedule notification:', notifErr);
+    } catch (err) {
+      console.warn('[MonitorManageScreen] Could not determine backend URL for schedule notification:', err);
     }
 
     // Automatically trigger ESP32-CAM capture AFTER user takes pill
@@ -1036,7 +1098,8 @@ const MonitorManageScreen = () => {
       // Get pill count from backend
       let pillCount = 0;
       try {
-        const configResponse = await fetch(`http://10.100.56.91:5001/get-pill-config/${containerId}`);
+        const base = await verificationService.getBackendUrl();
+        const configResponse = await fetch(`${base}/get-pill-config/${containerId}`);
         if (configResponse.ok) {
           const configData = await configResponse.json();
           pillCount = configData.pill_config?.count || 0;
@@ -1047,7 +1110,7 @@ const MonitorManageScreen = () => {
       } catch (configError) {
         console.warn(`[Auto Capture] Error fetching pill config:`, configError);
       }
-      
+
       // Trigger capture with retry logic (same as pre-pill)
       console.log(`[Auto Capture] Calling triggerCapture for ${containerId} with pill count ${pillCount}...`);
       let captureResult = await verificationService.triggerCapture(containerId, { count: pillCount });
@@ -1126,8 +1189,7 @@ const MonitorManageScreen = () => {
       if (error instanceof Error) {
         console.error(`[Auto Capture] Error details: ${error.message}\n${error.stack}`);
       }
-    }
-  }, [alarmContainer, loadVerifications, loadScheduleData]);
+    }  }, [alarmContainer, loadVerifications, loadScheduleData]);
 
   // Listen for Bluetooth alarm notifications
   useEffect(() => {
@@ -1214,7 +1276,7 @@ const MonitorManageScreen = () => {
               // Get pill count from backend
               let pillCount = 0;
               try {
-                const configResponse = await fetch(`http://10.100.56.91:5001/get-pill-config/${containerId}`, {
+                const configResponse = await fetch(`${BACKEND_URL}/get-pill-config/${containerId}`, {
                   method: 'GET',
                   headers: { 'Content-Type': 'application/json' },
                   signal: AbortSignal.timeout(5000) // 5 second timeout
@@ -1304,7 +1366,7 @@ const MonitorManageScreen = () => {
           
           // Create schedule notification
           try {
-            const notificationResponse = await fetch('http://10.100.56.91:5001/notifications/schedule', {
+            const notificationResponse = await fetch(`${BACKEND_URL}/notifications/schedule`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
@@ -1867,8 +1929,50 @@ const MonitorManageScreen = () => {
         </TouchableOpacity>
       </View>
 
+      {/* DEV: Backend override (visible only in dev builds) */}
+      {__DEV__ ? (
+        <View style={[styles.devRowWrapper, { backgroundColor: theme.card }]}> 
+          <View style={{ flex: 1 }}>
+            <Text style={[styles.devLabel, { color: theme.textSecondary }]}>Backend</Text>
+            <Text style={[styles.devValue, { color: theme.text }]} numberOfLines={1} ellipsizeMode="middle">{backendOverride || BACKEND_URL}</Text>
+            <Text style={[styles.devStatus, { color: backendReachable ? 'green' : backendReachable === false ? 'orange' : theme.textSecondary }]}>Status: {backendReachable === null ? 'Checking...' : (backendReachable ? 'Reachable' : 'Unreachable')}</Text>
+          </View>
+          <View style={{ justifyContent: 'center' }}>
+            <TouchableOpacity onPress={() => { setBackendInput(backendOverride || BACKEND_URL); setBackendModalVisible(true); }} style={styles.smallButton}>
+              <Text style={{ color: theme.card }}>Edit</Text>
+            </TouchableOpacity>
+            <TouchableOpacity onPress={() => clearBackendOverride()} style={[styles.smallButton, { marginTop: 8, backgroundColor: theme.background }] }>
+              <Text style={{ color: theme.primary }}>Clear</Text>
+            </TouchableOpacity>
+          </View>
+
+          <Modal visible={backendModalVisible} transparent animationType="slide">
+            <View style={styles.modalOverlay}>
+              <View style={[styles.modalContent, { backgroundColor: theme.card }]}>
+                <Text style={[styles.modalTitle, { color: theme.text }]}>Set Backend URL</Text>
+                <TextInput
+                  value={backendInput}
+                  onChangeText={setBackendInput}
+                  placeholder="http://10.0.0.1:5001"
+                  style={[styles.input, { color: theme.text, backgroundColor: theme.background }]}
+                  autoCapitalize="none"
+                />
+                <View style={{ flexDirection: 'row', justifyContent: 'flex-end', gap: 8 }}>
+                  <TouchableOpacity onPress={() => setBackendModalVisible(false)} style={[styles.smallButton, { backgroundColor: theme.background }]}>
+                    <Text style={{ color: theme.primary }}>Cancel</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity onPress={() => saveBackendOverride(backendInput)} style={styles.smallButton}>
+                    <Text style={{ color: theme.card }}>Save</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            </View>
+          </Modal>
+        </View>
+      ) : null}
+
         {/* Current Scheduled Section - Dropdown */}
-      <View style={[styles.scheduleSection, { backgroundColor: theme.card }]}>
+      <View style={[styles.scheduleSection, { backgroundColor: theme.card }]}> 
           <TouchableOpacity 
             style={styles.dropdownHeader}
             onPress={() => setSchedulesExpanded(!schedulesExpanded)}
@@ -2354,6 +2458,58 @@ const styles = StyleSheet.create({
   verificationDetailText: {
     fontSize: 12,
     fontWeight: '500',
+  },
+
+  /* Dev UI styles */
+  devRowWrapper: {
+    marginTop: 12,
+    padding: 12,
+    borderRadius: 12,
+    flexDirection: 'row',
+    gap: 12,
+    alignItems: 'center',
+  },
+  devLabel: {
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  devValue: {
+    fontSize: 14,
+  },
+  devStatus: {
+    fontSize: 12,
+    marginTop: 4,
+  },
+  smallButton: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 8,
+    backgroundColor: '#007bff',
+    alignItems: 'center',
+    justifyContent: 'center',
+    minWidth: 64,
+  },
+  modalOverlay: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0,0,0,0.4)',
+    padding: 20,
+  },
+  modalContent: {
+    width: '100%',
+    padding: 16,
+    borderRadius: 12,
+  },
+  modalTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    marginBottom: 12,
+  },
+  input: {
+    borderRadius: 8,
+    padding: 12,
+    marginBottom: 12,
   },
 });
 

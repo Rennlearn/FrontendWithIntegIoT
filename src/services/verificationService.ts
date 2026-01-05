@@ -3,13 +3,19 @@
  * Handles communication with the local backend for pill verification
  */
 
-// Backend URL - update this if your backend IP changes
-// For development: use your Mac's IP address
-// For production: use your deployed backend URL
-// NOTE: This should match the BACKEND_HOST in esp32_cam_client.ino
-// Current IP: 10.56.196.91 (update if your network IP changes)
-// IMPORTANT: This should be your Mac's current LAN IP so your phone + ESP32-CAM can reach it.
-const BACKEND_URL = 'http://10.100.56.91:5001'; // Local backend URL (Mac's current LAN IP)
+// Backend URL is centralized in src/config.ts to provide a safe fallback when
+// EXPO_PUBLIC_BACKEND_URL is not set on the device. This prevents capture
+// triggers from silently failing when the env var is missing.
+import { BACKEND_URL } from '@/config';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+
+// Basic validation and a helpful log to aid debugging on devices/emulators
+if (!BACKEND_URL || !/^https?:\/\//.test(BACKEND_URL)) {
+  // eslint-disable-next-line no-console
+  console.warn(`[VerificationService] WARNING: BACKEND_URL may be invalid or missing: ${BACKEND_URL}`);
+}
+
+
 
 export interface VerificationResult {
   success: boolean;
@@ -33,14 +39,25 @@ class VerificationService {
    * @param pillConfig - Expected pill configuration with count AND optional label
    * @returns Promise with success status
    */
+  async getBackendUrl(): Promise<string> {
+    try {
+      const override = await AsyncStorage.getItem('backend_url_override');
+      if (override && String(override).trim()) return String(override).trim();
+    } catch (e) {
+      // ignore and fallback
+    }
+    return BACKEND_URL;
+  }
+
   async triggerCapture(containerId: string, pillConfig: { count?: number; label?: string }, retryCount: number = 0): Promise<{ ok: boolean; message: string }> {
     const maxRetries = 2;
     const retryDelay = 2000; // 2 seconds
     
     try {
+      const base = await this.getBackendUrl();
       console.log(`[VerificationService] Triggering capture for ${containerId}${retryCount > 0 ? ` (retry ${retryCount}/${maxRetries})` : ''}`);
       console.log(`[VerificationService] Expected config: count=${pillConfig.count || 0}, label=${pillConfig.label || 'none'}`);
-      console.log(`[VerificationService] Using endpoint: ${BACKEND_URL}/trigger-capture/${containerId}`);
+      console.log(`[VerificationService] Using endpoint: ${base}/trigger-capture/${containerId}`);
       
       // Add timeout to prevent hanging
       const controller = new AbortController();
@@ -49,7 +66,7 @@ class VerificationService {
       // Use the dedicated trigger-capture endpoint
       // Send pill config in request body so backend can use it if not in memory
       // IMPORTANT: Include both count AND label for proper verification
-      const response = await fetch(`${BACKEND_URL}/trigger-capture/${containerId}`, {
+      const response = await fetch(`${base}/trigger-capture/${containerId}`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -76,7 +93,10 @@ class VerificationService {
             console.error(`[VerificationService] Rate limited (429) after ${maxRetries} retries`);
           }
         } else {
+          // Append response status for better diagnostics
+          errorMessage = `${errorMessage} (status: ${response.status})`;
           console.error(`[VerificationService] Backend error (${response.status}):`, errorText);
+          console.warn(`[VerificationService] Diagnostic: Check BACKEND_URL (${await this.getBackendUrl()}) and network connectivity`);
         }
         
         return { ok: false, message: errorMessage };
@@ -123,7 +143,8 @@ class VerificationService {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 8000); // 8 second timeout
       
-      const response = await fetch(`${BACKEND_URL}/containers/${containerId}/verification`, {
+      const base = await this.getBackendUrl();
+      const response = await fetch(`${base}/containers/${containerId}/verification`, {
         method: 'GET',
         headers: {
           'Content-Type': 'application/json',
@@ -208,8 +229,9 @@ class VerificationService {
    */
   async testConnection(): Promise<{ success: boolean; message: string }> {
     try {
-      console.log(`[VerificationService] Testing connection to ${BACKEND_URL}`);
-      const response = await fetch(`${BACKEND_URL}/test`, {
+      const base = await this.getBackendUrl();
+      console.log(`[VerificationService] Testing connection to ${base}`);
+      const response = await fetch(`${base}/test`, {
         method: 'GET',
         headers: {
           'Content-Type': 'application/json',
