@@ -449,10 +449,29 @@ const SetScreen = () => {
             const schedulesByContainer: Record<number, number> = { 1: 0, 2: 0, 3: 0 };
             
             for (const sched of scheduleList) {
-              await BluetoothService.sendCommand(`SCHED ADD ${sched.time} ${sched.container}\n`);
-              schedulesByContainer[sched.container] = (schedulesByContainer[sched.container] || 0) + 1;
-              console.log(`[SetScreen] Added schedule: ${sched.time} for Container ${sched.container}`);
-              await new Promise(resolve => setTimeout(resolve, 200)); // Small delay between commands
+              const command = `SCHED ADD ${sched.time} ${sched.container}\n`;
+              console.log(`[SetScreen] Sending to Arduino: ${command.trim()}`);
+              
+              // Retry logic for Bluetooth corruption
+              let retries = 3;
+              let success = false;
+              while (retries > 0 && !success) {
+                success = await BluetoothService.sendCommand(command);
+                if (!success && retries > 1) {
+                  console.warn(`[SetScreen] Command failed, retrying... (${retries - 1} attempts left)`);
+                  await new Promise(resolve => setTimeout(resolve, 500)); // Wait before retry
+                }
+                retries--;
+              }
+              
+              if (success) {
+                schedulesByContainer[sched.container] = (schedulesByContainer[sched.container] || 0) + 1;
+                console.log(`[SetScreen] ✅ Added schedule: ${sched.time} for Container ${sched.container}`);
+              } else {
+                console.error(`[SetScreen] ❌ Failed to send schedule after 3 attempts: ${sched.time} C${sched.container}`);
+              }
+              
+              await new Promise(resolve => setTimeout(resolve, 400)); // Increased delay between commands
             }
             
             // Log summary

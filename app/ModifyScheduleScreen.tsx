@@ -292,10 +292,28 @@ const ModifyScheduleScreen = () => {
               scheduleList.push({ time: hhmm, container: sched.container });
             });
             
-            // Send all schedules to Arduino
+            // Send all schedules to Arduino with retry logic
             for (const sched of scheduleList) {
-              await BluetoothService.sendCommand(`SCHED ADD ${sched.time} ${sched.container}\n`);
-              await new Promise(resolve => setTimeout(resolve, 200));
+              const command = `SCHED ADD ${sched.time} ${sched.container}\n`;
+              console.log(`[ModifyScheduleScreen] Sending to Arduino: ${command.trim()}`);
+              
+              // Retry logic for Bluetooth corruption
+              let retries = 3;
+              let success = false;
+              while (retries > 0 && !success) {
+                success = await BluetoothService.sendCommand(command);
+                if (!success && retries > 1) {
+                  console.warn(`[ModifyScheduleScreen] Command failed, retrying... (${retries - 1} attempts left)`);
+                  await new Promise(resolve => setTimeout(resolve, 500)); // Wait before retry
+                }
+                retries--;
+              }
+              
+              if (!success) {
+                console.error(`[ModifyScheduleScreen] Failed to send schedule after 3 attempts: ${sched.time} C${sched.container}`);
+              }
+              
+              await new Promise(resolve => setTimeout(resolve, 400)); // Increased delay between commands
             }
           }
         } else {
@@ -463,8 +481,26 @@ const ModifyScheduleScreen = () => {
                     });
                     
                     for (const sched of scheduleList) {
-                      await BluetoothService.sendCommand(`SCHED ADD ${sched.time} ${sched.container}\n`);
-                      await new Promise(resolve => setTimeout(resolve, 200));
+                      const command = `SCHED ADD ${sched.time} ${sched.container}\n`;
+                      console.log(`[ModifyScheduleScreen] Sending to Arduino: ${command.trim()}`);
+                      
+                      // Retry logic for Bluetooth corruption
+                      let retries = 3;
+                      let success = false;
+                      while (retries > 0 && !success) {
+                        success = await BluetoothService.sendCommand(command);
+                        if (!success && retries > 1) {
+                          console.warn(`[ModifyScheduleScreen] Command failed, retrying... (${retries - 1} attempts left)`);
+                          await new Promise(resolve => setTimeout(resolve, 500)); // Wait before retry
+                        }
+                        retries--;
+                      }
+                      
+                      if (!success) {
+                        console.error(`[ModifyScheduleScreen] Failed to send schedule after 3 attempts: ${sched.time} C${sched.container}`);
+                      }
+                      
+                      await new Promise(resolve => setTimeout(resolve, 400)); // Increased delay between commands
                     }
                   }
                 }

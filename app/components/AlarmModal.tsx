@@ -11,9 +11,10 @@ interface AlarmModalProps {
   container: number;
   time: string;
   onDismiss: () => void;
+  onScheduleUpdated?: () => void; // Callback to reload schedules after update
 }
 
-const AlarmModal: React.FC<AlarmModalProps> = ({ visible, container, time, onDismiss }) => {
+const AlarmModal: React.FC<AlarmModalProps> = ({ visible, container, time, onDismiss, onScheduleUpdated }) => {
   const { isDarkMode } = useTheme();
   const theme = isDarkMode ? darkTheme : lightTheme;
   const [pulseAnim] = useState(new Animated.Value(1));
@@ -78,6 +79,8 @@ const AlarmModal: React.FC<AlarmModalProps> = ({ visible, container, time, onDis
             if (matchingSchedule) {
               console.log(`[AlarmModal] Found matching schedule ${matchingSchedule._id}, marking as Done...`);
               
+              let updateSuccess = false;
+              
               // Update schedule status to "Done"
               const updateResponse = await fetch(`https://pillnow-database.onrender.com/api/medication_schedules/${matchingSchedule._id}`, {
                 method: 'PATCH',
@@ -87,6 +90,7 @@ const AlarmModal: React.FC<AlarmModalProps> = ({ visible, container, time, onDis
               
               if (updateResponse.ok) {
                 console.log(`[AlarmModal] ✅ Schedule ${matchingSchedule._id} marked as Done`);
+                updateSuccess = true;
               } else {
                 const errorText = await updateResponse.text();
                 console.warn(`[AlarmModal] PATCH failed (${updateResponse.status}): ${errorText}`);
@@ -100,10 +104,17 @@ const AlarmModal: React.FC<AlarmModalProps> = ({ visible, container, time, onDis
                 
                 if (putResponse.ok) {
                   console.log(`[AlarmModal] ✅ Schedule marked as Done (via PUT)`);
+                  updateSuccess = true;
                 } else {
                   const putErrorText = await putResponse.text();
                   console.warn(`[AlarmModal] ⚠️ PUT also failed (${putResponse.status}): ${putErrorText}`);
                 }
+              }
+              
+              // Reload schedules if update was successful
+              if (updateSuccess && onScheduleUpdated) {
+                console.log('[AlarmModal] ✅ Schedule updated successfully, triggering reload...');
+                onScheduleUpdated();
               }
             } else {
               console.warn(`[AlarmModal] ⚠️ Could not find matching active schedule for Container ${container} at ${time}`);
@@ -123,16 +134,23 @@ const AlarmModal: React.FC<AlarmModalProps> = ({ visible, container, time, onDis
           // Don't block the alarm stop if status update fails
         }
         
-        // Dismiss modal first
-        onDismiss();
+        // Reload schedules first to show updated status, then dismiss modal
+        if (onScheduleUpdated) {
+          onScheduleUpdated();
+        }
         
-        // Show success message that schedule is marked as Done
+        // Dismiss modal after a short delay to allow schedule reload
         setTimeout(() => {
-          Alert.alert(
-            'Alarm Stopped', 
-            'The alarm has been turned off. Schedule marked as Done. Verifying medication...',
-            [{ text: 'OK' }]
-          );
+          onDismiss();
+          
+          // Show success message that schedule is marked as Done
+          setTimeout(() => {
+            Alert.alert(
+              'Alarm Stopped', 
+              'The alarm has been turned off. Schedule marked as Done. Verifying medication...',
+              [{ text: 'OK' }]
+            );
+          }, 300);
         }, 500);
       } else {
         onDismiss();

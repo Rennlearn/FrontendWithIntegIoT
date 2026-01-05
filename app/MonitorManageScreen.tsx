@@ -759,6 +759,8 @@ const MonitorManageScreen = () => {
         }
         
         // Also skip missed schedules (even if they have valid scheduleId) - they should have been deleted
+        // IMPORTANT: Skip schedules that have already passed TODAY (not just >5 minutes old)
+        // This prevents syncing schedules that won't trigger until tomorrow
         if (schedule?.date && schedule?.time) {
           try {
             const [y, m, d] = String(schedule.date).split('-').map(Number);
@@ -766,9 +768,16 @@ const MonitorManageScreen = () => {
             const scheduleTime = new Date(y, (m || 1) - 1, d, hh, mm);
             const scheduleTimeMs = scheduleTime.getTime();
             
-            // If schedule is missed for more than 5 minutes, skip it (don't sync to Arduino)
-            if (scheduleTimeMs < now.getTime() && scheduleTimeMs < fiveMinutesAgo) {
-              // Don't log individual warnings - too verbose. These will be deleted on next auto-deletion cycle.
+            // Skip if schedule time has already passed today (even if less than 5 minutes ago)
+            // This prevents re-adding schedules that won't trigger until tomorrow
+            // Add 30 second buffer to account for clock differences
+            const thirtySecondsAgo = now.getTime() - (30 * 1000);
+            if (scheduleTimeMs < thirtySecondsAgo) {
+              // Only log if it's a recent schedule (within last hour) to help debug
+              const minutesAgo = (now.getTime() - scheduleTimeMs) / (60 * 1000);
+              if (minutesAgo < 60) {
+                console.log(`[MonitorManageScreen] ⏭️ Skipping schedule ${schedule.time} - already passed ${Math.round(minutesAgo * 10) / 10} minutes ago (won't trigger until tomorrow)`);
+              }
               return;
             }
           } catch (err) {
@@ -802,8 +811,11 @@ const MonitorManageScreen = () => {
               const scheduleTime = new Date(y, (m || 1) - 1, d, hh, mm);
               const scheduleTimeMs = scheduleTime.getTime();
               
-              // Skip if missed for more than 5 minutes
-              if (scheduleTimeMs < now.getTime() && scheduleTimeMs < fiveMinutesAgo) {
+              // Skip if schedule has already passed (with 30 second buffer for clock differences)
+              // This prevents syncing schedules that won't trigger until tomorrow
+              // Use 30 seconds instead of 1 minute to be more precise
+              const thirtySecondsAgo = now.getTime() - (30 * 1000);
+              if (scheduleTimeMs < thirtySecondsAgo) {
                 missedCount++;
                 return false;
               }
@@ -872,9 +884,26 @@ const MonitorManageScreen = () => {
               
               for (const sched of sortedSchedules) {
                 const containerNum = parseInt(sched.container) || 1;
-                console.log(`[MonitorManageScreen] Sending to Arduino: SCHED ADD ${sched.time} ${containerNum}`);
-                await BluetoothService.sendCommand(`SCHED ADD ${sched.time} ${containerNum}\n`);
-                await new Promise(resolve => setTimeout(resolve, 300)); // Increased delay for reliability
+                const command = `SCHED ADD ${sched.time} ${containerNum}\n`;
+                console.log(`[MonitorManageScreen] Sending to Arduino: ${command.trim()}`);
+                
+                // Retry logic for Bluetooth corruption
+                let retries = 3;
+                let success = false;
+                while (retries > 0 && !success) {
+                  success = await BluetoothService.sendCommand(command);
+                  if (!success && retries > 1) {
+                    console.warn(`[MonitorManageScreen] Command failed, retrying... (${retries - 1} attempts left)`);
+                    await new Promise(resolve => setTimeout(resolve, 500)); // Wait before retry
+                  }
+                  retries--;
+                }
+                
+                if (!success) {
+                  console.error(`[MonitorManageScreen] Failed to send schedule after 3 attempts: ${sched.time} C${containerNum}`);
+                }
+                
+                await new Promise(resolve => setTimeout(resolve, 400)); // Increased delay for reliability
               }
               console.log(`[MonitorManageScreen] ✅ Successfully synced ${sortedSchedules.length} schedule(s) to Arduino`);
         } else if (isActive && sortedSchedules.length === 0) {
@@ -1156,8 +1185,15 @@ const MonitorManageScreen = () => {
 
   // Helper to derive status locally without mutating backend
   // Only mark as "Missed" if it's been more than 2 minutes past the scheduled time
+  // IMPORTANT: Don't change status if it's already "Done" or "Active"
   const deriveStatus = (schedule: any): 'Pending' | 'Missed' | string => {
     if (!schedule?.date || !schedule?.time) return schedule?.status || 'Pending';
+    
+    // If status is already "Done" or "Active", keep it (don't override)
+    if (schedule.status === 'Done' || schedule.status === 'Active') {
+      return schedule.status;
+    }
+    
     try {
       const [y, m, d] = String(schedule.date).split('-').map(Number);
       const [hh, mm] = String(schedule.time).split(':').map(Number);
@@ -1166,13 +1202,15 @@ const MonitorManageScreen = () => {
       const twoMinutesAgo = now.getTime() - (2 * 60 * 1000); // 2 minutes buffer
       
       // Only mark as "Missed" if:
-      // 1. Status is "Pending" (not already Done/Missed)
+      // 1. Status is currently "Pending" (or null/undefined)
       // 2. Current time is past scheduled time
       // 3. It's been more than 2 minutes past (buffer to prevent premature marking)
-      if (schedule.status === 'Pending' && when.getTime() < twoMinutesAgo) {
+      if ((!schedule.status || schedule.status === 'Pending') && when.getTime() < twoMinutesAgo) {
         return 'Missed';
       }
-      return schedule.status;
+      
+      // Return current status or default to "Pending"
+      return schedule.status || 'Pending';
     } catch {
       return schedule.status || 'Pending';
     }
@@ -1345,6 +1383,10 @@ const MonitorManageScreen = () => {
         container={alarmContainer}
         time={alarmTime}
         onDismiss={() => setAlarmVisible(false)}
+        onScheduleUpdated={() => {
+          console.log('[MonitorManageScreen] Schedule updated, reloading schedules...');
+          loadScheduleData(false, false); // Reload schedules without syncing to Arduino
+        }}
       />
     </View>
   );

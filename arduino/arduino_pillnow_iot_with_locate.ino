@@ -106,6 +106,9 @@ String sanitizeCommand(String input) {
         result += 'D';  // @ often replaces D
       } else if (c == '#') {
         result += 'H';  // # sometimes replaces H
+      } else if (c == 'j' || c == 'J') {
+        // 'j' or 'J' often replaces ':' in time format (e.g., "02:50" -> "02j50")
+        result += ':';
       } else if (c == 'Q' && i > 0 && result.length() > 0 && result.charAt(result.length() - 1) == 'R') {
         // RQ often replaces SCH - try to fix it
         result.setCharAt(result.length() - 1, 'S');
@@ -167,9 +170,24 @@ void loop() {
   // Alarm buzzing (medication schedule) - has priority over locate
   if (alarmActive) {
     unsigned long nowMs = millis();
-    if (nowMs - lastAlarmToggle >= 400) {
+    // Check if alarm has been running too long (60 seconds max)
+    if (nowMs - alarmStartTime >= alarmMaxDurationMs) {
+      Serial.println(F("⏰ Alarm timeout - auto-stopping after 60 seconds"));
+      stopAlarm();
+    } else if (nowMs - lastAlarmToggle >= 400) {
+      // Toggle buzzer every 400ms for audible alarm
       digitalWrite(BUZZER_PIN, !digitalRead(BUZZER_PIN));
       lastAlarmToggle = nowMs;
+      // Debug: Print every 5 seconds to confirm buzzer is toggling
+      static unsigned long lastDebugPrint = 0;
+      if (nowMs - lastDebugPrint >= 5000) {
+        Serial.print(F("🔔 Alarm active, buzzer toggling. Container: "));
+        Serial.print(activeContainerLED);
+        Serial.print(F(", Running for: "));
+        Serial.print((nowMs - alarmStartTime) / 1000);
+        Serial.println(F(" seconds"));
+        lastDebugPrint = nowMs;
+      }
     }
     // CRITICAL: Ensure container LED stays on while alarm is active - check every loop
     if (activeContainerLED > 0) {
@@ -179,10 +197,6 @@ void loop() {
         case 2: digitalWrite(LED_CONTAINER2_PIN, HIGH); break;
         case 3: digitalWrite(LED_CONTAINER3_PIN, HIGH); break;
       }
-    }
-    // auto-stop after max duration
-    if (nowMs - alarmStartTime >= alarmMaxDurationMs) {
-      stopAlarm();
     }
   } else if (locateBoxActive) {
     // Handle locate buzzer - only if alarm is not active
@@ -257,7 +271,14 @@ void handleCommand(const char *cmd) {
       
       
       // Look for time pattern (HH:MM) - this is the key indicator
+      // Also check for corrupted colon (j, J, or other characters)
       int colon = afterAdd.indexOf(':');
+      if (colon < 0) {
+        // Try to find corrupted colon patterns
+        colon = afterAdd.indexOf('j');
+        if (colon < 0) colon = afterAdd.indexOf('J');
+        if (colon < 0) colon = afterAdd.indexOf(';');
+      }
       if (colon > 0 && colon < (int)afterAdd.length() - 1) {
         // Found time pattern - this is definitely a schedule add command
         // Extract time (HH:MM format)
@@ -637,7 +658,7 @@ void checkSchedules() {
       if (schedules[i].lastTriggeredYmd != ymd) {
         schedules[i].lastTriggeredYmd = ymd;
         
-        Serial.print(F("Schedule matched! Container "));
+        Serial.print(F("✅ Schedule matched! Container "));
         Serial.print(schedules[i].container);
         Serial.print(F(" at "));
         Serial.print(currentHour);
@@ -646,7 +667,9 @@ void checkSchedules() {
         Serial.println(currentMinute);
         
         // Start alarm for container
+        Serial.println(F("🔔 Starting alarm for container..."));
         startAlarmForContainer(schedules[i].container);
+        Serial.println(F("✅ Alarm started successfully"));
         
         // SIM800L SMS sending (commented out - uncomment to enable)
         // sim.print(F("AT+CMGS=\""));
@@ -691,13 +714,47 @@ void addSchedule(uint8_t hour, uint8_t minute, uint8_t container) {
     return;
   }
   
+  // Check if this schedule time has already passed today
+  // If so, set lastTriggeredYmd to today so it won't trigger until tomorrow
+  int ymd = 0;
+  bool timeHasPassed = false;
+  if (rtc.begin()) {
+    DateTime now = rtc.now();
+    if (now.year() >= 2000) {
+      ymd = now.year() * 10000 + now.month() * 100 + now.day();
+      uint8_t currentHour = now.hour();
+      uint8_t currentMinute = now.minute();
+      
+      // If schedule time has passed today (not equal), mark it as already triggered
+      // If equal, we want it to trigger immediately
+      if (hour < currentHour || (hour == currentHour && minute < currentMinute)) {
+        timeHasPassed = true;
+        Serial.print(F("Schedule time has passed today ("));
+        Serial.print(hour);
+        Serial.print(F(":"));
+        if (minute < 10) Serial.print(F("0"));
+        Serial.print(minute);
+        Serial.print(F(" < "));
+        Serial.print(currentHour);
+        Serial.print(F(":"));
+        if (currentMinute < 10) Serial.print(F("0"));
+        Serial.print(currentMinute);
+        Serial.println(F(") - will trigger tomorrow"));
+      } else if (hour == currentHour && minute == currentMinute) {
+        Serial.println(F("Schedule time matches current time - will trigger immediately!"));
+      }
+    }
+  }
+  
   for (int i = 0; i < MAX_SCHEDULES; i++) {
     if (!schedules[i].inUse) {
       schedules[i].inUse = true;
       schedules[i].hour = hour;
       schedules[i].minute = minute;
       schedules[i].container = container;
-      schedules[i].lastTriggeredYmd = 0;
+      // If time has passed today, set lastTriggeredYmd to today so it won't trigger until tomorrow
+      // Otherwise, set to 0 so it can trigger today
+      schedules[i].lastTriggeredYmd = timeHasPassed ? ymd : 0;
       Serial.print(F("Schedule added: Container "));
       Serial.print(container);
       Serial.print(F(" at "));
@@ -713,6 +770,33 @@ void addSchedule(uint8_t hour, uint8_t minute, uint8_t container) {
       btSerial.print(minute);
       btSerial.print(F(" C"));
       btSerial.println(container);
+      
+      // Immediately check if this schedule should trigger NOW
+      // This handles the case where schedule is added at the exact current time
+      if (!timeHasPassed && rtc.begin()) {
+        DateTime now = rtc.now();
+        if (now.year() >= 2000) {
+          int currentYmd = now.year() * 10000 + now.month() * 100 + now.day();
+          uint8_t currentH = now.hour();
+          uint8_t currentM = now.minute();
+          
+          // If schedule time matches current time, trigger it immediately
+          if (hour == currentH && minute == currentM) {
+            Serial.println(F("⚠️ Schedule matches current time - triggering immediately!"));
+            schedules[i].lastTriggeredYmd = currentYmd; // Mark as triggered for today
+            startAlarmForContainer(container);
+            char msgBuf[64];
+            snprintf(msgBuf, sizeof(msgBuf), "ALARM_TRIGGERED C%d %02d:%02d", container, hour, minute);
+            Serial.print(F("📤 Sending: "));
+            Serial.println(msgBuf);
+            btSerial.println(msgBuf);
+            btSerial.flush();
+            Serial.println(F("✅ Alarm triggered immediately!"));
+            delay(100); // Give time for message to be sent
+          }
+        }
+      }
+      
       return;
     }
   }
@@ -721,7 +805,7 @@ void addSchedule(uint8_t hour, uint8_t minute, uint8_t container) {
   schedules[MAX_SCHEDULES - 1].hour = hour;
   schedules[MAX_SCHEDULES - 1].minute = minute;
   schedules[MAX_SCHEDULES - 1].container = container;
-  schedules[MAX_SCHEDULES - 1].lastTriggeredYmd = 0;
+  schedules[MAX_SCHEDULES - 1].lastTriggeredYmd = timeHasPassed ? ymd : 0;
   Serial.print(F("Schedule added (overwrite): Container "));
   Serial.print(container);
   Serial.print(F(" at "));
@@ -737,6 +821,32 @@ void addSchedule(uint8_t hour, uint8_t minute, uint8_t container) {
   btSerial.print(minute);
   btSerial.print(F(" C"));
   btSerial.println(container);
+  
+  // Immediately check if this schedule should trigger NOW
+  // This handles the case where schedule is added at the exact current time
+  if (!timeHasPassed && rtc.begin()) {
+    DateTime now = rtc.now();
+    if (now.year() >= 2000) {
+      int currentYmd = now.year() * 10000 + now.month() * 100 + now.day();
+      uint8_t currentH = now.hour();
+      uint8_t currentM = now.minute();
+      
+      // If schedule time matches current time, trigger it immediately
+      if (hour == currentH && minute == currentM) {
+        Serial.println(F("⚠️ Schedule matches current time - triggering immediately!"));
+        schedules[MAX_SCHEDULES - 1].lastTriggeredYmd = currentYmd; // Mark as triggered for today
+        startAlarmForContainer(container);
+        char msgBuf[64];
+        snprintf(msgBuf, sizeof(msgBuf), "ALARM_TRIGGERED C%d %02d:%02d", container, hour, minute);
+        Serial.print(F("📤 Sending: "));
+        Serial.println(msgBuf);
+        btSerial.println(msgBuf);
+        btSerial.flush();
+        Serial.println(F("✅ Alarm triggered immediately!"));
+        delay(100); // Give time for message to be sent
+      }
+    }
+  }
 }
 
 void clearSchedules() {

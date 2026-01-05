@@ -364,6 +364,8 @@ class BluetoothService {
             if (sent) {
               console.log(`✅ Command "${command}" sent successfully via real Bluetooth to HC-05`);
               console.log('✅ Data transmission completed - check Arduino Serial Monitor');
+              // Add a small delay to ensure data is flushed
+              await new Promise(resolve => setTimeout(resolve, 100));
               return true;
             } else {
               console.error('❌ Real Bluetooth data transmission failed');
