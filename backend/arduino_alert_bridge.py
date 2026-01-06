@@ -4,6 +4,7 @@ MQTT to Arduino Serial Bridge
 Subscribes to pillnow/*/cmd MQTT topics and forwards alert commands to Arduino via Serial
 """
 import paho.mqtt.client as mqtt
+import os
 import serial
 import json
 import sys
@@ -236,6 +237,62 @@ def on_message(client, userdata, msg):
     except Exception as e:
         print(f"❌ Error processing MQTT message: {e}")
 
+def serial_read_loop():
+    """Read lines from Arduino Serial and handle ALARM_STOPPED events."""
+    global arduino_serial
+    last_stop_ts = {}
+    BACKEND_HTTP = os.environ.get('BACKEND_HTTP', 'http://127.0.0.1:5001')
+
+    while True:
+        try:
+            if not (arduino_serial and arduino_serial.is_open):
+                time.sleep(1)
+                continue
+            try:
+                line = arduino_serial.readline().decode('utf-8', errors='ignore').strip()
+            except Exception:
+                line = ""
+            if not line:
+                time.sleep(0.1)
+                continue
+            print(f"📟 Serial <- {line}", flush=True)
+
+            # Detect ALARM_STOPPED (we added a short tag from the sketch)
+            if 'ALARM_STOPPED' in line.upper():
+                # Try to extract container number (C<number>)
+                container_num = None
+                import re
+                m = re.search(r'C(\d+)', line.upper())
+                if m:
+                    container_num = int(m.group(1))
+                if not container_num:
+                    # fallback to 1
+                    container_num = 1
+                container_id = f"container{container_num}"
+
+                now = time.time()
+                last = last_stop_ts.get(container_id, 0)
+                if now - last < 5:
+                    print(f"⚠️  Ignoring duplicate ALARM_STOPPED for {container_id} (throttled)", flush=True)
+                    continue
+                last_stop_ts[container_id] = now
+
+                print(f"📣 Detected ALARM_STOPPED for {container_id}, calling backend for post-capture...", flush=True)
+                try:
+                    import urllib.request, json
+                    url = f"{BACKEND_HTTP}/alarm/stopped/{container_id}"
+                    data = json.dumps({}).encode('utf-8')
+                    req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+                    with urllib.request.urlopen(req, timeout=8) as resp:
+                        text = resp.read().decode('utf-8')
+                        print(f"📤 Backend /alarm/stopped response: {text}", flush=True)
+                except Exception as e:
+                    print(f"❌ Failed to call backend /alarm/stopped: {e}", flush=True)
+        except Exception as e:
+            print(f"⚠️ Serial read loop error: {e}", flush=True)
+            time.sleep(1)
+
+
 def main():
     """Main function"""
     print("🔌 Starting MQTT to Arduino Alert Bridge...", flush=True)
@@ -246,6 +303,11 @@ def main():
     # Start reconnect loop so alarms/mismatch resume automatically after closing Serial Monitor
     t = threading.Thread(target=arduino_reconnect_loop, daemon=True)
     t.start()
+
+    # Start serial reader thread that listens for ALARM_STOPPED messages and triggers post-capture
+    serial_reader_thread = threading.Thread(target=serial_read_loop, daemon=True)
+    serial_reader_thread.start()
+
     sys.stdout.flush()
     
     # Connect to MQTT

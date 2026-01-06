@@ -1051,8 +1051,11 @@ void stopAlarm() {
     snprintf(msgBuf, sizeof(msgBuf), "ALARM_STOPPED C%d", stoppedContainer);
     Serial.println(msgBuf);
     btSerial.println(msgBuf);
+    // Also print a short tag to Serial for the bridge to pick up easily
+    Serial.println("[PILLNOW] ALARM_STOPPED");
   } else {
     btSerial.println(F("ALARM_STOPPED"));
+    Serial.println("[PILLNOW] ALARM_STOPPED");
   }
 }
 

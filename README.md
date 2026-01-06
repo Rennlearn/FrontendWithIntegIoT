@@ -1,5 +1,8 @@
 # PillNow - Medication Management System
 
+[![Integration (fast)](https://github.com/REPLACE_WITH_OWNER/REPO/actions/workflows/integration-fast.yml/badge.svg)](https://github.com/REPLACE_WITH_OWNER/REPO/actions/workflows/integration-fast.yml)  
+_Replace `REPLACE_WITH_OWNER/REPO` with your GitHub repository path to enable the badge._
+
 A comprehensive medication management application built with React Native/Expo, featuring IoT integration, Bluetooth connectivity, and caregiver monitoring capabilities.
 
 ## Project Structure

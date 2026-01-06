@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from "react";
-import { View, Text, TouchableOpacity, Image, StyleSheet, Modal, Alert, AppState, ScrollView } from "react-native";
+import React, { useState, useEffect, useCallback } from "react";
+import { View, Text, TouchableOpacity, Image, StyleSheet, Modal, Alert, AppState, ScrollView, BackHandler } from "react-native";
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -17,6 +17,42 @@ const ElderDashboard = () => {
   const theme = isDarkMode ? darkTheme : lightTheme;
   
   // Legacy design: no real-time notification center or monitoring dashboard
+
+  const performLogout = useCallback(async () => {
+    try {
+      await AsyncStorage.multiRemove([
+        'token',
+        'userRole',
+        'selectedElderId',
+        'selectedElderName',
+      ]);
+      router.replace('/LoginScreen');
+    } catch (error) {
+      console.error('Logout error:', error);
+      Alert.alert('Error', 'Failed to logout. Please try again.');
+    }
+  }, [router]);
+
+  useEffect(() => {
+    const backAction = () => {
+      Alert.alert('Logout and Exit', 'You need to logout first to exit the app. Do you want to logout?', [
+        {
+          text: 'Cancel',
+          onPress: () => null,
+          style: 'cancel',
+        },
+        { text: 'YES', onPress: performLogout },
+      ]);
+      return true;
+    };
+
+    const backHandler = BackHandler.addEventListener(
+      'hardwareBackPress',
+      backAction,
+    );
+
+    return () => backHandler.remove();
+  }, [performLogout]);
 
   // Check Bluetooth connection status on component mount
   useEffect(() => {
@@ -126,20 +162,7 @@ const ElderDashboard = () => {
         {
           text: 'Logout',
           style: 'destructive',
-          onPress: async () => {
-            try {
-              await AsyncStorage.multiRemove([
-                'token',
-                'userRole',
-                'selectedElderId',
-                'selectedElderName',
-              ]);
-              router.replace('/LoginScreen');
-            } catch (error) {
-              console.error('Logout error:', error);
-              Alert.alert('Error', 'Failed to logout. Please try again.');
-            }
-          },
+          onPress: performLogout,
         },
       ],
       { cancelable: true }

@@ -61,4 +61,19 @@ npm run iot:stop
 - **State**: `backend/state.json` stores per-container pill config + times and latest verification results.
 - **Images**: annotated images are saved to `backend/captures/` by the verifier.
 
+## Schedule / Auto-capture
+
+- The backend runs an internal scheduler (server local time) that fires alarms for per-container `times` or `schedules` stored in `state.json`.
+- If you want the backend to automatically request an ESP32-CAM capture when an alarm fires, set `AUTO_CAPTURE_ON_ALARM=true` (see `backend/backend.env`). The delay before requesting capture can be tuned with `AUTO_CAPTURE_DELAY_MS` (ms).
+- For quick testing, use the debug endpoint to fire a schedule immediately:
+  - `POST /debug/fire-schedule/:containerId` (body: `{ "auto_capture": true|false }` optional)
+- There is also a stop notification endpoint that you can call when an alarm is stopped (e.g., from hardware bridge):
+  - `POST /alarm/stopped/:containerId` (body: `{ "capture": true|false }` optional). By default `AUTO_CAPTURE_POST_ON_STOP` controls post-stop captures.
+
+- Troubleshooting tips:
+  - Confirm the device IDs and topics: backend publishes to `pillnow/<deviceId>/cmd` (default uses container logical id unless `SINGLE_CAMERA_DEVICE_ID` is set).
+  - Monitor MQTT messages with:
+    - `mosquitto_sub -h 127.0.0.1 -t 'pillnow/+/cmd' -v`
+  - Check ESP32-CAM serial logs for subscription, online status, and received messages.
+
 

@@ -415,20 +415,74 @@ export default function GlobalAlarmHandler() {
 
     const containerId = `container${containerNum}`;
     try {
-      // Trigger capture using the same flow to fetch expected config
+      // Prefer to ask the backend to perform a post-stop capture. This centralizes capture requests
+      // (Arduino bridge will also call backend /alarm/stopped on hardware stops) and avoids duplicate
+      // publishes from both the app and the bridge. If backend call fails or is rate-limited, fall back
+      // to triggering a direct capture via `triggerCapture`.
       try {
         const base = await verificationService.getBackendUrl();
-        const cfgResp = await fetch(`${base}/get-pill-config/${containerId}`);
-        if (cfgResp.ok) {
-          const cfg = await cfgResp.json();
-          const expected = cfg?.pill_config || { count: 0 };
-          await verificationService.triggerCapture(containerId, expected);
+        console.log(`[GlobalAlarmHandler] 🛑 Requesting backend post-stop capture for ${containerId}`);
+        const stopResp = await fetch(`${base}/alarm/stopped/${containerId}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ capture: true }),
+        });
+
+        if (stopResp.ok) {
+          const body = await stopResp.json().catch(() => ({}));
+          if (body && body.captureRequested) {
+            console.log(`[GlobalAlarmHandler] ✅ Backend accepted post-stop capture for ${containerId}`);
+            // Backend will publish capture; proceed to polling below
+          } else {
+            console.log(`[GlobalAlarmHandler] ⚠️ Backend did not request capture (captureRequested=${body?.captureRequested}), falling back to direct trigger`);
+            // fallback to direct trigger
+            try {
+              const cfgResp = await fetch(`${base}/get-pill-config/${containerId}`);
+              if (cfgResp.ok) {
+                const cfg = await cfgResp.json();
+                const expected = cfg?.pill_config || { count: 0 };
+                await verificationService.triggerCapture(containerId, expected);
+              } else {
+                await verificationService.triggerCapture(containerId, { count: 0 });
+              }
+            } catch (err) {
+              console.warn('[GlobalAlarmHandler] Fetch config failed, triggering with default', err);
+              await verificationService.triggerCapture(containerId, { count: 0 });
+            }
+          }
         } else {
-          await verificationService.triggerCapture(containerId, { count: 0 });
+          // Rate limited or server error -> fallback
+          console.warn(`[GlobalAlarmHandler] Backend /alarm/stopped returned ${stopResp.status}, falling back to triggerCapture`);
+          try {
+            const cfgResp = await fetch(`${base}/get-pill-config/${containerId}`);
+            if (cfgResp.ok) {
+              const cfg = await cfgResp.json();
+              const expected = cfg?.pill_config || { count: 0 };
+              await verificationService.triggerCapture(containerId, expected);
+            } else {
+              await verificationService.triggerCapture(containerId, { count: 0 });
+            }
+          } catch (err) {
+            console.warn('[GlobalAlarmHandler] Fetch config failed, triggering with default', err);
+            await verificationService.triggerCapture(containerId, { count: 0 });
+          }
         }
       } catch (err) {
-        console.warn('[GlobalAlarmHandler] Fetch config failed, triggering with default', err);
-        await verificationService.triggerCapture(containerId, { count: 0 });
+        console.warn('[GlobalAlarmHandler] Failed to call /alarm/stopped, falling back to direct trigger', err);
+        try {
+          const base = await verificationService.getBackendUrl();
+          const cfgResp = await fetch(`${base}/get-pill-config/${containerId}`);
+          if (cfgResp.ok) {
+            const cfg = await cfgResp.json();
+            const expected = cfg?.pill_config || { count: 0 };
+            await verificationService.triggerCapture(containerId, expected);
+          } else {
+            await verificationService.triggerCapture(containerId, { count: 0 });
+          }
+        } catch (err2) {
+          console.warn('[GlobalAlarmHandler] Fetch config failed, triggering with default', err2);
+          await verificationService.triggerCapture(containerId, { count: 0 });
+        }
       }
 
       // Poll for verification result

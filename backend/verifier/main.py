@@ -1,18 +1,32 @@
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 from io import BytesIO
-from PIL import Image
 import json
 import os
-import pickle
-import cv2
-import numpy as np
 import time
-from ultralytics import YOLO
 from pathlib import Path
-from sklearn.neighbors import KNeighborsClassifier
+
+# Mock verifier mode flag - when true, skip heavy ML imports and return deterministic responses
+MOCK_VERIFIER = str(os.environ.get('MOCK_VERIFIER', '')).lower() in ('1', 'true', 'yes')
+
+# Conditional heavy imports (skip when MOCK_VERIFIER to make CI lightweight)
+if not MOCK_VERIFIER:
+    from PIL import Image
+    import pickle
+    import cv2
+    import numpy as np
+    from ultralytics import YOLO
+    from sklearn.neighbors import KNeighborsClassifier
+else:
+    # Provide light fallback types in mock mode
+    Image = None
+    np = None
+    cv2 = None
+    YOLO = None
+    KNeighborsClassifier = None
+    pickle = None
 
 app = FastAPI(title="PillNow Verifier", version="0.1.0")
 
@@ -27,8 +41,15 @@ knn_scaler = None  # Feature scaler if KNN model uses one
 
 @app.on_event("startup")
 async def load_models():
-    """Load YOLOv8 and KNN models on server startup"""
+    """Load YOLOv8 and KNN models on server startup (skipped in MOCK mode)"""
     global yolo_model, knn_model, knn_scaler
+    if MOCK_VERIFIER:
+        print("⚡ MOCK_VERIFIER enabled — skipping heavy model loads")
+        yolo_model = None
+        knn_model = None
+        knn_scaler = None
+        return
+
     try:
         # Load YOLOv8 model
         if YOLO_MODEL_PATH.exists():
@@ -237,6 +258,38 @@ async def verify(image: UploadFile = File(...), expected: str = Form("{}")):
             print(f"[YOLO DEBUG] ⚠️ No expected label found in expected_obj. Keys available: {list(expected_obj.keys())}")
     else:
         print(f"[YOLO DEBUG] ⚠️ expected_obj is not a dict, type: {type(expected_obj)}")
+
+    # Mock verifier mode: return deterministic, fast response for CI and local dev
+    if MOCK_VERIFIER:
+        cnt = expected_count if (isinstance(expected_count, int) and expected_count > 0) else 1
+        classes = []
+        if expected_label:
+            classes.append(ClassCount(label=expected_label, n=cnt))
+        else:
+            classes.append(ClassCount(label="pill_mock", n=cnt))
+
+        knn_verification_data = {
+            'enabled': False,
+            'attempted': 0,
+            'successful': 0,
+            'total_verified': 0,
+            'yolo_knn_matches': 0,
+            'yolo_knn_match_rate': 0,
+            'expected_matches': cnt if expected_label else 0,
+            'expected_match_rate': 1.0 if expected_label else 0.0,
+            'foreign_pills_detected': 0,
+            'foreign_pills': [],
+            'results': []
+        }
+
+        return VerifyResponse(
+            pass_=True,
+            count=cnt,
+            classesDetected=classes,
+            confidence=0.95,
+            annotatedImagePath=None,
+            knnVerification=knn_verification_data,
+        )
 
     # Run inference with YOLOv8 model
     detected_classes: List[ClassCount] = []

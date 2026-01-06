@@ -45,6 +45,12 @@ const EMAIL_PORT = process.env.EMAIL_PORT ? Number(process.env.EMAIL_PORT) : 587
 const EMAIL_USER = process.env.EMAIL_USER || "";
 const EMAIL_PASS = process.env.EMAIL_PASS || "";
 
+// Auto-capture: when an alarm fires, should the backend automatically request an ESP32-CAM capture?
+const AUTO_CAPTURE_ON_ALARM = String(process.env.AUTO_CAPTURE_ON_ALARM || "").toLowerCase() === "true";
+const AUTO_CAPTURE_DELAY_MS = Number(process.env.AUTO_CAPTURE_DELAY_MS || 5000);
+// Optional single-camera override (publish captures to this device regardless of logical container)
+const SINGLE_CAMERA_DEVICE_ID = String(process.env.SINGLE_CAMERA_DEVICE_ID || "").trim();
+
 const CAPTURES_DIR = path.join(__dirname, "captures");
 const STATE_PATH = path.join(__dirname, "state.json");
 
@@ -190,6 +196,18 @@ mqttClient.on("error", (err) => {
   console.warn("[backend] MQTT error:", err?.message || err);
 });
 
+// Track last published capture timestamp per container/device to suppress duplicates
+const lastCaptureAt = new Map(); // key -> timestamp (ms)
+
+// Simple in-memory metrics (transient)
+const metrics = {
+  capturesPublished: 0,
+  capturesSuppressed: 0,
+  alarmTriggers: 0,
+  postStops: 0,
+  triggerRequests: 0,
+};
+
 function publishCmd(deviceId, payload) {
   const topic = `pillnow/${deviceId}/cmd`;
   const msg = JSON.stringify(payload);
@@ -199,6 +217,21 @@ function publishCmd(deviceId, payload) {
     console.error(`[backend] ❌ MQTT NOT CONNECTED - Cannot publish to ${topic}`);
     console.error(`[backend] MQTT connection status: ${mqttClient.connected}`);
     return false;
+  }
+
+  // Suppress near-duplicate capture publishes to avoid double-capture when both app and bridge
+  // request a capture around the same time. Only applies to payload.action === 'capture'.
+  if (payload && payload.action === 'capture') {
+    const key = payload.container || deviceId || 'unknown';
+    const last = lastCaptureAt.get(key) || 0;
+    const now = Date.now();
+    if (now - last < 3000) {
+      console.log(`[backend] ⏭️ Suppressing duplicate capture publish for ${key} (last: ${now - last}ms ago)`);
+      metrics.capturesSuppressed = (metrics.capturesSuppressed || 0) + 1;
+      return true; // treat as OK since a capture was recently requested
+    }
+    lastCaptureAt.set(key, now);
+    console.log(`[backend] ⏱️ Setting lastCaptureAt for ${key} = ${now}`);
   }
 
   console.log(`[backend] 📤 Publishing MQTT message:`);
@@ -211,6 +244,13 @@ function publishCmd(deviceId, payload) {
         console.error(`[backend] ❌ MQTT publish failed for ${topic}:`, err?.message || err);
       } else {
         console.log(`[backend] ✅ MQTT message published successfully to ${topic}`);
+        // increment capturesPublished only for capture messages
+        try {
+          const p = JSON.parse(msg || '{}');
+          if (p && p.action === 'capture') metrics.capturesPublished = (metrics.capturesPublished || 0) + 1;
+        } catch (e) {
+          // ignore
+        }
       }
     });
     return true;
@@ -376,6 +416,7 @@ const triggerLimiter = rateLimit({
 
 app.get("/health", (_req, res) => res.json({ ok: true }));
 app.get("/test", (_req, res) => res.json({ ok: true, mqtt: mqttClient.connected, verifier: VERIFIER_URL }));
+app.get('/metrics', (_req, res) => res.json({ ok: true, metrics }));
 
 function isValidEmail(email) {
   const s = String(email || "").trim();
@@ -774,6 +815,7 @@ app.post("/trigger-capture/:containerId", triggerLimiter, (req, res) => {
     container: containerId,
     expected,
   });
+  metrics.triggerRequests = (metrics.triggerRequests || 0) + 1;
 
   console.log(`[backend] trigger-capture: device=${deviceId} container=${containerId} expected=${JSON.stringify(expected)} publish_ok=${Boolean(published)}`);
 
@@ -983,19 +1025,68 @@ app.post("/ingest/:deviceId/:container", upload.single("image"), async (req, res
   return res.json({ ok: true, ...payload });
 });
 
+/**
+ * Debug: Fire schedule for a container immediately (testing only)
+ * POST /debug/fire-schedule/:containerId
+ * Body: { auto_capture?: boolean }
+ */
+app.post("/debug/fire-schedule/:containerId", (req, res) => {
+  const containerId = normalizeContainerId(req.params.containerId);
+  if (!containerId || !state.containers?.[containerId]) {
+    return res.status(400).json({ ok: false, message: 'Invalid or missing container_id' });
+  }
+  const cfg = state.containers[containerId];
+  const hhmm = hhmmNowLocal();
+  const date = yyyyMmDdLocal();
+  console.log(`[backend][debug] Firing schedule for ${containerId} at ${date} ${hhmm}`);
+
+  const alarmPublished = publishCmd(resolveDeviceId(containerId), {
+    action: "alarm_triggered",
+    container: containerId,
+    date,
+    time: hhmm,
+  });
+  if (alarmPublished) metrics.alarmTriggers = (metrics.alarmTriggers || 0) + 1;
+
+  const autoCapture = typeof req.body?.auto_capture === 'boolean' ? req.body.auto_capture : (String(process.env.AUTO_CAPTURE_ON_ALARM || "").toLowerCase() === "true");
+  if (autoCapture) {
+    const expected = cfg?.pill_config || { count: 0 };
+    const capturePublished = publishCmd(resolveDeviceId(containerId), {
+      action: "capture",
+      container: containerId,
+      expected,
+    });
+    console.log(`[backend][debug] AUTO_CAPTURE requested for ${containerId} (published=${Boolean(capturePublished)})`);
+  } else {
+    console.log(`[backend][debug] AUTO_CAPTURE not requested for ${containerId}`);
+  }
+
+  return res.json({ ok: true, alarmPublished });
+});
+
 // --- Alarm scheduler (per container) ---
 // IMPROVED: Supports multiple containers at the same time with staggered firing
 const firedKeys = new Map(); // key -> timestamp
+const lastScheduleLog = new Map(); // key -> lastLogTimestamp (throttle schedule logs)
 setInterval(() => {
   const hhmm = hhmmNowLocal();
   const date = yyyyMmDdLocal();
 
   // Cleanup old keys occasionally (keep map small)
+  const keyPruneCutoff = Date.now() - 6 * 60 * 60 * 1000; // 6 hours
+  for (const [k, ts] of firedKeys.entries()) {
+    if (ts < keyPruneCutoff) firedKeys.delete(k);
+  }
   if (firedKeys.size > 500) {
     const cutoff = Date.now() - 48 * 60 * 60 * 1000;
     for (const [k, ts] of firedKeys.entries()) {
       if (ts < cutoff) firedKeys.delete(k);
     }
+  }
+  // Also prune lastScheduleLog entries older than 6 hours to avoid growth
+  const scheduleLogPruneCutoff = Date.now() - 6 * 60 * 60 * 1000;
+  for (const [k, ts] of lastScheduleLog.entries()) {
+    if (ts < scheduleLogPruneCutoff) lastScheduleLog.delete(k);
   }
 
   // Collect all containers that need to fire at this time
@@ -1007,23 +1098,39 @@ setInterval(() => {
       console.warn(`[backend] ⚠️ Skipping invalid container ID: ${containerId}`);
       continue;
     }
-    
+
     const times = getTimesForToday(cfg, date);
-    
-    // Enhanced logging for debugging
+
+    // Enhanced logging for debugging (throttled: once per minute per unique schedule)
     if (times.length > 0) {
-      console.log(`[backend] 📅 Container ${containerId} has ${times.length} schedule(s) for ${date}: ${times.join(', ')}`);
-      console.log(`[backend] 🔍 Checking if ${hhmm} matches any schedule...`);
+      const schedLogKey = `${containerId}|${date}|${times.join(',')}`;
+      const last = lastScheduleLog.get(schedLogKey) || 0;
+      if (Date.now() - last > 60_000) { // log at most once per minute per schedule
+        console.log(`[backend] 📅 Container ${containerId} has ${times.length} schedule(s) for ${date}: ${times.join(', ')}`);
+        lastScheduleLog.set(schedLogKey, Date.now());
+      }
+      // Only print a light check message (avoid noisy logs each second)
+      // console.log(`[backend] 🔍 Checking if ${hhmm} matches any schedule...`);
     }
-    
+
     if (!times.includes(hhmm)) continue;
 
     const key = `${containerId}|${date}|${hhmm}`;
-    if (firedKeys.has(key)) {
-      console.log(`[backend] ⏳ Alarm ${key} already fired, skipping`);
+    const firedAt = firedKeys.get(key);
+    const now = Date.now();
+
+    // If we've fired recently (within 2 minutes), skip silently to avoid log spam
+    if (firedAt && now - firedAt < 2 * 60 * 1000) {
+      // Still within suppression window — skip
       continue;
     }
-    
+
+    // If firedAt exists but is expired, allow firing again (informational log)
+    if (firedAt && now - firedAt >= 2 * 60 * 1000) {
+      console.log(`[backend] ♻️ Previous alarm ${key} expired after ${Math.round((now - firedAt)/1000)}s — re-firing`);
+      firedKeys.delete(key);
+    }
+
     console.log(`[backend] ✅ Container ${containerId} scheduled for ${hhmm} - adding to fire list`);
     containersToFire.push({ containerId, cfg, key });
   }
@@ -1095,10 +1202,73 @@ setInterval(() => {
   }
 }, 1000);
 
+/**
+ * POST /alarm/stopped/:containerId
+ * Notify backend that an alarm was stopped (e.g., hardware button pressed).
+ * Body: { capture?: true|false }
+ * If capture not provided, BACKEND's AUTO_CAPTURE_POST_ON_STOP (env) or default true will be used.
+ */
+app.post('/alarm/stopped/:containerId', async (req, res) => {
+  try {
+    const containerId = normalizeContainerId(req.params.containerId);
+    if (!containerId || !state.containers?.[containerId]) {
+      return res.status(400).json({ ok: false, message: 'Invalid container or no config' });
+    }
+
+    // Rate-limit repeated stop-triggered captures per container (5s)
+    const lastStopKey = `stop|${containerId}`;
+    const last = firedKeys.get(lastStopKey);
+    const now = Date.now();
+    if (last && now - last < 5000) {
+      return res.status(429).json({ ok: false, message: 'Too many stop events, throttled' });
+    }
+    firedKeys.set(lastStopKey, now);
+
+    // Decide whether to capture after stop
+    const envPref = String(process.env.AUTO_CAPTURE_POST_ON_STOP || "").toLowerCase();
+    const defaultPost = envPref === "true" || envPref === "1" || envPref === "yes";
+    const doCapture = typeof req.body?.capture === 'boolean' ? req.body.capture : defaultPost;
+
+    console.log(`[backend] 🛑 Alarm stopped for ${containerId} — post-capture requested=${doCapture}`);
+
+    if (doCapture) {
+      const expected = state.containers?.[containerId]?.pill_config || { count: 0 };
+      const capturePublished = publishCmd(resolveDeviceId(containerId), {
+        action: 'capture',
+        container: containerId,
+        expected,
+      });
+      metrics.postStops = (metrics.postStops || 0) + 1;
+
+      if (!capturePublished) {
+        const note = { type: 'error', message: `Post-stop capture failed (MQTT) for ${containerId}`, container: containerId, timestamp: new Date().toISOString() };
+        state.notifications.push(note);
+        saveStateSoon();
+        return res.status(502).json({ ok: false, message: 'MQTT not connected' });
+      }
+
+      console.log(`[backend] 🤖 Post-stop capture requested for ${containerId}, published=${Boolean(capturePublished)}`);
+    }
+
+    return res.json({ ok: true, container: containerId, captureRequested: doCapture });
+  } catch (e) {
+    console.warn('[backend] /alarm/stopped error:', e?.message || e);
+    return res.status(500).json({ ok: false, message: String(e?.message || e) });
+  }
+});
+
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`[backend] listening on http://0.0.0.0:${PORT}`);
   console.log(`[backend] MQTT_BROKER_URL=${MQTT_BROKER_URL}`);
   console.log(`[backend] VERIFIER_URL=${VERIFIER_URL}`);
+  console.log(`[backend] AUTO_CAPTURE_ON_ALARM=${AUTO_CAPTURE_ON_ALARM}`);
+  console.log(`[backend] AUTO_CAPTURE_DELAY_MS=${AUTO_CAPTURE_DELAY_MS}`);
+  const singleCam = String(process.env.SINGLE_CAMERA_DEVICE_ID || "").trim();
+  if (singleCam) {
+    console.log(`[backend] SINGLE_CAMERA_DEVICE_ID=${singleCam}`);
+  } else {
+    console.log(`[backend] SINGLE_CAMERA_DEVICE_ID not set`);
+  }
 });
 
 

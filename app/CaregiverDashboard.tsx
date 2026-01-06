@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { View, Text, TouchableOpacity, StyleSheet, Image, Alert, AppState, ScrollView, FlatList, ActivityIndicator } from 'react-native';
+import React, { useState, useEffect, useCallback } from 'react';
+import { View, Text, TouchableOpacity, StyleSheet, Image, Alert, AppState, ScrollView, FlatList, ActivityIndicator, BackHandler } from 'react-native';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -44,6 +44,45 @@ const CaregiverDashboard: React.FC = () => {
     userId?: string;
     role?: string;
   }
+
+  const performLogout = useCallback(async () => {
+    if (loggingOut) return;
+    try {
+      setLoggingOut(true);
+      await AsyncStorage.multiRemove([
+        'token',
+        'userRole',
+        'selectedElderId',
+      ]);
+      router.replace('/LoginScreen');
+    } catch (error) {
+      console.error('Logout error:', error);
+      Alert.alert('Error', 'Failed to logout. Please try again.');
+    } finally {
+      setLoggingOut(false);
+    }
+  }, [loggingOut, router]);
+
+  useEffect(() => {
+    const backAction = () => {
+      Alert.alert('Logout and Exit', 'You need to logout first to exit the app. Do you want to logout?', [
+        {
+          text: 'Cancel',
+          onPress: () => null,
+          style: 'cancel',
+        },
+        { text: 'YES', onPress: performLogout },
+      ]);
+      return true;
+    };
+
+    const backHandler = BackHandler.addEventListener(
+      'hardwareBackPress',
+      backAction,
+    );
+
+    return () => backHandler.remove();
+  }, [performLogout]);
 
   // Get current caregiver ID from JWT token
   const getCurrentCaregiverId = async (): Promise<string> => {
@@ -512,21 +551,7 @@ const CaregiverDashboard: React.FC = () => {
         {
           text: 'Logout',
           style: 'destructive',
-          onPress: async () => {
-            try {
-              setLoggingOut(true);
-              await AsyncStorage.multiRemove([
-                'token',
-                'userRole',
-                'selectedElderId',
-              ]);
-              router.replace('/LoginScreen');
-            } catch (error) {
-              console.error('Logout error:', error);
-              Alert.alert('Error', 'Failed to logout. Please try again.');
-              setLoggingOut(false);
-            }
-          },
+          onPress: performLogout,
         },
       ],
       { cancelable: true }
