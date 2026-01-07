@@ -44,9 +44,17 @@ fi
 # Also stop by process name (in case PID file is missing)
 print_status "Stopping services by process name..."
 
-pkill -f "backend/server.js" 2>/dev/null && print_success "Backend server stopped" || print_warning "Backend server was not running"
-pkill -f "uvicorn.*verifier.main" 2>/dev/null && print_success "Verifier service stopped" || print_warning "Verifier service was not running"
+# Stop PM2 services if PM2 is available
+if command -v pm2 &> /dev/null; then
+    pm2 stop pillnow-backend 2>/dev/null && print_success "Backend server stopped (PM2)" || print_warning "Backend server was not running in PM2"
+    pm2 stop pillnow-verifier 2>/dev/null && print_success "Verifier service stopped (PM2)" || print_warning "Verifier service was not running in PM2"
+fi
+
+# Also stop direct processes (in case not using PM2)
+pkill -f "backend/server.js" 2>/dev/null && print_success "Backend server stopped (direct)" || print_warning "Backend server was not running"
+pkill -f "uvicorn.*verifier.main" 2>/dev/null && print_success "Verifier service stopped (direct)" || print_warning "Verifier service was not running"
 pkill -f "arduino_alert_bridge.py" 2>/dev/null && print_success "Arduino bridge stopped" || print_warning "Arduino bridge was not running"
+pkill -f "auto_update_esp32_config.sh" 2>/dev/null && print_success "ESP32-CAM Auto-Config service stopped" || print_warning "ESP32-CAM Auto-Config service was not running"
 
 sleep 1
 

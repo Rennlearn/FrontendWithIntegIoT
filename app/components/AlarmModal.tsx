@@ -77,7 +77,14 @@ export default function AlarmModal({ visible, container, time, remainingAlarms =
   };
 
   return (
-    <Modal visible={visible} transparent animationType="slide">
+    <Modal 
+      visible={visible} 
+      transparent 
+      animationType="slide"
+      statusBarTranslucent
+      hardwareAccelerated
+      onRequestClose={onDismiss}
+    >
       <View style={styles.overlay}>
         <View style={[styles.container, { maxHeight: '85%' }]}>
           <Text style={styles.title}>Medication Reminder</Text>
@@ -125,9 +132,11 @@ export default function AlarmModal({ visible, container, time, remainingAlarms =
 const styles = StyleSheet.create({
   overlay: {
     flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.5)',
+    backgroundColor: 'rgba(0,0,0,0.7)',
     justifyContent: 'center',
     alignItems: 'center',
+    zIndex: 10000,
+    elevation: 1000,
   },
   container: {
     width: '90%',
@@ -135,6 +144,8 @@ const styles = StyleSheet.create({
     padding: 20,
     borderRadius: 12,
     alignItems: 'center',
+    zIndex: 10001,
+    elevation: 1001,
   },
   title: { fontSize: 20, fontWeight: '700', marginBottom: 6 },
   subtitle: { fontSize: 16, marginBottom: 8 },

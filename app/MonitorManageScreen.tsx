@@ -47,7 +47,7 @@ const MonitorManageScreen = () => {
   const [deletingAll, setDeletingAll] = useState(false);
   const [navigating, setNavigating] = useState<string | null>(null);
 
-  // Dev/back-end override controls
+  // Backend override controls (available in all builds)
   const [backendOverride, setBackendOverride] = useState<string | null>(null);
   const [backendReachable, setBackendReachable] = useState<boolean | null>(null);
   const [backendModalVisible, setBackendModalVisible] = useState(false);
@@ -841,6 +841,27 @@ const MonitorManageScreen = () => {
         console.log(`  [${index + 1}] Container ${sched.container} - ${sched.time} (Schedule ID: ${sched.scheduleId || sched._id || 'N/A'})`);
       });
 
+      // CRITICAL: Sync schedules to backend state.containers for alarm firing
+      // The alarm system only checks state.containers, not the database
+      try {
+        const base = await verificationService.getBackendUrl();
+        const syncResponse = await fetch(`${base}/sync-schedules-from-database`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
+          },
+        });
+        if (syncResponse.ok) {
+          const syncData = await syncResponse.json();
+          console.log(`[MonitorManageScreen] ✅ Synced ${syncData.total_schedules} schedule(s) to backend alarm system (${syncData.synced_containers} container(s))`);
+        } else {
+          console.warn(`[MonitorManageScreen] ⚠️ Failed to sync schedules to backend: ${syncResponse.status}`);
+        }
+      } catch (syncErr) {
+        console.warn('[MonitorManageScreen] ⚠️ Error syncing schedules to backend (alarms may not fire):', syncErr);
+      }
+
       // Also sync current schedules to Arduino over Bluetooth if connected
       // IMPORTANT: Sync happens AFTER deletion, so sortedSchedules only contains remaining (non-deleted) schedules
       // Only sync if explicitly requested (not during periodic refresh)
@@ -931,15 +952,115 @@ const MonitorManageScreen = () => {
     return unsubscribe;
   }, [navigation, loadScheduleData, loadVerifications, getSelectedElderId, getUserRole, checkCaregiverConnection]);
 
-  // Load backend override and reachability (dev helper)
+  // Auto-update backend URL when Mac IP changes
   useEffect(() => {
     let mounted = true;
+    let pollInterval: any = null;
+    let lastKnownIp: string | null = null;
+
+    const autoUpdateBackendUrl = async () => {
+      if (!mounted) return;
+      
+      try {
+        // Try to get current IP from backend (if reachable)
+        // First try with current override or default
+        const currentUrl = backendOverride || BACKEND_URL;
+        let newBackendUrl: string | null = null;
+        
+        try {
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 3000);
+          const response = await fetch(`${currentUrl}/current-ip`, {
+            method: 'GET',
+            headers: { 'Content-Type': 'application/json' },
+            signal: controller.signal,
+          });
+          clearTimeout(timeoutId);
+          
+          if (response.ok) {
+            const data = await response.json();
+            if (data.ok && data.backend_url) {
+              newBackendUrl = data.backend_url;
+              const newIp = data.ip;
+              
+              // Only update if IP actually changed
+              if (newIp !== lastKnownIp) {
+                console.log(`[MonitorManageScreen] 🔄 IP changed: ${lastKnownIp || 'unknown'} -> ${newIp}`);
+                console.log(`[MonitorManageScreen] 🔄 Auto-updating backend URL to: ${newBackendUrl}`);
+                
+                // Auto-update the override
+                await AsyncStorage.setItem('backend_url_override', newBackendUrl);
+                setBackendOverride(newBackendUrl);
+                lastKnownIp = newIp;
+                
+                // Test reachability with new URL
+                const reachable = await testBackendReachable(3000);
+                setBackendReachable(reachable);
+                
+                if (reachable) {
+                  console.log(`[MonitorManageScreen] ✅ Backend URL auto-updated and reachable`);
+                } else {
+                  console.warn(`[MonitorManageScreen] ⚠️ Backend URL updated but not reachable yet`);
+                }
+              }
+            }
+          }
+        } catch (fetchError: any) {
+          // Backend not reachable with current URL, try default
+          if (currentUrl !== BACKEND_URL) {
+            try {
+              const fallbackController = new AbortController();
+              const fallbackTimeoutId = setTimeout(() => fallbackController.abort(), 3000);
+              const fallbackResponse = await fetch(`${BACKEND_URL}/current-ip`, {
+                method: 'GET',
+                headers: { 'Content-Type': 'application/json' },
+                signal: fallbackController.signal,
+              });
+              clearTimeout(fallbackTimeoutId);
+              
+              if (fallbackResponse.ok) {
+                const data = await fallbackResponse.json();
+                if (data.ok && data.backend_url) {
+                  newBackendUrl = data.backend_url;
+                  const newIp = data.ip;
+                  
+                  if (newIp !== lastKnownIp) {
+                    console.log(`[MonitorManageScreen] 🔄 IP detected via fallback: ${newIp}`);
+                    await AsyncStorage.setItem('backend_url_override', newBackendUrl);
+                    setBackendOverride(newBackendUrl);
+                    lastKnownIp = newIp;
+                    const reachable = await testBackendReachable(3000);
+                    setBackendReachable(reachable);
+                  }
+                }
+              }
+            } catch (fallbackError) {
+              // Both failed, backend might be down or network issue
+              console.warn('[MonitorManageScreen] Could not reach backend to get current IP:', fetchError?.message || fetchError);
+              // Don't update reachability here - let testBackendReachable handle it
+            }
+          } else {
+            // Current URL is already the default, backend might be down
+            console.warn('[MonitorManageScreen] Backend not reachable at default URL');
+          }
+        }
+      } catch (e) {
+        console.warn('[MonitorManageScreen] Auto-update error:', e);
+      }
+    };
+
+    // Initial load
     const load = async () => {
       try {
         const override = await AsyncStorage.getItem('backend_url_override');
         if (!mounted) return;
         setBackendOverride(override);
-        const reachable = await testBackendReachable(3000);
+        
+        // Try to get current IP and auto-update
+        await autoUpdateBackendUrl();
+        
+        // Test reachability
+        const reachable = await testBackendReachable(5000); // Longer timeout for initial check
         if (!mounted) return;
         setBackendReachable(reachable);
       } catch (e) {
@@ -947,9 +1068,26 @@ const MonitorManageScreen = () => {
         setBackendReachable(false);
       }
     };
+    
     load();
-    return () => { mounted = false; };
-  }, []);
+    
+    // Poll for IP changes every 10 seconds (same as ESP32-CAM auto-config)
+    pollInterval = setInterval(async () => {
+      await autoUpdateBackendUrl();
+      // Also refresh reachability status periodically
+      if (mounted) {
+        const reachable = await testBackendReachable(3000);
+        setBackendReachable(reachable);
+      }
+    }, 10000);
+    
+    return () => {
+      mounted = false;
+      if (pollInterval) {
+        clearInterval(pollInterval);
+      }
+    };
+  }, [backendOverride]);
 
   const saveBackendOverride = async (url: string | null) => {
     try {
@@ -1929,47 +2067,64 @@ const MonitorManageScreen = () => {
         </TouchableOpacity>
       </View>
 
-      {/* DEV: Backend override (visible only in dev builds) */}
-      {__DEV__ ? (
-        <View style={[styles.devRowWrapper, { backgroundColor: theme.card }]}> 
-          <View style={{ flex: 1 }}>
-            <Text style={[styles.devLabel, { color: theme.textSecondary }]}>Backend</Text>
-            <Text style={[styles.devValue, { color: theme.text }]} numberOfLines={1} ellipsizeMode="middle">{backendOverride || BACKEND_URL}</Text>
-            <Text style={[styles.devStatus, { color: backendReachable ? 'green' : backendReachable === false ? 'orange' : theme.textSecondary }]}>Status: {backendReachable === null ? 'Checking...' : (backendReachable ? 'Reachable' : 'Unreachable')}</Text>
-          </View>
-          <View style={{ justifyContent: 'center' }}>
-            <TouchableOpacity onPress={() => { setBackendInput(backendOverride || BACKEND_URL); setBackendModalVisible(true); }} style={styles.smallButton}>
-              <Text style={{ color: theme.card }}>Edit</Text>
-            </TouchableOpacity>
-            <TouchableOpacity onPress={() => clearBackendOverride()} style={[styles.smallButton, { marginTop: 8, backgroundColor: theme.background }] }>
-              <Text style={{ color: theme.primary }}>Clear</Text>
-            </TouchableOpacity>
-          </View>
+      {/* Backend override (available in all builds) */}
+      {/* 
+        Backend IP Override Function:
+        - AUTOMATIC: The app automatically detects and updates the backend URL when your Mac's IP changes
+        - Polls the backend every 10 seconds to check for IP changes (same as ESP32-CAM auto-config)
+        - Auto-updates the override in the background - no manual intervention needed!
+        - Manual Override: You can still manually set a custom backend URL if needed
+        - Edit: Set a custom backend URL (e.g., "http://10.165.11.91:5001")
+        - Clear: Remove the override and use automatic detection
+        - The override is saved locally and persists across app restarts
+        - All API calls will use this override URL instead of the default
+        - Status shows "Reachable" when backend is accessible, "Unreachable" when not
+      */}
+      <View style={[styles.devRowWrapper, { backgroundColor: theme.card }]}> 
+        <View style={{ flex: 1 }}>
+          <Text style={[styles.devLabel, { color: theme.textSecondary }]}>Backend</Text>
+          <Text style={[styles.devValue, { color: theme.text }]} numberOfLines={1} ellipsizeMode="middle">{backendOverride || BACKEND_URL}</Text>
+          <Text style={[styles.devStatus, { color: backendReachable ? 'green' : backendReachable === false ? 'orange' : theme.textSecondary }]}>Status: {backendReachable === null ? 'Checking...' : (backendReachable ? 'Reachable' : 'Unreachable')}</Text>
+        </View>
+        <View style={{ justifyContent: 'center' }}>
+          <TouchableOpacity onPress={() => { setBackendInput(backendOverride || BACKEND_URL); setBackendModalVisible(true); }} style={styles.smallButton}>
+            <Text style={{ color: theme.card }}>Edit</Text>
+          </TouchableOpacity>
+          <TouchableOpacity onPress={() => clearBackendOverride()} style={[styles.smallButton, { marginTop: 8, backgroundColor: theme.background }] }>
+            <Text style={{ color: theme.primary }}>Clear</Text>
+          </TouchableOpacity>
+        </View>
 
-          <Modal visible={backendModalVisible} transparent animationType="slide">
-            <View style={styles.modalOverlay}>
-              <View style={[styles.modalContent, { backgroundColor: theme.card }]}>
-                <Text style={[styles.modalTitle, { color: theme.text }]}>Set Backend URL</Text>
-                <TextInput
-                  value={backendInput}
-                  onChangeText={setBackendInput}
-                  placeholder="http://10.0.0.1:5001"
-                  style={[styles.input, { color: theme.text, backgroundColor: theme.background }]}
-                  autoCapitalize="none"
-                />
-                <View style={{ flexDirection: 'row', justifyContent: 'flex-end', gap: 8 }}>
-                  <TouchableOpacity onPress={() => setBackendModalVisible(false)} style={[styles.smallButton, { backgroundColor: theme.background }]}>
-                    <Text style={{ color: theme.primary }}>Cancel</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity onPress={() => saveBackendOverride(backendInput)} style={styles.smallButton}>
-                    <Text style={{ color: theme.card }}>Save</Text>
-                  </TouchableOpacity>
-                </View>
+        <Modal 
+          visible={backendModalVisible && !alarmVisible} 
+          transparent 
+          animationType="slide"
+          statusBarTranslucent
+          hardwareAccelerated
+          onRequestClose={() => setBackendModalVisible(false)}
+        >
+          <View style={[styles.modalOverlay, { zIndex: 5000, elevation: 500 }]}>
+            <View style={[styles.modalContent, { backgroundColor: theme.card, zIndex: 5001, elevation: 501 }]}>
+              <Text style={[styles.modalTitle, { color: theme.text }]}>Set Backend URL</Text>
+              <TextInput
+                value={backendInput}
+                onChangeText={setBackendInput}
+                placeholder="http://10.0.0.1:5001"
+                style={[styles.input, { color: theme.text, backgroundColor: theme.background }]}
+                autoCapitalize="none"
+              />
+              <View style={{ flexDirection: 'row', justifyContent: 'flex-end', gap: 8 }}>
+                <TouchableOpacity onPress={() => setBackendModalVisible(false)} style={[styles.smallButton, { backgroundColor: theme.background }]}>
+                  <Text style={{ color: theme.primary }}>Cancel</Text>
+                </TouchableOpacity>
+                <TouchableOpacity onPress={() => saveBackendOverride(backendInput)} style={styles.smallButton}>
+                  <Text style={{ color: theme.card }}>Save</Text>
+                </TouchableOpacity>
               </View>
             </View>
-          </Modal>
-        </View>
-      ) : null}
+          </View>
+        </Modal>
+      </View>
 
         {/* Current Scheduled Section - Dropdown */}
       <View style={[styles.scheduleSection, { backgroundColor: theme.card }]}> 

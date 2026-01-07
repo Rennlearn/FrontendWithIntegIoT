@@ -32,7 +32,7 @@ app = FastAPI(title="PillNow Verifier", version="0.1.0")
 
 # Load models on startup
 MODEL_DIR = Path(__file__).parent / "models"
-YOLO_MODEL_PATH = MODEL_DIR / "best2.pt"
+YOLO_MODEL_PATH = MODEL_DIR / "best_new.pt"
 KNN_MODEL_PATH = MODEL_DIR / "knn_pills_2.pkl"
 
 yolo_model = None
@@ -59,42 +59,46 @@ async def load_models():
         else:
             print(f"Warning: YOLOv8 model not found at {YOLO_MODEL_PATH}")
             
-        # Load KNN classifier
-        if KNN_MODEL_PATH.exists():
-            print(f"Loading KNN model from {KNN_MODEL_PATH}")
-            try:
-                # Some sklearn artifacts are saved with joblib, others with raw pickle.
-                # Your `knn_pills_2.pkl` loads via joblib but fails with pickle.
-                knn_data = None
-                try:
-                    with open(KNN_MODEL_PATH, 'rb') as f:
-                        knn_data = pickle.load(f)
-                except Exception as pickle_err:
-                    try:
-                        import joblib  # type: ignore
-                        knn_data = joblib.load(str(KNN_MODEL_PATH))
-                        print(f"KNN model loaded via joblib (pickle failed: {pickle_err})")
-                    except Exception as joblib_err:
-                        raise Exception(f"Failed to load KNN model. pickle_err={pickle_err} joblib_err={joblib_err}")
-
-                    # Handle different KNN model formats
-                    if isinstance(knn_data, dict):
-                        knn_model = knn_data.get('model') or knn_data.get('classifier') or knn_data.get('knn')
-                        knn_scaler = knn_data.get('scaler') or knn_data.get('feature_scaler')
-                        print(f"KNN model loaded: {type(knn_model)}")
-                        if knn_scaler:
-                            print("KNN scaler loaded")
-                    elif hasattr(knn_data, 'predict'):  # Direct KNN model
-                        knn_model = knn_data
-                        print("KNN model loaded (direct)")
-                    else:
-                        print(f"Warning: Unknown KNN model format: {type(knn_data)}")
-                        knn_model = None
-            except Exception as e:
-                print(f"Error loading KNN model: {e}")
-                knn_model = None
-        else:
-            print(f"Warning: KNN model not found at {KNN_MODEL_PATH}")
+        # Load KNN classifier - DISABLED FOR TESTING (YOLO only)
+        # KNN verification is disabled to test YOLO-only performance
+        knn_model = None
+        knn_scaler = None
+        print("KNN model loading disabled - using YOLO only for testing")
+        # if KNN_MODEL_PATH.exists():
+        #     print(f"Loading KNN model from {KNN_MODEL_PATH}")
+        #     try:
+        #         # Some sklearn artifacts are saved with joblib, others with raw pickle.
+        #         # Your `knn_pills_2.pkl` loads via joblib but fails with pickle.
+        #         knn_data = None
+        #         try:
+        #             with open(KNN_MODEL_PATH, 'rb') as f:
+        #                 knn_data = pickle.load(f)
+        #         except Exception as pickle_err:
+        #             try:
+        #                 import joblib  # type: ignore
+        #                 knn_data = joblib.load(str(KNN_MODEL_PATH))
+        #                 print(f"KNN model loaded via joblib (pickle failed: {pickle_err})")
+        #             except Exception as joblib_err:
+        #                 raise Exception(f"Failed to load KNN model. pickle_err={pickle_err} joblib_err={joblib_err}")
+        #
+        #             # Handle different KNN model formats
+        #             if isinstance(knn_data, dict):
+        #                 knn_model = knn_data.get('model') or knn_data.get('classifier') or knn_data.get('knn')
+        #                 knn_scaler = knn_data.get('scaler') or knn_data.get('feature_scaler')
+        #                 print(f"KNN model loaded: {type(knn_model)}")
+        #                 if knn_scaler:
+        #                     print("KNN scaler loaded")
+        #             elif hasattr(knn_data, 'predict'):  # Direct KNN model
+        #                 knn_model = knn_data
+        #                 print("KNN model loaded (direct)")
+        #             else:
+        #                 print(f"Warning: Unknown KNN model format: {type(knn_data)}")
+        #                 knn_model = None
+        #     except Exception as e:
+        #         print(f"Error loading KNN model: {e}")
+        #         knn_model = None
+        # else:
+        #     print(f"Warning: KNN model not found at {KNN_MODEL_PATH}")
             
     except Exception as e:
         print(f"Error loading models: {e}")
@@ -305,8 +309,11 @@ async def verify(image: UploadFile = File(...), expected: str = Form("{}")):
         if hasattr(yolo_model, 'names'):
             print(f"[YOLO DEBUG] Model classes: {yolo_model.names}")
         
-        # Run YOLOv8 detection with higher confidence threshold to reduce false positives
-        results = yolo_model(img_cv, conf=0.3, verbose=True)  # Increased to 0.3 to reduce false positives
+        # Run YOLOv8 detection with optimized parameters for precision and accuracy
+        # conf: confidence threshold (0.3 = balanced precision/recall)
+        # iou: IoU threshold for NMS (0.45 = standard, helps remove overlapping detections)
+        # verbose: print detailed detection info
+        results = yolo_model(img_cv, conf=0.3, iou=0.45, verbose=True)
         
         # Process detection results and filter duplicates
         all_detections: List[Dict[str, Any]] = []
@@ -460,7 +467,7 @@ async def verify(image: UploadFile = File(...), expected: str = Form("{}")):
         # Determine if verification passes
         # PillNow requirement: alert when pill TYPE is wrong OR pill COUNT is wrong.
         # IMPORTANT: If container should have ONLY one type of pill, ANY foreign pill = MISMATCH
-        confidence_threshold = 0.3  # Lower threshold to allow more detections
+        confidence_threshold = 0.3  # Confidence threshold for verification (matches YOLO conf parameter)
         
         # Initialize pass_ based on confidence and basic detection
         pass_ = detected_count > 0 and confidence >= confidence_threshold
@@ -525,19 +532,17 @@ async def verify(image: UploadFile = File(...), expected: str = Form("{}")):
         print(f"   confidence = {confidence:.2f}")
         print(f"   ==========================================")
         
-        # KNN verification: Use KNN as secondary verification if available
-        # KNN provides additional confidence by analyzing pill features (color, shape, texture)
-        #
-        # We track:
-        # - attempted: number of YOLO ROIs we attempted to classify
-        # - successful: number of ROIs that produced a KNN class prediction
-        # - results: detailed per-ROI outcomes (including skipped reasons)
+        # KNN verification: DISABLED FOR TESTING (YOLO only)
+        # KNN verification is disabled to test YOLO-only performance
         knn_verification_results = []
-        knn_foreign_pills = []  # Track foreign pills detected by KNN
+        knn_foreign_pills = []
         knn_attempted = 0
         knn_successful = 0
         
-        if knn_model is not None and len(filtered_detections) > 0:
+        # Skip KNN verification - using YOLO only
+        print("[KNN DEBUG] KNN verification disabled - using YOLO only for testing")
+        
+        if False and knn_model is not None and len(filtered_detections) > 0:  # Disabled
             print(f"[KNN DEBUG] ========== KNN VERIFICATION ==========")
             print(f"[KNN DEBUG] Expected pill type: '{expected_label or 'any'}'")
             try:
@@ -688,11 +693,11 @@ async def verify(image: UploadFile = File(...), expected: str = Form("{}")):
                 print(f"[KNN DEBUG] Error during KNN verification: {e}")
                 import traceback
                 print(traceback.format_exc())
-        else:
-            if knn_model is None:
-                print(f"[KNN DEBUG] KNN model not available - using YOLO only")
-            else:
-                print(f"[KNN DEBUG] No detections to verify with KNN")
+        # else:
+        #     if knn_model is None:
+        #         print(f"[KNN DEBUG] KNN model not available - using YOLO only")
+        #     else:
+        #         print(f"[KNN DEBUG] No detections to verify with KNN")
         
     except Exception as e:
         import traceback

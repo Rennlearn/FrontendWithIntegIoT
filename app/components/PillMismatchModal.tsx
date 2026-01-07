@@ -109,6 +109,8 @@ const PillMismatchModal: React.FC<PillMismatchModalProps> = ({
       visible={visible}
       transparent
       animationType="fade"
+      statusBarTranslucent
+      hardwareAccelerated
       onRequestClose={handleStopBuzzer}
     >
       <View style={styles.overlay}>
@@ -185,9 +187,11 @@ const PillMismatchModal: React.FC<PillMismatchModalProps> = ({
 const styles = StyleSheet.create({
   overlay: {
     flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.7)',
+    backgroundColor: 'rgba(0, 0, 0, 0.8)',
     justifyContent: 'center',
     alignItems: 'center',
+    zIndex: 10000,
+    elevation: 1000,
   },
   modalContainer: {
     width: '85%',
@@ -198,7 +202,8 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 5 },
     shadowOpacity: 0.3,
     shadowRadius: 10,
-    elevation: 10,
+    elevation: 1001,
+    zIndex: 10001,
   },
   iconContainer: {
     marginBottom: 20,

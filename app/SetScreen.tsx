@@ -678,28 +678,80 @@ const SetScreen = () => {
         headers['Authorization'] = `Bearer ${token.trim()}`;
       }
       
-      // NOTE: We no longer delete old schedules when adding new ones
-      // This allows users to have multiple schedules and add new ones without losing existing ones
-      // Old schedules will only be deleted if they are explicitly marked as "Missed" or "Done" and are older than 5 minutes
-      // (handled by MonitorManageScreen auto-deletion logic)
+      // Check for existing schedules to prevent duplicates
+      // Load existing schedules for the user to check for duplicates
+      let existingSchedules: any[] = [];
+      try {
+        const existingResponse = await fetch('https://pillnow-database.onrender.com/api/medication_schedules', {
+          headers,
+        });
+        if (existingResponse.ok) {
+          const existingData = await existingResponse.json();
+          const allSchedules = existingData.data || [];
+          // Filter schedules for the current user (or selected elder if caregiver)
+          existingSchedules = allSchedules.filter((s: any) => {
+            const scheduleUserIdNum = parseInt(s.user);
+            const scheduleUserIdStr = s.user?.toString?.() || '';
+            return (
+              scheduleUserIdStr === String(scheduleUserId) ||
+              scheduleUserIdNum === scheduleUserId
+            );
+          });
+          console.log(`[SetScreen] Found ${existingSchedules.length} existing schedule(s) for user ${scheduleUserId}`);
+        }
+      } catch (err) {
+        console.warn('[SetScreen] Failed to load existing schedules (non-critical):', err);
+        // Continue anyway - we'll just create new schedules
+      }
       
-      // Now send each new schedule record with timeout
-      const promises = scheduleRecords.map(record => {
+      // Process each schedule record - update existing or create new
+      const promises = scheduleRecords.map(async (record, index) => {
+        // Check if there's an existing schedule with the same user, container, medication, date, and time
+        const existingSchedule = existingSchedules.find((existing: any) => 
+          existing.user === record.user &&
+          existing.container === record.container && 
+          existing.medication === record.medication &&
+          existing.date === record.date &&
+          existing.time === record.time
+        );
+        
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 15000); // 15 second timeout per request
         
-        return fetch('https://pillnow-database.onrender.com/api/medication_schedules', {
-          method: 'POST',
-          headers,
-          body: JSON.stringify(record),
-          signal: controller.signal,
-        }).then(response => {
-          clearTimeout(timeoutId);
-          return response;
-        }).catch(err => {
-          clearTimeout(timeoutId);
-          throw err;
-        });
+        if (existingSchedule) {
+          // Update existing schedule using PUT to prevent duplicates
+          console.log(`[SetScreen] Updating existing schedule ${index + 1}/${scheduleRecords.length} (ID: ${existingSchedule._id})`);
+          return fetch(`https://pillnow-database.onrender.com/api/medication_schedules/${existingSchedule._id}`, {
+            method: 'PUT',
+            headers,
+            body: JSON.stringify({
+              ...record,
+              scheduleId: existingSchedule.scheduleId // Keep the existing scheduleId
+            }),
+            signal: controller.signal,
+          }).then(response => {
+            clearTimeout(timeoutId);
+            return response;
+          }).catch(err => {
+            clearTimeout(timeoutId);
+            throw err;
+          });
+        } else {
+          // Create new schedule using POST
+          console.log(`[SetScreen] Creating new schedule ${index + 1}/${scheduleRecords.length}`);
+          return fetch('https://pillnow-database.onrender.com/api/medication_schedules', {
+            method: 'POST',
+            headers,
+            body: JSON.stringify(record),
+            signal: controller.signal,
+          }).then(response => {
+            clearTimeout(timeoutId);
+            return response;
+          }).catch(err => {
+            clearTimeout(timeoutId);
+            throw err;
+          });
+        }
       });
       
       const responses = await Promise.allSettled(promises);
@@ -842,6 +894,24 @@ const SetScreen = () => {
               });
               clearTimeout(timeoutId);
               console.log(`[SetScreen] ✅ Saved pill config and ${schedulesArray.length} schedule(s) for ${containerId}`);
+              
+              // CRITICAL: Also sync to backend alarm system after saving
+              // This ensures alarms fire correctly
+              try {
+                const syncResponse = await fetch(`${BACKEND_URL}/sync-schedules-from-database`, {
+                  method: 'POST',
+                  headers: {
+                    'Content-Type': 'application/json',
+                    ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
+                  },
+                });
+                if (syncResponse.ok) {
+                  const syncData = await syncResponse.json();
+                  console.log(`[SetScreen] ✅ Synced schedules to backend alarm system (${syncData.synced_containers} container(s))`);
+                }
+              } catch (syncErr) {
+                console.warn('[SetScreen] ⚠️ Failed to sync schedules to backend alarm system:', syncErr);
+              }
             } catch (err) {
               clearTimeout(timeoutId);
               throw err;
@@ -981,7 +1051,7 @@ const SetScreen = () => {
               if (captureResult.message && captureResult.message.toLowerCase().includes('backend unreachable')) {
                 Alert.alert(
                   'Backend Unreachable',
-                  'The backend could not be reached. You can set a backend override in the Monitor screen (DEV) or ensure the backend is running on your machine (port 5001).',
+                  'The backend could not be reached. You can set a backend override in the Monitor screen or ensure the backend is running on your machine (port 5001).',
                   [
                     { text: 'Open Monitor', onPress: () => { try { navigation.navigate('MonitorManageScreen' as never); } catch (e) { } } },
                     { text: 'OK' }

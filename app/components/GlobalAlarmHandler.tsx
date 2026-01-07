@@ -519,11 +519,65 @@ export default function GlobalAlarmHandler() {
 
   useEffect(() => {
     let active = true;
+    let httpPollInterval: any = null;
+    let lastPollTimestamp = Date.now();
 
     // If Bluetooth is not connected, we still keep handler mounted; it will just not receive.
-    BluetoothService.isConnectionActive().then((isConnected) => {
+    BluetoothService.isConnectionActive().then(async (isConnected) => {
       if (!isConnected) {
-        console.warn('[GlobalAlarmHandler] Bluetooth not connected; alarms/mismatch modals require HC-05 connection.');
+        console.warn('[GlobalAlarmHandler] Bluetooth not connected; using HTTP polling as fallback for alarms/mismatch modals.');
+        
+        // Start HTTP polling as fallback when Bluetooth unavailable
+        const pollAlarmEvents = async () => {
+          if (!active) return;
+          try {
+            const base = await verificationService.getBackendUrl();
+            const response = await fetch(`${base}/alarm-events?since=${lastPollTimestamp}`);
+            if (response.ok) {
+              const data = await response.json();
+              if (data.events && Array.isArray(data.events)) {
+                for (const event of data.events) {
+                  if (event.timestamp > lastPollTimestamp) {
+                    lastPollTimestamp = event.timestamp;
+                  }
+                  
+                  if (event.type === 'alarm_triggered') {
+                    const containerNum = parseInt(event.container.replace('container', ''));
+                    const timeStr = event.time || '00:00';
+                    console.log(`[GlobalAlarmHandler] 📨 HTTP Poll: ALARM_TRIGGERED for Container ${containerNum} at ${timeStr}`);
+                    
+                    // Process alarm same as Bluetooth message
+                    if (pendingMismatchTimerRef.current) {
+                      clearTimeout(pendingMismatchTimerRef.current);
+                      pendingMismatchTimerRef.current = null;
+                    }
+                    if (pillMismatchVisibleRef.current) setPillMismatchVisibleSafe(false);
+                    
+                    const wasAdded = addAlarmToQueue(containerNum, timeStr);
+                    if (wasAdded && !alarmVisibleRef.current) {
+                      showNextAlarmFromQueue();
+                    }
+                  } else if (event.type === 'pill_mismatch') {
+                    const containerNum = parseInt((event.container || 'container1').replace('container', ''));
+                    console.log(`[GlobalAlarmHandler] 📨 HTTP Poll: PILLALERT for Container ${containerNum}`);
+                    
+                    if (alarmVisibleRef.current) {
+                      pendingMismatchRef.current = { container: containerNum, ts: Date.now() };
+                    } else {
+                      showMismatchForContainer(containerNum).catch(() => {});
+                    }
+                  }
+                }
+              }
+            }
+          } catch (err) {
+            console.warn('[GlobalAlarmHandler] HTTP polling error:', err);
+          }
+        };
+        
+        // Poll every 2 seconds when Bluetooth unavailable
+        httpPollInterval = setInterval(pollAlarmEvents, 2000);
+        pollAlarmEvents(); // Initial poll
       }
     });
 
@@ -707,6 +761,10 @@ export default function GlobalAlarmHandler() {
 
     return () => {
       active = false;
+      if (httpPollInterval) {
+        clearInterval(httpPollInterval);
+        httpPollInterval = null;
+      }
       try {
         if (pendingMismatchTimerRef.current) {
           clearTimeout(pendingMismatchTimerRef.current);
@@ -725,10 +783,15 @@ export default function GlobalAlarmHandler() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // CRITICAL: Ensure only one modal shows at a time
+  // Alarm modal has priority over mismatch modal
+  const shouldShowAlarm = alarmVisible;
+  const shouldShowMismatch = pillMismatchVisible && !alarmVisible; // Only show if alarm is not visible
+
   return (
     <>
       <AlarmModal
-        visible={alarmVisible}
+        visible={shouldShowAlarm}
         container={alarmContainer}
         time={alarmTime}
         remainingAlarms={remainingAlarms}
@@ -749,7 +812,7 @@ export default function GlobalAlarmHandler() {
       />
 
       <PillMismatchModal
-        visible={pillMismatchVisible}
+        visible={shouldShowMismatch}
         container={pillMismatchContainer}
         expectedLabel={pillMismatchExpected}
         detectedLabels={pillMismatchDetected}

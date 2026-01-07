@@ -17,12 +17,12 @@ static const char* WIFI_SSID = "YOUR_WIFI_SSID";      // <-- set this to your Wi
 static const char* WIFI_PASS = "YOUR_WIFI_PASSWORD";  // <-- set this to your WiFi password
 
 // IMPORTANT: Use your Mac's current LAN IP so ESP32-CAM can reach it.
-// Mac LAN IP (en0): 10.128.151.91 (UPDATE THIS if your Mac's IP changes!)
-static const char* MQTT_HOST = "10.128.151.91";    // Mosquitto/Broker host
+// Mac LAN IP (en0): 10.165.11.91 (Auto-config service will update this via MQTT if IP changes)
+static const char* MQTT_HOST = "10.165.11.91";    // Mosquitto/Broker host
 static const uint16_t MQTT_PORT = 1883;
 
 // Node backend (uploads to /ingest/:deviceId/:container)
-static const char* BACKEND_HOST = "10.128.151.91"; // Node backend host
+static const char* BACKEND_HOST = "10.165.11.91"; // Node backend host
 static const uint16_t BACKEND_PORT = 5001;         // Node backend port (avoid AirTunes conflict)
 
 static const char* DEVICE_ID = "container2";         // Unique per ESP32-CAM: container1|container2|container3
@@ -330,11 +330,21 @@ static void handleMqttMessage(char* topic, byte* payload, unsigned int length) {
     }
 
     if (changed) {
-      // Apply changes by updating MQTT server and forcing reconnect
-      Serial.println("🔧 Config changed — applying and reconnecting MQTT");
+      // Apply changes by updating MQTT server and forcing immediate reconnect
+      Serial.println("🔧 Config changed — applying and reconnecting MQTT immediately");
+      Serial.print("   New MQTT: "); Serial.print(cfgMqttHost); Serial.print(":"); Serial.println(cfgMqttPort);
+      Serial.print("   New Backend: "); Serial.print(cfgBackendHost); Serial.print(":"); Serial.println(cfgBackendPort);
+      
+      // Disconnect and update server settings
       mqttClient.disconnect();
       mqttClient.setServer(cfgMqttHost.c_str(), cfgMqttPort);
-      // publish new status (done when reconnected in ensureMqtt)
+      
+      // Force immediate reconnection (don't wait for loop to call ensureMqtt)
+      Serial.println("🔄 Forcing immediate MQTT reconnection...");
+      ensureMqtt();
+      
+      // Log that config is now active
+      Serial.println("✅ New IP configuration is now active!");
     } else {
       Serial.println("ℹ️ Config message received but no change detected");
     }

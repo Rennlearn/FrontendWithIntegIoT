@@ -134,13 +134,29 @@ main() {
         exit 1
     fi
     
-    # Check if MQTT broker is running (Mosquitto)
+    # Check and start MQTT broker (Mosquitto)
     if ! check_port 1883; then
-        print_warning "MQTT broker (port 1883) is not running."
-        print_warning "Please start Mosquitto MQTT broker first:"
-        print_warning "  brew services start mosquitto  (macOS)"
-        print_warning "  sudo systemctl start mosquitto  (Linux)"
-        print_warning "Continuing anyway, but MQTT features may not work..."
+        print_warning "MQTT broker (port 1883) is not running. Attempting to start..."
+        if command -v brew &> /dev/null; then
+            # macOS with Homebrew
+            brew services start mosquitto 2>/dev/null || {
+                print_warning "Failed to start via brew. Trying direct start..."
+                mosquitto -d 2>/dev/null || print_error "Could not start Mosquitto. Please start manually: brew services start mosquitto"
+            }
+            sleep 2
+        elif command -v systemctl &> /dev/null; then
+            # Linux with systemd
+            sudo systemctl start mosquitto 2>/dev/null || print_error "Could not start Mosquitto. Please start manually: sudo systemctl start mosquitto"
+            sleep 2
+        else
+            print_error "Could not auto-start Mosquitto. Please start it manually."
+        fi
+        
+        if check_port 1883; then
+            print_success "MQTT broker started and running on port 1883"
+        else
+            print_error "MQTT broker failed to start. MQTT features will not work!"
+        fi
     else
         print_success "MQTT broker is running on port 1883"
     fi
@@ -149,17 +165,52 @@ main() {
     print_status "Starting services..."
     echo ""
     
-    # Start Backend Server (Node.js)
-    start_service "backend" \
-        "cd '$SCRIPT_DIR' && node backend/server.js" \
-        "5001"
-    
-    sleep 2
-    
-    # Start Verifier Service (FastAPI/Python)
-    start_service "verifier" \
-        "cd '$SCRIPT_DIR' && python3 -m uvicorn backend.verifier.main:app --host 0.0.0.0 --port 8000" \
-        "8000"
+    # Start Backend Server (Node.js) - Using PM2 if available, otherwise direct
+    if command -v pm2 &> /dev/null; then
+        print_status "Using PM2 to manage backend and verifier services..."
+        
+        # Start Backend with PM2
+        if pm2 list | grep -q "pillnow-backend"; then
+            print_status "Backend already in PM2, restarting..."
+            pm2 restart pillnow-backend 2>/dev/null || {
+                print_status "Starting backend with PM2..."
+                cd "$SCRIPT_DIR" && pm2 start backend/server.js --name pillnow-backend --no-autorestart
+            }
+        else
+            print_status "Starting backend with PM2..."
+            cd "$SCRIPT_DIR" && pm2 start backend/server.js --name pillnow-backend --no-autorestart
+        fi
+        
+        sleep 2
+        
+        # Start Verifier with PM2
+        if pm2 list | grep -q "pillnow-verifier"; then
+            print_status "Verifier already in PM2, restarting..."
+            pm2 restart pillnow-verifier 2>/dev/null || {
+                print_status "Starting verifier with PM2..."
+                cd "$SCRIPT_DIR" && pm2 start "python3 -m uvicorn backend.verifier.main:app --host 0.0.0.0 --port 8000" --name pillnow-verifier --interpreter python3 --no-autorestart
+            }
+        else
+            print_status "Starting verifier with PM2..."
+            cd "$SCRIPT_DIR" && pm2 start "python3 -m uvicorn backend.verifier.main:app --host 0.0.0.0 --port 8000" --name pillnow-verifier --interpreter python3 --no-autorestart
+        fi
+        
+        sleep 2
+    else
+        # Fallback to direct start if PM2 not available
+        print_warning "PM2 not found, starting services directly..."
+        start_service "backend" \
+            "cd '$SCRIPT_DIR' && node backend/server.js" \
+            "5001"
+        
+        sleep 2
+        
+        start_service "verifier" \
+            "cd '$SCRIPT_DIR' && python3 -m uvicorn backend.verifier.main:app --host 0.0.0.0 --port 8000" \
+            "8000"
+        
+        sleep 2
+    fi
     
     sleep 2
     
@@ -167,6 +218,22 @@ main() {
     start_service "arduino_bridge" \
         "cd '$SCRIPT_DIR' && python3 backend/arduino_alert_bridge.py" \
         ""
+    
+    sleep 2
+    
+    # Start ESP32-CAM Auto-Config Service (monitors IP changes and updates ESP32-CAM devices)
+    if ! pgrep -f "auto_update_esp32_config.sh" > /dev/null; then
+        print_status "Starting ESP32-CAM Auto-Config Service..."
+        "$SCRIPT_DIR/scripts/start_auto_config.sh" > /dev/null 2>&1
+        sleep 1
+        if pgrep -f "auto_update_esp32_config.sh" > /dev/null; then
+            print_success "ESP32-CAM Auto-Config Service started"
+        else
+            print_warning "ESP32-CAM Auto-Config Service failed to start (check logs)"
+        fi
+    else
+        print_success "ESP32-CAM Auto-Config Service already running"
+    fi
     
     sleep 2
     
@@ -180,13 +247,19 @@ main() {
     if check_port 5001; then
         print_success "✓ Backend Server running on http://localhost:5001"
     else
-        print_error "✗ Backend Server not running"
+        print_error "✗ Backend Server not running (check logs or PM2: pm2 logs pillnow-backend)"
     fi
     
     if check_port 8000; then
         print_success "✓ Verifier Service running on http://localhost:8000"
     else
-        print_error "✗ Verifier Service not running"
+        print_error "✗ Verifier Service not running (check logs or PM2: pm2 logs pillnow-verifier)"
+    fi
+    
+    if check_port 1883; then
+        print_success "✓ MQTT Broker running on port 1883"
+    else
+        print_error "✗ MQTT Broker not running"
     fi
     
     if pgrep -f "arduino_alert_bridge.py" > /dev/null; then

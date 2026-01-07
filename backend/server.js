@@ -416,6 +416,131 @@ const triggerLimiter = rateLimit({
 
 app.get("/health", (_req, res) => res.json({ ok: true }));
 app.get("/test", (_req, res) => res.json({ ok: true, mqtt: mqttClient.connected, verifier: VERIFIER_URL }));
+
+/**
+ * GET /current-ip
+ * Returns the current Mac IP address for automatic backend URL configuration
+ */
+app.get("/current-ip", (_req, res) => {
+  try {
+    const os = require('os');
+    const interfaces = os.networkInterfaces();
+    let ip = null;
+    
+    // Find the primary network interface (usually en0 on Mac)
+    // Try en0 first (primary WiFi on Mac), then en1, then any en* interface
+    const interfaceNames = Object.keys(interfaces || {});
+    const primaryInterface = interfaceNames.find(name => 
+      name.startsWith('en') && !name.includes('bridge') && !name.includes('loopback')
+    ) || interfaceNames.find(name => name.startsWith('en')) || interfaceNames[0];
+    
+    if (primaryInterface && interfaces[primaryInterface]) {
+      const ifaceList = Array.isArray(interfaces[primaryInterface]) 
+        ? interfaces[primaryInterface] 
+        : [interfaces[primaryInterface]];
+      
+      for (const iface of ifaceList) {
+        // Handle both 'IPv4' and 4 (numeric family code)
+        const isIPv4 = iface.family === 'IPv4' || iface.family === 4;
+        if (isIPv4 && !iface.internal) {
+          ip = iface.address;
+          break;
+        }
+      }
+    }
+    
+    // Fallback: try all interfaces if primary didn't work
+    if (!ip) {
+      for (const name of interfaceNames) {
+        if (name.includes('loopback') || name.includes('bridge')) continue;
+        const ifaceList = Array.isArray(interfaces[name]) ? interfaces[name] : [interfaces[name]];
+        for (const iface of ifaceList) {
+          const isIPv4 = iface.family === 'IPv4' || iface.family === 4;
+          if (isIPv4 && !iface.internal) {
+            ip = iface.address;
+            break;
+          }
+        }
+        if (ip) break;
+      }
+    }
+    
+    if (ip) {
+      return res.json({ 
+        ok: true, 
+        ip, 
+        backend_url: `http://${ip}:${PORT}`,
+        port: PORT 
+      });
+    } else {
+      // Last resort: try to get from req connection (might be localhost though)
+      const reqIp = req.connection?.remoteAddress || req.socket?.remoteAddress || req.ip;
+      if (reqIp && reqIp !== '127.0.0.1' && reqIp !== '::1') {
+        return res.json({ 
+          ok: true, 
+          ip: reqIp, 
+          backend_url: `http://${reqIp}:${PORT}`,
+          port: PORT,
+          note: 'Using request IP (may not be accurate)'
+        });
+      }
+      return res.status(500).json({ ok: false, message: 'Could not detect IP address', interfaces: interfaceNames });
+    }
+  } catch (e) {
+    return res.status(500).json({ ok: false, message: String(e?.message || e) });
+  }
+});
+
+/**
+ * GET /alarm-events
+ * Returns recent alarm and mismatch events for app polling (fallback when Bluetooth unavailable)
+ * Query params: since (timestamp in ms) - only return events after this time
+ */
+app.get("/alarm-events", (req, res) => {
+  const since = parseInt(String(req.query.since || '0')) || 0;
+  const events = [];
+  
+  // Get recent alarm triggers (from firedKeys)
+  const now = Date.now();
+  const recentWindow = 60000; // 1 minute window
+  
+  // Check for alarms that fired recently
+  for (const [key, firedAt] of firedKeys.entries()) {
+    if (firedAt > since && firedAt > now - recentWindow) {
+      const match = key.match(/^(container\d+)\|(\d{4}-\d{2}-\d{2})\|(\d{2}:\d{2})$/);
+      if (match) {
+        events.push({
+          type: 'alarm_triggered',
+          container: match[1],
+          date: match[2],
+          time: match[3],
+          timestamp: firedAt
+        });
+      }
+    }
+  }
+  
+  // Get recent pill mismatches (from notifications)
+  if (state.notifications) {
+    for (const note of state.notifications) {
+      if (note.timestamp && new Date(note.timestamp).getTime() > since) {
+        if (note.type === 'pill_mismatch' || (note.message && note.message.includes('mismatch'))) {
+          events.push({
+            type: 'pill_mismatch',
+            container: note.container || 'unknown',
+            data: note,
+            timestamp: new Date(note.timestamp).getTime()
+          });
+        }
+      }
+    }
+  }
+  
+  // Sort by timestamp (newest first)
+  events.sort((a, b) => b.timestamp - a.timestamp);
+  
+  return res.json({ ok: true, events, count: events.length });
+});
 app.get('/metrics', (_req, res) => res.json({ ok: true, metrics }));
 
 function isValidEmail(email) {
@@ -775,6 +900,106 @@ app.post("/set-schedule", (req, res) => {
 });
 
 /**
+ * POST /sync-schedules-from-database
+ * Syncs schedules from the database to backend state.containers for alarm firing
+ * This ensures alarms work even after backend restart
+ */
+app.post("/sync-schedules-from-database", async (req, res) => {
+  try {
+    const base = "https://pillnow-database.onrender.com";
+    const token = req.headers.authorization?.replace('Bearer ', '') || req.body?.token;
+    
+    // Fetch all schedules from database
+    const headers = { 'Content-Type': 'application/json' };
+    if (token) {
+      headers['Authorization'] = `Bearer ${token}`;
+    }
+    
+    const response = await fetch(`${base}/api/medication_schedules`, { headers });
+    if (!response.ok) {
+      return res.status(response.status).json({ ok: false, message: `Database fetch failed: ${response.status}` });
+    }
+    
+    const data = await response.json();
+    const allSchedules = Array.isArray(data) ? data : (data?.data || []);
+    
+    console.log(`[backend] 🔄 Syncing ${allSchedules.length} schedule(s) from database to state.containers...`);
+    
+    // Group schedules by container and user
+    const containerMap = new Map(); // containerId -> { schedules: [], pill_config: {}, notify_email: "" }
+    
+    for (const schedule of allSchedules) {
+      const containerNum = parseInt(schedule.container) || 1;
+      const containerId = `container${containerNum}`;
+      
+      if (!containerMap.has(containerId)) {
+        // Get existing state or initialize
+        const existing = state.containers[containerId] || { pill_config: { count: 0 }, times: [], schedules: [], notify_email: "" };
+        containerMap.set(containerId, {
+          pill_config: existing.pill_config,
+          schedules: [],
+          notify_email: existing.notify_email,
+        });
+      }
+      
+      const container = containerMap.get(containerId);
+      
+      // Add schedule if it has date and time
+      if (schedule.date && schedule.time) {
+        container.schedules.push({
+          date: normalizeYyyyMmDd(schedule.date),
+          time: normalizeHhMm(schedule.time),
+        });
+      }
+      
+      // Update pill_config from medication if available
+      if (schedule.medication) {
+        // Try to fetch medication details
+        try {
+          const medResponse = await fetch(`${base}/api/medications/${schedule.medication}`, { headers });
+          if (medResponse.ok) {
+            const med = await medResponse.json();
+            if (med?.name) {
+              container.pill_config = {
+                count: container.pill_config?.count || 1,
+                label: med.name,
+              };
+            }
+          }
+        } catch (e) {
+          // Ignore medication fetch errors
+        }
+      }
+    }
+    
+    // Update state.containers with synced data
+    let syncedCount = 0;
+    for (const [containerId, data] of containerMap.entries()) {
+      state.containers[containerId] = {
+        pill_config: data.pill_config,
+        times: [], // Legacy format - not used if schedules are present
+        schedules: data.schedules,
+        notify_email: data.notify_email,
+      };
+      syncedCount++;
+      console.log(`[backend] ✅ Synced ${data.schedules.length} schedule(s) for ${containerId}`);
+    }
+    
+    saveStateSoon();
+    
+    return res.json({ 
+      ok: true, 
+      synced_containers: syncedCount,
+      total_schedules: allSchedules.length,
+      containers: Object.keys(state.containers),
+    });
+  } catch (e) {
+    console.error('[backend] Error syncing schedules from database:', e);
+    return res.status(500).json({ ok: false, message: String(e?.message || e) });
+  }
+});
+
+/**
  * Get stored pill config for a container (used by AlarmModal + MonitorManageScreen).
  */
 app.get("/get-pill-config/:containerId", (req, res) => {
@@ -994,6 +1219,26 @@ app.post("/ingest/:deviceId/:container", upload.single("image"), async (req, res
 
   // If mismatch (pass_ === false), publish alert so Arduino buzzes (bridge -> PILLALERT)
   if (!pass_) {
+    // Store mismatch notification for HTTP polling fallback
+    const mismatchNote = {
+      type: 'pill_mismatch',
+      message: `Pill mismatch detected in ${containerId}. Expected: ${expected?.count || 0} x "${expected?.label || 'none'}", Detected: ${detectedCount} x "${detectedClasses.map(c => c.label).join(', ') || 'none'}"`,
+      container: containerId,
+      timestamp: new Date().toISOString(),
+      data: {
+        expected,
+        detected: detectedClasses,
+        count: detectedCount,
+        annotatedImagePath: resultPayload.annotatedImagePath,
+      }
+    };
+    state.notifications.push(mismatchNote);
+    // Keep only last 50 notifications to prevent memory bloat
+    if (state.notifications.length > 50) {
+      state.notifications = state.notifications.slice(-50);
+    }
+    saveStateSoon();
+    
     const expectedLabel = expected?.label || 'unknown';
     const detectedLabels = resultPayload.classesDetected.map(c => c.label).join(', ') || 'none';
     
@@ -1158,32 +1403,41 @@ setInterval(() => {
     setTimeout(() => {
       firedKeys.set(key, Date.now());
 
-      // Publish alarm trigger (bridge will forward to Arduino, app will show AlarmModal)
-      const alarmPublished = publishCmd(resolveDeviceId(containerId), {
-        action: "alarm_triggered",
-        container: containerId,
-        date,
-        time: hhmm,
-      });
-
-      console.log(`[backend] ⏰ alarm_triggered published for ${containerId} at ${hhmm} (published=${Boolean(alarmPublished)}) (${containersToFire.length} containers at same time, delay=${delay}ms, position ${index + 1}/${containersToFire.length})`);
-
-      // If configured, automatically request a capture after a short delay
+      // PRE-ALARM CAPTURE: Trigger BEFORE alarm fires (if configured)
+      // This captures the state BEFORE user takes the pill
       if (AUTO_CAPTURE_ON_ALARM) {
+        const expected = cfg?.pill_config || { count: 0 };
+        const preCapturePublished = publishCmd(resolveDeviceId(containerId), {
+          action: "capture",
+          container: containerId,
+          expected,
+        });
+        console.log(`[backend] 📸 PRE-ALARM capture requested for ${containerId} (before alarm fires), published=${Boolean(preCapturePublished)}`);
+        if (!preCapturePublished) {
+          const note = { type: 'error', message: `PRE-ALARM capture failed (MQTT) for ${containerId}`, container: containerId, timestamp: new Date().toISOString() };
+          state.notifications.push(note);
+          saveStateSoon();
+        }
+        // Small delay before alarm to ensure capture completes
         setTimeout(() => {
-          const expected = cfg?.pill_config || { count: 0 };
-          const capturePublished = publishCmd(resolveDeviceId(containerId), {
-            action: "capture",
+          // Publish alarm trigger (bridge will forward to Arduino, app will show AlarmModal)
+          const alarmPublished = publishCmd(resolveDeviceId(containerId), {
+            action: "alarm_triggered",
             container: containerId,
-            expected,
+            date,
+            time: hhmm,
           });
-          console.log(`[backend] 🤖 AUTO_CAPTURE_ON_ALARM: requested capture for ${containerId}, published=${Boolean(capturePublished)}`);
-          if (!capturePublished) {
-            const note = { type: 'error', message: `AUTO_CAPTURE failed (MQTT) for ${containerId}`, container: containerId, timestamp: new Date().toISOString() };
-            state.notifications.push(note);
-            saveStateSoon();
-          }
-        }, AUTO_CAPTURE_DELAY_MS + delay);
+          console.log(`[backend] ⏰ alarm_triggered published for ${containerId} at ${hhmm} (published=${Boolean(alarmPublished)}) (${containersToFire.length} containers at same time, delay=${delay}ms, position ${index + 1}/${containersToFire.length})`);
+        }, 1000); // 1 second delay after pre-capture before alarm fires
+      } else {
+        // No pre-capture: publish alarm immediately
+        const alarmPublished = publishCmd(resolveDeviceId(containerId), {
+          action: "alarm_triggered",
+          container: containerId,
+          date,
+          time: hhmm,
+        });
+        console.log(`[backend] ⏰ alarm_triggered published for ${containerId} at ${hhmm} (published=${Boolean(alarmPublished)}) (${containersToFire.length} containers at same time, delay=${delay}ms, position ${index + 1}/${containersToFire.length})`);
       }
 
       // Optional email reminder
@@ -1257,6 +1511,28 @@ app.post('/alarm/stopped/:containerId', async (req, res) => {
   }
 });
 
+// Auto-sync schedules from database on startup (non-blocking)
+// Note: This will fail without auth, but that's OK - app will sync when it loads schedules
+const syncSchedulesOnStartup = async () => {
+  try {
+    console.log('[backend] 🔄 Auto-syncing schedules from database on startup...');
+    const response = await fetch(`http://localhost:${PORT}/sync-schedules-from-database`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    if (response.ok) {
+      const data = await response.json();
+      console.log(`[backend] ✅ Auto-sync completed: ${data.synced_containers} container(s), ${data.total_schedules} schedule(s)`);
+    } else {
+      const errorData = await response.json().catch(() => ({ message: 'Unknown error' }));
+      console.warn(`[backend] ⚠️ Auto-sync failed: ${response.status} - ${errorData.message} (app will sync when schedules are loaded)`);
+    }
+  } catch (e) {
+    console.warn('[backend] ⚠️ Auto-sync error (non-critical, app will sync when schedules are loaded):', e?.message || e);
+  }
+};
+
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`[backend] listening on http://0.0.0.0:${PORT}`);
   console.log(`[backend] MQTT_BROKER_URL=${MQTT_BROKER_URL}`);
@@ -1269,6 +1545,9 @@ app.listen(PORT, "0.0.0.0", () => {
   } else {
     console.log(`[backend] SINGLE_CAMERA_DEVICE_ID not set`);
   }
+  
+  // Start auto-sync after a short delay to ensure server is ready
+  setTimeout(syncSchedulesOnStartup, 2000);
 });
 
 
