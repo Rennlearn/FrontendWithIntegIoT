@@ -199,15 +199,15 @@ main() {
     else
         # Fallback to direct start if PM2 not available
         print_warning "PM2 not found, starting services directly..."
-        start_service "backend" \
-            "cd '$SCRIPT_DIR' && node backend/server.js" \
-            "5001"
-        
-        sleep 2
-        
-        start_service "verifier" \
-            "cd '$SCRIPT_DIR' && python3 -m uvicorn backend.verifier.main:app --host 0.0.0.0 --port 8000" \
-            "8000"
+    start_service "backend" \
+        "cd '$SCRIPT_DIR' && node backend/server.js" \
+        "5001"
+    
+    sleep 2
+    
+    start_service "verifier" \
+        "cd '$SCRIPT_DIR' && python3 -m uvicorn backend.verifier.main:app --host 0.0.0.0 --port 8000" \
+        "8000"
         
         sleep 2
     fi

@@ -1056,14 +1056,29 @@ const MonitorManageScreen = () => {
         if (!mounted) return;
         setBackendOverride(override);
         
-        // Try to get current IP and auto-update
-        await autoUpdateBackendUrl();
-        
-        // Test reachability
-        const reachable = await testBackendReachable(5000); // Longer timeout for initial check
+        // First, test reachability with current URL (override or default)
+        const initialReachable = await testBackendReachable(5000); // Longer timeout for initial check
         if (!mounted) return;
-        setBackendReachable(reachable);
+        setBackendReachable(initialReachable);
+        
+        // If reachable, try to get current IP and auto-update
+        if (initialReachable) {
+          await autoUpdateBackendUrl();
+          // Test again after update
+          const reachable = await testBackendReachable(3000);
+          if (!mounted) return;
+          setBackendReachable(reachable);
+        } else {
+          // If not reachable, try to auto-update anyway (might discover new IP)
+          console.log('[MonitorManageScreen] Backend not reachable, attempting auto-update to discover new IP...');
+          await autoUpdateBackendUrl();
+          // Test again after update attempt
+          const reachable = await testBackendReachable(5000);
+          if (!mounted) return;
+          setBackendReachable(reachable);
+        }
       } catch (e) {
+        console.warn('[MonitorManageScreen] Error during initial load:', e);
         if (!mounted) return;
         setBackendReachable(false);
       }

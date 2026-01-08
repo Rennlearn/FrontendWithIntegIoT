@@ -483,7 +483,22 @@ const SetScreen = () => {
 
   // Save schedule data to database
   const saveScheduleData = async () => {
+    // Prevent multiple simultaneous saves
+    if (saving || verifying) {
+      console.warn('[SetScreen] Save already in progress, ignoring duplicate call');
+      return;
+    }
+    
     try {
+      // CRITICAL: Close all modals before saving to prevent overlaps
+      setPillModalVisible(false);
+      setAlarmModalVisible(false);
+      setConfirmModalVisible(false);
+      setWarningModalVisible(false);
+      
+      // Small delay to ensure modals are closed
+      await new Promise(resolve => setTimeout(resolve, 200));
+      
       setSaving(true);
       
       // Get selectedElderId once at the start
@@ -739,18 +754,18 @@ const SetScreen = () => {
         } else {
           // Create new schedule using POST
           console.log(`[SetScreen] Creating new schedule ${index + 1}/${scheduleRecords.length}`);
-          return fetch('https://pillnow-database.onrender.com/api/medication_schedules', {
-            method: 'POST',
-            headers,
-            body: JSON.stringify(record),
-            signal: controller.signal,
-          }).then(response => {
-            clearTimeout(timeoutId);
-            return response;
-          }).catch(err => {
-            clearTimeout(timeoutId);
-            throw err;
-          });
+        return fetch('https://pillnow-database.onrender.com/api/medication_schedules', {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(record),
+          signal: controller.signal,
+        }).then(response => {
+          clearTimeout(timeoutId);
+          return response;
+        }).catch(err => {
+          clearTimeout(timeoutId);
+          throw err;
+        });
         }
       });
       
@@ -1091,22 +1106,38 @@ const SetScreen = () => {
           
           setVerifying(false);
           
+          // CRITICAL: Close all modals before showing alerts to prevent overlaps
+          setPillModalVisible(false);
+          setAlarmModalVisible(false);
+          setConfirmModalVisible(false);
+          setWarningModalVisible(false);
+          
+          // Small delay to ensure modals are closed
+          await new Promise(resolve => setTimeout(resolve, 300));
+          
           // Check if any verification failed
           const failedVerifications = results.filter(r => r.success && !r.pass);
+          
+          // Build summary of alarms set per container
+          const alarmsSummary: string[] = [];
+          for (let containerNum = 1; containerNum <= 3; containerNum++) {
+            const alarmCount = alarms[containerNum as PillSlot].length;
+            if (alarmCount > 0) {
+              alarmsSummary.push(`Container ${containerNum}: ${alarmCount} alarm${alarmCount > 1 ? 's' : ''}`);
+            }
+          }
+          const summaryText = alarmsSummary.length > 0 
+            ? `\n\nAlarms set:\n${alarmsSummary.join('\n')}`
+            : '';
           
           if (failedVerifications.length > 0) {
             // Show alert for failed verifications
             const failedContainers = failedVerifications.map(r => `Container ${r.containerNum}`).join(', ');
             Alert.alert(
               'Verification Failed',
-              `The pills in ${failedContainers} do not match the expected configuration. Please check and retry.`,
+              `The pills in ${failedContainers} do not match the expected configuration. Please check and retry.${summaryText}`,
               [
                 { text: 'OK', onPress: () => {
-                  // Close modals first
-                  setPillModalVisible(false);
-                  setAlarmModalVisible(false);
-                  setConfirmModalVisible(false);
-                  setWarningModalVisible(false);
                   resetAllData();
                   // Navigate back with small delay (guarded)
                   safeSetTimeout(() => {
@@ -1116,21 +1147,25 @@ const SetScreen = () => {
               ]
             );
           } else {
-            // All verifications passed or were skipped
+            // All verifications passed or were skipped - show single success alert
             Alert.alert(
               'Success',
-              'Schedule saved successfully! Pill verification completed.',
+              `Schedule saved successfully! Pill verification completed.${summaryText}`,
               [
                 { text: 'OK', onPress: () => {
-                  // Close modals first
-                  setPillModalVisible(false);
-                  setAlarmModalVisible(false);
-                  setConfirmModalVisible(false);
-                  setWarningModalVisible(false);
                   resetAllData();
-                  // Navigate back with small delay (guarded)
+                  // Navigate based on user role
                   safeSetTimeout(() => {
-                    try { navigation.goBack(); } catch (e) { console.warn('[SetScreen] goBack failed', e); }
+                    try {
+                      if (isActingAsCaregiver) {
+                        navigation.navigate("MonitorManageScreen" as never);
+                      } else {
+                        navigation.navigate("ElderDashboard" as never);
+                      }
+                    } catch (e) { 
+                      console.warn('[SetScreen] Navigation failed', e);
+                      try { navigation.goBack(); } catch (e2) { }
+                    }
                   }, 100);
                 }}
               ]
@@ -1139,36 +1174,58 @@ const SetScreen = () => {
         } catch (verifyErr) {
           console.error('Error triggering verification:', verifyErr);
           setVerifying(false);
-          Alert.alert(
-            'Schedule Saved',
-            `Schedule saved successfully! ${verifyErr instanceof Error ? verifyErr.message : 'Verification may have failed.'}`,
-            [
-              { text: 'OK', onPress: () => {
-                // Close modals first
+          
+          // CRITICAL: Close all modals before showing alerts
                 setPillModalVisible(false);
                 setAlarmModalVisible(false);
                 setConfirmModalVisible(false);
                 setWarningModalVisible(false);
+          
+          // Build summary
+          const alarmsSummary: string[] = [];
+          for (let containerNum = 1; containerNum <= 3; containerNum++) {
+            const alarmCount = alarms[containerNum as PillSlot].length;
+            if (alarmCount > 0) {
+              alarmsSummary.push(`Container ${containerNum}: ${alarmCount} alarm${alarmCount > 1 ? 's' : ''}`);
+            }
+          }
+          const summaryText = alarmsSummary.length > 0 
+            ? `\n\nAlarms set:\n${alarmsSummary.join('\n')}`
+            : '';
+          
+          // Small delay to ensure modals are closed
+          await new Promise(resolve => setTimeout(resolve, 300));
+          
+          Alert.alert(
+            'Schedule Saved',
+            `Schedule saved successfully!${summaryText}\n\n${verifyErr instanceof Error ? verifyErr.message : 'Verification may have failed.'}`,
+            [
+              { text: 'OK', onPress: () => {
                 resetAllData();
-                // Navigate back with small delay (guarded)
                 safeSetTimeout(() => {
-                  try { navigation.goBack(); } catch (e) { console.warn('[SetScreen] goBack failed', e); }
+                  try {
+                    if (isActingAsCaregiver) {
+                      navigation.navigate("MonitorManageScreen" as never);
+                    } else {
+                      navigation.navigate("ElderDashboard" as never);
+                    }
+                  } catch (e) { 
+                    console.warn('[SetScreen] Navigation failed', e);
+                    try { navigation.goBack(); } catch (e2) { }
+                  }
                 }, 100);
               }}
             ]
           );
         }
       } else {
-      Alert.alert('Success', 'Schedule saved successfully!', [
-        { text: 'OK', onPress: () => {
-          // Reset all data and go back to prevent modification
-          resetAllData();
-          navigation.navigate("MonitorManageScreen" as never);
-        }}
-      ]);
-      }
-      
-      // Build summary of alarms set per container
+        // No verification - close all modals first
+        setPillModalVisible(false);
+        setAlarmModalVisible(false);
+        setConfirmModalVisible(false);
+        setWarningModalVisible(false);
+        
+        // Build summary
       const alarmsSummary: string[] = [];
       for (let containerNum = 1; containerNum <= 3; containerNum++) {
         const alarmCount = alarms[containerNum as PillSlot].length;
@@ -1180,22 +1237,28 @@ const SetScreen = () => {
         ? `\n\nAlarms set:\n${alarmsSummary.join('\n')}`
         : '';
       
-      // Show success message without verification
-      // After saving:
-      // - Caregiver (acting for an elder): go back to Monitor & Manage (monitoring dashboard)
-      // - Elder (own schedule): go back to ElderDashboard
+        // Small delay to ensure modals are closed
+        await new Promise(resolve => setTimeout(resolve, 300));
+        
+        // Show single success alert
       Alert.alert('Success', `Schedule saved successfully!${summaryText}`, [
-        { 
-          text: 'OK', 
-          onPress: () => {
+          { text: 'OK', onPress: () => {
+            resetAllData();
+            safeSetTimeout(() => {
+              try {
             if (isActingAsCaregiver) {
               navigation.navigate("MonitorManageScreen" as never);
             } else {
               navigation.navigate("ElderDashboard" as never);
             }
+              } catch (e) { 
+                console.warn('[SetScreen] Navigation failed', e);
+                try { navigation.goBack(); } catch (e2) { }
           } 
-        }
+            }, 100);
+          }}
       ]);
+      }
     } catch (err) {
       console.error('Error saving schedule:', err);
       Alert.alert('Error', `Failed to save schedule: ${err instanceof Error ? err.message : 'Unknown error'}`);
@@ -1322,10 +1385,13 @@ const SetScreen = () => {
                       <Text style={[styles.scheduleTime, { color: theme.text }]}>{timeStr}</Text>
                       <TouchableOpacity 
                         onPress={() => {
+                          if (saving || verifying) return;
                           const newAlarms = [...alarms[num]];
                           newAlarms.splice(index, 1);
                           setAlarms(prev => ({ ...prev, [num]: newAlarms }));
                         }}
+                        disabled={saving || verifying}
+                        style={{ opacity: (saving || verifying) ? 0.5 : 1 }}
                       >
                         <Ionicons name="close-circle" size={16} color={theme.error} />
                       </TouchableOpacity>
@@ -1353,10 +1419,12 @@ const SetScreen = () => {
                 <View style={styles.pillCountControls}>
                   <TouchableOpacity
                     onPress={() => {
+                      if (saving || verifying) return;
                       const newCount = Math.max(0, (pillCounts[num] || 0) - 1);
                       setPillCounts(prev => ({ ...prev, [num]: newCount }));
                     }}
-                    style={[styles.countButton, { backgroundColor: theme.background }]}
+                    style={[styles.countButton, { backgroundColor: theme.background, opacity: (saving || verifying) ? 0.5 : 1 }]}
+                    disabled={saving || verifying}
                   >
                     <Text style={[styles.countButtonText, { color: theme.text }]}>−</Text>
                   </TouchableOpacity>
@@ -1365,20 +1433,24 @@ const SetScreen = () => {
                   </Text>
                   <TouchableOpacity
                     onPress={() => {
+                      if (saving || verifying) return;
                       const newCount = (pillCounts[num] || 0) + 1;
                       setPillCounts(prev => ({ ...prev, [num]: newCount }));
                     }}
-                    style={[styles.countButton, { backgroundColor: theme.background }]}
+                    style={[styles.countButton, { backgroundColor: theme.background, opacity: (saving || verifying) ? 0.5 : 1 }]}
+                    disabled={saving || verifying}
                   >
                     <Text style={[styles.countButtonText, { color: theme.text }]}>+</Text>
                   </TouchableOpacity>
                   {pillCounts[num] > 0 && (
                     <TouchableOpacity
                       onPress={() => {
+                        if (saving || verifying) return;
                         setPillCountsLocked(prev => ({ ...prev, [num]: true }));
                         Alert.alert('Pill Count Locked', `Maximum pill count for Container ${num} is set to ${pillCounts[num]}. You can add up to ${pillCounts[num]} schedule times.`);
                       }}
-                      style={[styles.lockButton, { backgroundColor: theme.primary }]}
+                      style={[styles.lockButton, { backgroundColor: theme.primary, opacity: (saving || verifying) ? 0.5 : 1 }]}
+                      disabled={saving || verifying}
                     >
                       <Ionicons name="lock-closed" size={14} color={theme.card} />
                       <Text style={[styles.lockButtonText, { color: theme.card }]}>Lock</Text>
@@ -1444,9 +1516,16 @@ const SetScreen = () => {
       </TouchableOpacity>
 
       {/* Warning Modal */}
-      <Modal visible={warningModalVisible} transparent animationType="slide">
-        <View style={styles.modalOverlay}>
-          <View style={[styles.modalContent, { backgroundColor: theme.card }]}>
+      <Modal 
+        visible={warningModalVisible && !saving && !verifying} 
+        transparent 
+        animationType="slide"
+        statusBarTranslucent
+        hardwareAccelerated
+        onRequestClose={() => setWarningModalVisible(false)}
+      >
+        <View style={[styles.modalOverlay, { zIndex: 2000, elevation: 200 }]}>
+          <View style={[styles.modalContent, { backgroundColor: theme.card, zIndex: 2001, elevation: 201 }]}>
             <TouchableOpacity 
               style={styles.closeButtonTop} 
               onPress={() => setWarningModalVisible(false)}
@@ -1477,9 +1556,16 @@ const SetScreen = () => {
       </Modal>
 
       {/* Pill Selection Modal */}
-      <Modal visible={pillModalVisible} transparent animationType="slide">
-        <View style={styles.modalOverlay}>
-          <View style={[styles.modalContent, { backgroundColor: theme.card }]}>
+      <Modal 
+        visible={pillModalVisible && !saving && !verifying} 
+        transparent 
+        animationType="slide"
+        statusBarTranslucent
+        hardwareAccelerated
+        onRequestClose={() => setPillModalVisible(false)}
+      >
+        <View style={[styles.modalOverlay, { zIndex: 2000, elevation: 200 }]}>
+          <View style={[styles.modalContent, { backgroundColor: theme.card, zIndex: 2001, elevation: 201 }]}>
             <Text style={[styles.modalTitle, { color: theme.secondary }]}>Select a Medication</Text>
 
             <FlatList 
@@ -1514,9 +1600,20 @@ const SetScreen = () => {
       </Modal>
 
       {/* Simplified Time Selection Modal */}
-      <Modal visible={alarmModalVisible} transparent animationType="slide">
-        <View style={styles.modalOverlay}>
-          <View style={[styles.modalContent, { backgroundColor: theme.card }]}>
+      <Modal 
+        visible={alarmModalVisible && !saving && !verifying} 
+        transparent 
+        animationType="slide"
+        statusBarTranslucent
+        hardwareAccelerated
+        onRequestClose={() => {
+          setAlarmModalVisible(false);
+          setShowTimePicker(false);
+          setShowDatePicker(false);
+        }}
+      >
+        <View style={[styles.modalOverlay, { zIndex: 2000, elevation: 200 }]}>
+          <View style={[styles.modalContent, { backgroundColor: theme.card, zIndex: 2001, elevation: 201 }]}>
             <Text style={[styles.modalTitle, { color: theme.secondary }]}>Set Date & Time for Container {currentPillSlot}</Text>
             <Text style={[styles.modalSubtitle, { color: theme.textSecondary }]}>
               Choose the exact date and time (24-hour format)
@@ -1799,7 +1896,9 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    backgroundColor: 'rgba(0,0,0,0.5)',
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    zIndex: 2000,
+    elevation: 200,
   },
   modalContent: {
     width: '90%',
@@ -1808,7 +1907,8 @@ const styles = StyleSheet.create({
     padding: 16,
     borderRadius: 15,
     alignItems: 'center',
-    elevation: 5,
+    elevation: 201,
+    zIndex: 2001,
     position: 'relative',
   },
   closeButtonTop: {

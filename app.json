@@ -1,7 +1,7 @@
 {
   "expo": {
     "name": "Pillnow",
-    "slug": "pillnow-org",
+    "slug": "pillnow",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
@@ -49,9 +49,9 @@
         "origin": false
       },
       "eas": {
-        "projectId": "2fafc804-6539-4666-9c14-e1ca9d382ab4"
+        "projectId": "5052c10a-1520-405d-ae05-ddd6ac89f163"
       }
     },
-    "owner": "twelveees-organization"
+    "owner": "ravenapp2gos-organization"
   }
 }

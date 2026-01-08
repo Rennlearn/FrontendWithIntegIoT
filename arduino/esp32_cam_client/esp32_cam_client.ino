@@ -166,11 +166,53 @@ void setup() {
 
   // Load persisted config (if any) and fall back to compile-time constants
   prefs.begin("pillcfg", false);
-  cfgMqttHost = prefs.getString("mqtt_host", String(MQTT_HOST));
+  
+  // CRITICAL FIX: Check if stored IP differs from compile-time IP
+  // If stored IP is from a different network (e.g., old phone hotspot IP),
+  // prefer compile-time IP to ensure connection works
+  String storedMqttHost = prefs.getString("mqtt_host", "");
+  String compileTimeMqttHost = String(MQTT_HOST);
+  
+  if (storedMqttHost.length() > 0 && storedMqttHost != compileTimeMqttHost) {
+    Serial.print("⚠️ Stored MQTT IP (");
+    Serial.print(storedMqttHost);
+    Serial.print(") differs from compile-time IP (");
+    Serial.print(compileTimeMqttHost);
+    Serial.println(")");
+    Serial.println("   Using compile-time IP to ensure connection...");
+    // Clear stored IP and use compile-time
+    prefs.remove("mqtt_host");
+    prefs.remove("backend_host");
+    cfgMqttHost = compileTimeMqttHost;
+  } else {
+    cfgMqttHost = prefs.getString("mqtt_host", String(MQTT_HOST));
+  }
+  
   cfgMqttPort = (uint16_t) prefs.getString("mqtt_port", String(MQTT_PORT)).toInt();
   cfgBackendHost = prefs.getString("backend_host", String(BACKEND_HOST));
   cfgBackendPort = (uint16_t) prefs.getString("backend_port", String(BACKEND_PORT)).toInt();
+  
+  // Ensure backend host matches MQTT host (they should be the same)
+  if (cfgBackendHost != cfgMqttHost) {
+    Serial.print("⚠️ Backend IP (");
+    Serial.print(cfgBackendHost);
+    Serial.print(") differs from MQTT IP (");
+    Serial.print(cfgMqttHost);
+    Serial.println(") - syncing backend to match MQTT");
+    cfgBackendHost = cfgMqttHost;
+    prefs.putString("backend_host", cfgBackendHost);
+  }
+  
   topicConfig = String("pillnow/") + DEVICE_ID + "/config";
+  
+  Serial.print("📋 Using MQTT: ");
+  Serial.print(cfgMqttHost);
+  Serial.print(":");
+  Serial.println(cfgMqttPort);
+  Serial.print("📋 Using Backend: ");
+  Serial.print(cfgBackendHost);
+  Serial.print(":");
+  Serial.println(cfgBackendPort);
 
   // Configure MQTT client using runtime config
   mqttClient.setServer(cfgMqttHost.c_str(), cfgMqttPort);
