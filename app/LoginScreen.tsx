@@ -10,6 +10,7 @@ import { lightTheme, darkTheme } from "@/styles/theme";
 import * as SMS from "expo-sms";
 
 const LoginScreen = () => {
+    const [showPasswordReq, setShowPasswordReq] = useState(false);
   const router = useRouter();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -75,6 +76,21 @@ const LoginScreen = () => {
   }, [isLoggedIn]);
 
   const handleLogin = async () => {
+    // Enhanced password validation
+    if (password.length < 8) {
+      Alert.alert(
+        "Invalid Password",
+        "Password must be at least 8 characters long."
+      );
+      return;
+    }
+    if (!/\d/.test(password)) {
+      Alert.alert(
+        "Invalid Password",
+        "Password must contain at least one number."
+      );
+      return;
+    }
     try {
       setLoading(true);
       await AsyncStorage.removeItem("token"); // Clear previous token
@@ -394,7 +410,27 @@ const LoginScreen = () => {
             value={password}
             onChangeText={setPassword}
             secureTextEntry
+            onFocus={() => setShowPasswordReq(true)}
+            onBlur={() => setShowPasswordReq(false)}
           />
+
+        {/* Password requirements popup */}
+        <Modal
+          visible={showPasswordReq}
+          transparent
+          animationType="fade"
+        >
+          <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#00000080' }}>
+            <View style={{ backgroundColor: theme.card, padding: 20, borderRadius: 10, elevation: 5 }}>
+              <Text style={{ color: theme.text, fontWeight: 'bold', fontSize: 16 }}>Password Requirements</Text>
+              <Text style={{ color: theme.text, marginTop: 10 }}>• At least 8 characters</Text>
+              <Text style={{ color: theme.text }}>• Must contain at least one number</Text>
+              <TouchableOpacity style={{ marginTop: 15, alignSelf: 'flex-end' }} onPress={() => setShowPasswordReq(false)}>
+                <Text style={{ color: theme.primary }}>Close</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </Modal>
 
             <TouchableOpacity
             style={styles.forgotButton}

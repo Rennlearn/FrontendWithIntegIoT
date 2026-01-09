@@ -30,6 +30,7 @@ import { lightTheme, darkTheme } from "@/styles/theme";
  */
 
 const ResetPassword = () => {
+    const [showPasswordReq, setShowPasswordReq] = useState(false);
   const router = useRouter();
   const params = useLocalSearchParams();
   const { isDarkMode } = useTheme();
@@ -98,12 +99,14 @@ const ResetPassword = () => {
       Alert.alert("Error", "Please enter a new password.");
       return;
     }
-
-    if (newPassword.length < 6) {
-      Alert.alert("Error", "Password must be at least 6 characters long.");
+    if (newPassword.length < 8) {
+      Alert.alert("Error", "Password must be at least 8 characters long.");
       return;
     }
-
+    if (!/\d/.test(newPassword)) {
+      Alert.alert("Error", "Password must contain at least one number.");
+      return;
+    }
     if (newPassword !== confirmPassword) {
       Alert.alert("Error", "Passwords do not match. Please try again.");
       return;
@@ -253,7 +256,26 @@ const ResetPassword = () => {
             secureTextEntry={!showPassword}
             autoCapitalize="none"
             autoCorrect={false}
+            onFocus={() => setShowPasswordReq(true)}
+            onBlur={() => setShowPasswordReq(false)}
           />
+        {/* Password requirements popup */}
+        <Modal
+          visible={showPasswordReq}
+          transparent
+          animationType="fade"
+        >
+          <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#00000080' }}>
+            <View style={{ backgroundColor: theme.card, padding: 20, borderRadius: 10, elevation: 5 }}>
+              <Text style={{ color: theme.text, fontWeight: 'bold', fontSize: 16 }}>Password Requirements</Text>
+              <Text style={{ color: theme.text, marginTop: 10 }}>• At least 8 characters</Text>
+              <Text style={{ color: theme.text }}>• Must contain at least one number</Text>
+              <TouchableOpacity style={{ marginTop: 15, alignSelf: 'flex-end' }} onPress={() => setShowPasswordReq(false)}>
+                <Text style={{ color: theme.primary }}>Close</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </Modal>
           <TouchableOpacity
             onPress={() => setShowPassword(!showPassword)}
             style={styles.eyeIcon}

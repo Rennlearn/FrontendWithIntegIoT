@@ -314,6 +314,18 @@ export default function ElderProfile({ onElderSelected, onBack }: ElderProfilePr
       return;
     }
 
+    // Password validation (if provided)
+    if (elderPassword.trim()) {
+      if (elderPassword.trim().length < 8) {
+        Alert.alert('Error', 'Password must be at least 8 characters long.');
+        return;
+      }
+      if (!/\d/.test(elderPassword.trim())) {
+        Alert.alert('Error', 'Password must contain at least one number.');
+        return;
+      }
+    }
+
     try {
       setIsCreating(true);
       
@@ -1109,11 +1121,30 @@ export default function ElderProfile({ onElderSelected, onBack }: ElderProfilePr
               value={elderPassword}
               onChangeText={setElderPassword}
               secureTextEntry
+              onFocus={() => setShowPasswordReq(true)}
+              onBlur={() => setShowPasswordReq(false)}
             />
 
             <Text style={[styles.helperText, { color: theme.textSecondary, fontSize: 12, marginTop: -10, marginBottom: 15 }]}>
               Note: Password is optional. If left empty, a default password will be generated. The elder does not need to login.
             </Text>
+            {/* Password requirements popup */}
+            <Modal
+              visible={showPasswordReq}
+              transparent
+              animationType="fade"
+            >
+              <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#00000080' }}>
+                <View style={{ backgroundColor: theme.card, padding: 20, borderRadius: 10, elevation: 5 }}>
+                  <Text style={{ color: theme.text, fontWeight: 'bold', fontSize: 16 }}>Password Requirements</Text>
+                  <Text style={{ color: theme.text, marginTop: 10 }}>• At least 8 characters</Text>
+                  <Text style={{ color: theme.text }}>• Must contain at least one number</Text>
+                  <TouchableOpacity style={{ marginTop: 15, alignSelf: 'flex-end' }} onPress={() => setShowPasswordReq(false)}>
+                    <Text style={{ color: theme.primary }}>Close</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            </Modal>
 
             <TouchableOpacity 
               style={[styles.connectButton, { backgroundColor: theme.primary }]}

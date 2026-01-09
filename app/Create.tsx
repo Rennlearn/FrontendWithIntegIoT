@@ -10,6 +10,7 @@ import { useTheme } from "@/context/ThemeContext";
 import { lightTheme, darkTheme } from "@/styles/theme";
 
 const CreateScreen = () => {
+    const [showPasswordReq, setShowPasswordReq] = useState(false);
   const navigation = useNavigation();
   const { isDarkMode } = useTheme();
   const theme = isDarkMode ? darkTheme : lightTheme;
@@ -30,6 +31,22 @@ const CreateScreen = () => {
   const handleCreate = async () => {
     if (!name || !email || !phone || !password) {
       Alert.alert("Error", "All fields are required!");
+      return;
+    }
+
+    // Password validation
+    if (password.length < 8) {
+      Alert.alert(
+        "Invalid Password",
+        "Password must be at least 8 characters long."
+      );
+      return;
+    }
+    if (!/\d/.test(password)) {
+      Alert.alert(
+        "Invalid Password",
+        "Password must contain at least one number."
+      );
       return;
     }
 
@@ -147,6 +164,8 @@ const CreateScreen = () => {
                 onChangeText={setPassword} 
                 secureTextEntry 
                 placeholderTextColor={theme.textSecondary}
+                onFocus={() => setShowPasswordReq(true)}
+                onBlur={() => setShowPasswordReq(false)}
               />
             </View>
           </View>
@@ -201,6 +220,23 @@ const CreateScreen = () => {
             </TouchableOpacity>
           </View>
 
+          {/* Password requirements popup */}
+          <Modal
+            visible={showPasswordReq}
+            transparent
+            animationType="fade"
+          >
+            <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#00000080' }}>
+              <View style={{ backgroundColor: theme.card, padding: 20, borderRadius: 10, elevation: 5 }}>
+                <Text style={{ color: theme.text, fontWeight: 'bold', fontSize: 16 }}>Password Requirements</Text>
+                <Text style={{ color: theme.text, marginTop: 10 }}>• At least 8 characters</Text>
+                <Text style={{ color: theme.text }}>• Must contain at least one number</Text>
+                <TouchableOpacity style={{ marginTop: 15, alignSelf: 'flex-end' }} onPress={() => setShowPasswordReq(false)}>
+                  <Text style={{ color: theme.primary }}>Close</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </Modal>
           {/* Register Button */}
           <TouchableOpacity 
             style={[styles.button, { backgroundColor: theme.primary }]} 
