@@ -1,5 +1,7 @@
 /* Central configuration for runtime constants */
 
+import AsyncStorage from '@react-native-async-storage/async-storage';
+
 // Fallback backend URL used when EXPO_PUBLIC_BACKEND_URL is not provided.
 // Update this default to match your local backend when testing on device/emulator.
 // Note: If your Mac's IP changes (e.g., phone hotspot), use the backend override in Monitor screen
@@ -8,7 +10,6 @@ export const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL || 'http://10.165
 // Get the effective backend URL (checks for override in AsyncStorage)
 export async function getBackendUrl(): Promise<string> {
   try {
-    const { default: AsyncStorage } = await import('@react-native-async-storage/async-storage');
     const override = await AsyncStorage.getItem('backend_url_override');
     if (override && String(override).trim()) {
       return String(override).trim();
@@ -40,7 +41,7 @@ export async function testBackendReachable(timeoutMs: number = 3000): Promise<bo
       // @ts-ignore - AbortSignal.timeout may not be in types
       signal = AbortSignal.timeout(timeoutMs);
     } else {
-      const controller = new AbortController();
+    const controller = new AbortController();
       timeoutId = setTimeout(() => controller.abort(), timeoutMs);
       signal = controller.signal;
     }

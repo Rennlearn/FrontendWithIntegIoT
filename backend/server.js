@@ -11,6 +11,8 @@
  * See docs/MQTT_and_Ingest.md for protocol notes.
  */
 
+/* eslint-env node */
+
 const path = require("path");
 // Load env from backend/backend.env first (local IoT backend config), then fall back to repo root .env.
 // NOTE: We avoid dotfiles here because some environments block creating/editing them.
@@ -186,8 +188,50 @@ const mqttClient = mqtt.connect(MQTT_BROKER_URL, {
   connectTimeout: 5000,
 });
 
+mqttClient.setMaxListeners?.(50);
+
+mqttClient.on("message", (topic, payloadBuf) => {
+  try {
+    const topicStr = String(topic || "");
+    if (!topicStr.startsWith("pillnow/")) return;
+
+    // Expect: pillnow/<deviceId>/status
+    const m = topicStr.match(/^pillnow\/([^/]+)\/status$/);
+    if (!m) return;
+    const deviceId = m[1];
+
+    const raw = payloadBuf ? payloadBuf.toString("utf8") : "";
+    let parsed = null;
+    try {
+      parsed = raw ? JSON.parse(raw) : null;
+    } catch {
+      parsed = { raw };
+    }
+
+    const now = Date.now();
+    state.cameraStatus = state.cameraStatus || {};
+    state.cameraStatus[deviceId] = {
+      lastSeenMs: now,
+      lastSeenIso: new Date(now).toISOString(),
+      topic: topicStr,
+      payload: parsed,
+    };
+    // Don't persist this into state.json (transient), but keep it in memory for diagnostics
+  } catch (e) {
+    console.warn("[backend] MQTT status parse error:", e?.message || e);
+  }
+});
+
 mqttClient.on("connect", () => {
   console.log(`[backend] MQTT connected: ${MQTT_BROKER_URL}`);
+  try {
+    mqttClient.subscribe("pillnow/+/status", { qos: 0 }, (err) => {
+      if (err) console.warn("[backend] MQTT subscribe failed (status):", err?.message || err);
+      else console.log("[backend] MQTT subscribed: pillnow/+/status");
+    });
+  } catch (e) {
+    console.warn("[backend] MQTT subscribe exception (status):", e?.message || e);
+  }
 });
 mqttClient.on("reconnect", () => {
   console.log("[backend] MQTT reconnecting...");
@@ -421,7 +465,7 @@ app.get("/test", (_req, res) => res.json({ ok: true, mqtt: mqttClient.connected,
  * GET /current-ip
  * Returns the current Mac IP address for automatic backend URL configuration
  */
-app.get("/current-ip", (_req, res) => {
+app.get("/current-ip", (req, res) => {
   try {
     const os = require('os');
     const interfaces = os.networkInterfaces();
@@ -542,6 +586,28 @@ app.get("/alarm-events", (req, res) => {
   return res.json({ ok: true, events, count: events.length });
 });
 app.get('/metrics', (_req, res) => res.json({ ok: true, metrics }));
+
+/**
+ * GET /cameras
+ * Diagnostic endpoint to tell whether ESP32-CAMs are online (based on MQTT status heartbeats).
+ */
+app.get("/cameras", (_req, res) => {
+  const now = Date.now();
+  const status = state.cameraStatus || {};
+  const out = {};
+  for (const id of ["container1", "container2", "container3"]) {
+    const s = status[id];
+    const lastSeenMs = s?.lastSeenMs || 0;
+    const ageMs = lastSeenMs ? now - lastSeenMs : null;
+    out[id] = {
+      online: typeof ageMs === "number" ? ageMs < 30000 : false,
+      lastSeenIso: s?.lastSeenIso || null,
+      ageMs,
+      payload: s?.payload || null,
+    };
+  }
+  return res.json({ ok: true, cameras: out });
+});
 
 function isValidEmail(email) {
   const s = String(email || "").trim();
@@ -1150,7 +1216,8 @@ app.post("/ingest/:deviceId/:container", upload.single("image"), async (req, res
     // Using the wrong FormData breaks multipart parsing on FastAPI (400 "error parsing body").
     const form = new FormData();
     const mime = req.file.mimetype || "image/jpeg";
-    form.append("image", new Blob([req.file.buffer], { type: mime }), rawName);
+    // `form-data` accepts Buffers directly; this avoids relying on `Blob` globals.
+    form.append("image", req.file.buffer, { filename: rawName, contentType: mime });
     form.append("expected", JSON.stringify(expected || {}));
 
     const vr = await fetch(VERIFIER_URL, { method: "POST", body: form });
@@ -1420,23 +1487,23 @@ setInterval(() => {
         }
         // Small delay before alarm to ensure capture completes
         setTimeout(() => {
-          // Publish alarm trigger (bridge will forward to Arduino, app will show AlarmModal)
-          const alarmPublished = publishCmd(resolveDeviceId(containerId), {
-            action: "alarm_triggered",
-            container: containerId,
-            date,
-            time: hhmm,
-          });
-          console.log(`[backend] ⏰ alarm_triggered published for ${containerId} at ${hhmm} (published=${Boolean(alarmPublished)}) (${containersToFire.length} containers at same time, delay=${delay}ms, position ${index + 1}/${containersToFire.length})`);
+      // Publish alarm trigger (bridge will forward to Arduino, app will show AlarmModal)
+      const alarmPublished = publishCmd(resolveDeviceId(containerId), {
+        action: "alarm_triggered",
+        container: containerId,
+        date,
+        time: hhmm,
+      });
+      console.log(`[backend] ⏰ alarm_triggered published for ${containerId} at ${hhmm} (published=${Boolean(alarmPublished)}) (${containersToFire.length} containers at same time, delay=${delay}ms, position ${index + 1}/${containersToFire.length})`);
         }, 1000); // 1 second delay after pre-capture before alarm fires
       } else {
         // No pre-capture: publish alarm immediately
         const alarmPublished = publishCmd(resolveDeviceId(containerId), {
           action: "alarm_triggered",
-          container: containerId,
+            container: containerId,
           date,
           time: hhmm,
-        });
+          });
         console.log(`[backend] ⏰ alarm_triggered published for ${containerId} at ${hhmm} (published=${Boolean(alarmPublished)}) (${containersToFire.length} containers at same time, delay=${delay}ms, position ${index + 1}/${containersToFire.length})`);
       }
 

@@ -63,7 +63,7 @@ const SetScreen = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [verifying, setVerifying] = useState(false);
-  const [verificationStatus, setVerificationStatus] = useState<Record<number, { status: 'pending' | 'success' | 'failed' | null; message?: string }>>({
+  const [verificationStatus, setVerificationStatus] = useState<Record<number, { status: 'pending' | 'success' | 'failed' | 'warning' | null; message?: string }>>({
     1: { status: null },
     2: { status: null },
     3: { status: null },
@@ -505,8 +505,8 @@ const SetScreen = () => {
       const selectedElderId = await getSelectedElderId();
       const currentUserId = await getCurrentUserId();
       const userRole = await getUserRole();
-      const isCaregiverByRole = (userRole === '3' || userRole === 3 || String(userRole) === '3') && 
-                          !(userRole === '2' || userRole === 2 || String(userRole) === '2');
+      const roleStr = userRole ? String(userRole) : '';
+      const isCaregiverByRole = roleStr === '3';
       
       // IMPORTANT: If selectedElderId exists, treat user as caregiver (backend will detect them as caregiver anyway)
       const isActingAsCaregiver = isCaregiverByRole || (selectedElderId !== null && selectedElderId !== undefined && String(selectedElderId) !== String(currentUserId));
@@ -541,7 +541,7 @@ const SetScreen = () => {
               const controller = new AbortController();
               const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
               
-              let connectionCheck;
+              let connectionCheck: Response | null = null;
               try {
                 connectionCheck = await fetch(`https://pillnow-database.onrender.com/api/caregiver-connections?caregiver=${caregiverId}&elder=${selectedElderId}`, {
                   headers,
@@ -552,10 +552,10 @@ const SetScreen = () => {
                 clearTimeout(timeoutId);
                 console.warn('[SetScreen] Connection check fetch failed (non-critical):', err);
                 // Allow access - connection check is not critical
-                connectionCheck = { ok: false, status: 0 };
+                connectionCheck = null;
               }
               
-              if (connectionCheck.ok) {
+              if (connectionCheck && connectionCheck.ok) {
                 const connData = await connectionCheck.json();
                 const connections = Array.isArray(connData) ? connData : (connData.connections || connData.data || []);
                 const activeConn = connections.find((c: any) => {
@@ -571,7 +571,7 @@ const SetScreen = () => {
                   // Try to create connection
                   await createCaregiverConnection(selectedElderId);
                 }
-              } else if (connectionCheck.status === 404) {
+              } else if (connectionCheck && connectionCheck.status === 404) {
                 // Connection doesn't exist - try to create it
                 console.log('[SetScreen] ⚠️ Connection not found (404), attempting to create...');
                 const created = await createCaregiverConnection(selectedElderId);
@@ -581,7 +581,7 @@ const SetScreen = () => {
                 }
               } else {
                 // Other error (401, 403, 500, etc.)
-                console.warn(`[SetScreen] Connection check returned ${connectionCheck.status}, but allowing access since elder is selected`);
+                console.warn(`[SetScreen] Connection check returned ${connectionCheck?.status || 0}, but allowing access since elder is selected`);
                 // Allow access - connection issues will be handled by backend
               }
             }
@@ -834,7 +834,7 @@ const SetScreen = () => {
                     scheduleId: record.scheduleId 
                   },
                 },
-                trigger: fireDate,
+                trigger: { type: 'date', date: fireDate } as any,
               });
             } catch (notifErr) {
               console.warn('[SetScreen] Failed to schedule local notification:', notifErr);

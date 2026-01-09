@@ -5,6 +5,7 @@ import AlarmModal from '@/components/AlarmModal';
 import PillMismatchModal from './PillMismatchModal';
 import verificationService from '@/services/verificationService';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { soundService } from '@/services/soundService';
 
 type PendingMismatch = {
   container: number;
@@ -96,6 +97,11 @@ export default function GlobalAlarmHandler() {
     alarmSessionActiveRef.current = true;
     lastAlarmKeyRef.current = nextAlarm.key;
     lastAlarmShownAtRef.current = nextAlarm.ts;
+
+    // Start phone-side alarm sound/haptics (globalized here so MonitorManageScreen doesn't duplicate it)
+    soundService.initialize()
+      .then(() => soundService.playAlarmSound('alarm'))
+      .catch((e) => console.warn('[GlobalAlarmHandler] Failed to start alarm sound:', e));
 
     // Mark schedule as Active
     DeviceEventEmitter.emit('pillnow:scheduleStatus', { container: nextAlarm.container, time: nextAlarm.time, status: 'Active' });
@@ -519,8 +525,12 @@ export default function GlobalAlarmHandler() {
 
   useEffect(() => {
     let active = true;
-    let httpPollInterval: any = null;
+    let httpPollTimer: any = null;
     let lastPollTimestamp = Date.now();
+    let pollBackoffMs = 2000; // start aggressive, back off on failure
+    let consecutiveHttpPollFailures = 0;
+    let lastHttpPollErrorLogAt = 0;
+    let clearedBackendOverride = false;
 
     // If Bluetooth is not connected, we still keep handler mounted; it will just not receive.
     BluetoothService.isConnectionActive().then(async (isConnected) => {
@@ -532,52 +542,100 @@ export default function GlobalAlarmHandler() {
           if (!active) return;
           try {
             const base = await verificationService.getBackendUrl();
+            // Helpful trace so we can see what base URL the app is trying to reach
+            // (this is often the root cause when IP changes)
+            // eslint-disable-next-line no-console
+            console.log(`[GlobalAlarmHandler] HTTP polling → ${base}/alarm-events?since=${lastPollTimestamp}`);
             const response = await fetch(`${base}/alarm-events?since=${lastPollTimestamp}`);
-            if (response.ok) {
-              const data = await response.json();
-              if (data.events && Array.isArray(data.events)) {
-                for (const event of data.events) {
-                  if (event.timestamp > lastPollTimestamp) {
-                    lastPollTimestamp = event.timestamp;
-                  }
+            if (!response.ok) {
+              // Treat non-200 as a failure so the self-heal can clear stale backend overrides.
+              throw new Error(`HTTP ${response.status}`);
+            }
+
+            const data = await response.json();
+            if (data.events && Array.isArray(data.events)) {
+              for (const event of data.events) {
+                if (event.timestamp > lastPollTimestamp) {
+                  lastPollTimestamp = event.timestamp;
+                }
+                
+                if (event.type === 'alarm_triggered') {
+                  const containerNum = parseInt(event.container.replace('container', ''));
+                  const timeStr = event.time || '00:00';
+                  console.log(`[GlobalAlarmHandler] 📨 HTTP Poll: ALARM_TRIGGERED for Container ${containerNum} at ${timeStr}`);
                   
-                  if (event.type === 'alarm_triggered') {
-                    const containerNum = parseInt(event.container.replace('container', ''));
-                    const timeStr = event.time || '00:00';
-                    console.log(`[GlobalAlarmHandler] 📨 HTTP Poll: ALARM_TRIGGERED for Container ${containerNum} at ${timeStr}`);
-                    
-                    // Process alarm same as Bluetooth message
-                    if (pendingMismatchTimerRef.current) {
-                      clearTimeout(pendingMismatchTimerRef.current);
-                      pendingMismatchTimerRef.current = null;
-                    }
-                    if (pillMismatchVisibleRef.current) setPillMismatchVisibleSafe(false);
-                    
-                    const wasAdded = addAlarmToQueue(containerNum, timeStr);
-                    if (wasAdded && !alarmVisibleRef.current) {
-                      showNextAlarmFromQueue();
-                    }
-                  } else if (event.type === 'pill_mismatch') {
-                    const containerNum = parseInt((event.container || 'container1').replace('container', ''));
-                    console.log(`[GlobalAlarmHandler] 📨 HTTP Poll: PILLALERT for Container ${containerNum}`);
-                    
-                    if (alarmVisibleRef.current) {
-                      pendingMismatchRef.current = { container: containerNum, ts: Date.now() };
-                    } else {
-                      showMismatchForContainer(containerNum).catch(() => {});
-                    }
+                  // Process alarm same as Bluetooth message
+                  if (pendingMismatchTimerRef.current) {
+                    clearTimeout(pendingMismatchTimerRef.current);
+                    pendingMismatchTimerRef.current = null;
+                  }
+                  if (pillMismatchVisibleRef.current) setPillMismatchVisibleSafe(false);
+                  
+                  const wasAdded = addAlarmToQueue(containerNum, timeStr);
+                  if (wasAdded && !alarmVisibleRef.current) {
+                    showNextAlarmFromQueue();
+                  }
+                } else if (event.type === 'pill_mismatch') {
+                  const containerNum = parseInt((event.container || 'container1').replace('container', ''));
+                  console.log(`[GlobalAlarmHandler] 📨 HTTP Poll: PILLALERT for Container ${containerNum}`);
+                  
+                  if (alarmVisibleRef.current) {
+                    pendingMismatchRef.current = { container: containerNum, ts: Date.now() };
+                  } else {
+                    showMismatchForContainer(containerNum).catch(() => {});
                   }
                 }
               }
             }
+
+            // Success: reset backoff
+            consecutiveHttpPollFailures = 0;
+            pollBackoffMs = 2000;
           } catch (err) {
-            console.warn('[GlobalAlarmHandler] HTTP polling error:', err);
+            consecutiveHttpPollFailures += 1;
+
+            // Backoff up to 30s to avoid log spam and battery drain when backend is unreachable
+            pollBackoffMs = Math.min(30000, pollBackoffMs * 2);
+
+            // Self-heal: if we are polling a stale backend override (common when IP changes),
+            // clear it once after a couple failures so we fall back to the default BACKEND_URL.
+            // This avoids getting stuck polling a dead IP like 10.x.x.x forever.
+            if (!clearedBackendOverride && consecutiveHttpPollFailures >= 2) {
+              try {
+                const override = await AsyncStorage.getItem('backend_url_override');
+                if (override && String(override).trim()) {
+                  console.warn(`[GlobalAlarmHandler] Clearing stale backend_url_override after repeated HTTP poll failures: ${override}`);
+                  await AsyncStorage.removeItem('backend_url_override');
+                  clearedBackendOverride = true;
+                  // Reset backoff so the next poll tries the default immediately
+                  pollBackoffMs = 2000;
+                  consecutiveHttpPollFailures = 0;
+                }
+              } catch {
+                // ignore
+              }
+            }
+
+            // Log at most once every 10s to avoid console spam
+            const now = Date.now();
+            if (now - lastHttpPollErrorLogAt > 10000) {
+              lastHttpPollErrorLogAt = now;
+              console.warn(
+                `[GlobalAlarmHandler] HTTP polling error (${consecutiveHttpPollFailures} fail(s), next in ${Math.round(pollBackoffMs / 1000)}s):`,
+                err
+              );
+            }
           }
         };
         
-        // Poll every 2 seconds when Bluetooth unavailable
-        httpPollInterval = setInterval(pollAlarmEvents, 2000);
-        pollAlarmEvents(); // Initial poll
+        // Poll with adaptive backoff when Bluetooth unavailable
+        const scheduleNext = async () => {
+          if (!active) return;
+          await pollAlarmEvents();
+          if (!active) return;
+          httpPollTimer = setTimeout(scheduleNext, pollBackoffMs);
+        };
+        scheduleNext(); // initial poll
       }
     });
 
@@ -665,6 +723,13 @@ export default function GlobalAlarmHandler() {
         const container = m ? parseInt(m[1]) : alarmContainerRef.current;
 
         console.log(`[GlobalAlarmHandler] 🛑 Alarm stopped for Container ${container}`);
+
+        // Stop phone-side alarm sound/haptics immediately when hardware stop arrives
+        try {
+          soundService.stopSound().catch(() => {});
+        } catch {
+          // ignore
+        }
 
         // Cancel any pending mismatch timer/candidate to avoid duplicates after stop.
         if (pendingMismatchTimerRef.current) {
@@ -761,9 +826,9 @@ export default function GlobalAlarmHandler() {
 
     return () => {
       active = false;
-      if (httpPollInterval) {
-        clearInterval(httpPollInterval);
-        httpPollInterval = null;
+      if (httpPollTimer) {
+        clearTimeout(httpPollTimer);
+        httpPollTimer = null;
       }
       try {
         if (pendingMismatchTimerRef.current) {

@@ -1,5 +1,6 @@
 // Simple integration script to test schedule -> MQTT publish -> simulated ESP32 ingest -> verifier workflow
 // Usage: node scripts/integration_post_stop_test.js
+/* eslint-env node */
 
 const mqtt = require('mqtt');
 const axios = require('axios');

@@ -185,7 +185,7 @@ void setup() {
     prefs.remove("backend_host");
     cfgMqttHost = compileTimeMqttHost;
   } else {
-    cfgMqttHost = prefs.getString("mqtt_host", String(MQTT_HOST));
+  cfgMqttHost = prefs.getString("mqtt_host", String(MQTT_HOST));
   }
   
   cfgMqttPort = (uint16_t) prefs.getString("mqtt_port", String(MQTT_PORT)).toInt();

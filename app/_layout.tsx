@@ -9,9 +9,9 @@ export default function RootLayout() {
     <ThemeProvider>
       <ErrorBoundary>
         <ModalManagerProvider>
-          {/* Mount global BT alarm handler once so alarms/mismatch modals work on every screen */}
-          <GlobalAlarmHandler />
-          <Stack screenOptions={{ headerShown: false }} />
+        {/* Mount global BT alarm handler once so alarms/mismatch modals work on every screen */}
+        <GlobalAlarmHandler />
+        <Stack screenOptions={{ headerShown: false }} />
         </ModalManagerProvider>
       </ErrorBoundary>
     </ThemeProvider>

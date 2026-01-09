@@ -1,6 +1,7 @@
 import React from 'react';
 import { Modal, View, Text, TouchableOpacity, StyleSheet, Platform, Alert, Image } from 'react-native';
 import BluetoothService from '@/services/BluetoothService';
+import { soundService } from '@/services/soundService';
 
 type Verification = {
   success: boolean;
@@ -31,16 +32,27 @@ export default function AlarmModal({ visible, container, time, remainingAlarms =
   }, [externalVerification]);
 
   const handleStop = async () => {
+    // Stop any phone-side alarm haptics/sound immediately (even if Bluetooth command fails)
     try {
-      // Send ALARMSTOP command to Arduino (via Bluetooth)
-      const sent = await BluetoothService.sendCommand('ALARMSTOP\n');
-      if (!sent) {
-        console.warn('[AlarmModal] Failed to send ALARMSTOP via Bluetooth');
-      } else {
-        console.log('[AlarmModal] ✅ ALARMSTOP sent');
+      await soundService.stopSound();
+    } catch {
+      // ignore
+    }
+
+    try {
+      // Send stop commands to Arduino (via Bluetooth) with retries for reliability.
+      // `STOPLOCATE` stops both locate buzzer and alarm buzzer in the Arduino sketch.
+      for (let i = 0; i < 3; i++) {
+        // eslint-disable-next-line no-await-in-loop
+        await BluetoothService.sendCommand('ALARMSTOP\n');
+        // eslint-disable-next-line no-await-in-loop
+        await BluetoothService.sendCommand('STOPLOCATE\n');
+        // eslint-disable-next-line no-await-in-loop
+        await new Promise((r) => setTimeout(r, 150));
       }
+      console.log('[AlarmModal] ✅ Stop commands sent (ALARMSTOP + STOPLOCATE)');
     } catch (e) {
-      console.warn('[AlarmModal] Error sending ALARMSTOP:', e);
+      console.warn('[AlarmModal] Error sending stop commands:', e);
     }
 
     // Immediate UI callback (e.g., mark schedule Done in UI)
@@ -96,7 +108,18 @@ export default function AlarmModal({ visible, container, time, remainingAlarms =
               <TouchableOpacity onPress={handleStop} style={[styles.button, styles.stopButton]} disabled={loading}>
                 <Text style={styles.buttonText}>{loading ? 'Stopping...' : 'Stop Alarm'}</Text>
               </TouchableOpacity>
-              <TouchableOpacity onPress={onDismiss} style={[styles.button, styles.dismissButton]} disabled={loading}>
+              <TouchableOpacity
+                onPress={async () => {
+                  try {
+                    await soundService.stopSound();
+                  } catch {
+                    // ignore
+                  }
+                  onDismiss();
+                }}
+                style={[styles.button, styles.dismissButton]}
+                disabled={loading}
+              >
                 <Text style={[styles.buttonText, { color: '#333' }]}>Dismiss</Text>
               </TouchableOpacity>
             </View>
@@ -108,9 +131,20 @@ export default function AlarmModal({ visible, container, time, remainingAlarms =
               {verification.result && (
                 <Text style={{ marginBottom: 6, color: '#666' }}>Confidence: {(Number(verification.result.confidence || 0) * 100).toFixed(1)}%</Text>
               )}
+              {verification.result && (
+                <>
+                  <Text style={{ marginBottom: 4, color: '#666' }}>
+                    Detected: {Array.isArray(verification.result.classesDetected) && verification.result.classesDetected.length > 0
+                      ? verification.result.classesDetected.map((c: any) => `${c.label} (${c.n})`).join(', ')
+                      : 'none'}
+                  </Text>
+                  <Text style={{ marginBottom: 8, color: '#666' }}>
+                    Total: {Number(verification.result.count || 0)} pill(s)
+                  </Text>
+                </>
+              )}
 
               {verification.annotatedUrl ? (
-                // eslint-disable-next-line react-native/no-inline-styles
                 <View style={{ width: '100%', height: 240, backgroundColor: '#eee', marginBottom: 8 }}>
                   <Image source={{ uri: verification.annotatedUrl }} style={{ width: '100%', height: '100%', resizeMode: 'cover' }} />
                 </View>
@@ -118,7 +152,17 @@ export default function AlarmModal({ visible, container, time, remainingAlarms =
                 <Text style={{ color: '#666', marginBottom: 8 }}>No annotated image available</Text>
               )}
 
-              <TouchableOpacity onPress={onDismiss} style={[styles.button, { backgroundColor: '#28a745' }]}>
+              <TouchableOpacity
+                onPress={async () => {
+                  try {
+                    await soundService.stopSound();
+                  } catch {
+                    // ignore
+                  }
+                  onDismiss();
+                }}
+                style={[styles.button, { backgroundColor: '#28a745' }]}
+              >
                 <Text style={styles.buttonText}>Done</Text>
               </TouchableOpacity>
             </View>

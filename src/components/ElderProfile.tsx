@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { 
   View, Text, TextInput, TouchableOpacity, StyleSheet, Image, 
-  Alert, ActivityIndicator, FlatList 
+  Alert, ActivityIndicator, FlatList, Modal 
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useTheme } from '@/context/ThemeContext';
@@ -50,6 +50,7 @@ export default function ElderProfile({ onElderSelected, onBack }: ElderProfilePr
   const [elderPhoneCreate, setElderPhoneCreate] = useState('');
   const [elderPassword, setElderPassword] = useState('');
   const [isCreating, setIsCreating] = useState(false);
+  const [showPasswordReq, setShowPasswordReq] = useState(false);
 
   // Get current caregiver ID from JWT token
   const getCurrentCaregiverId = async (): Promise<string> => {
@@ -138,7 +139,7 @@ export default function ElderProfile({ onElderSelected, onBack }: ElderProfilePr
         console.log('Connected elders from database (raw response):', JSON.stringify(data, null, 2));
         
         // Extract elder information from connections
-        let elders: ElderUser[] = [];
+        let elders: Array<ElderUser | null> = [];
         let eldersData: any[] = [];
         
         // Normalize response structure
@@ -208,10 +209,14 @@ export default function ElderProfile({ onElderSelected, onBack }: ElderProfilePr
               profileImage: elder.profileImage
             };
           }
-        }).filter((elder: ElderUser | null): elder is ElderUser => elder !== null && !!elder.userId);
+        });
+
+        const eldersFiltered: ElderUser[] = elders.filter(
+          (elder: ElderUser | null): elder is ElderUser => elder !== null && !!elder.userId
+        );
 
         // Filter only active connections (for old format)
-        const activeElders = elders.filter((elder: ElderUser) => {
+        const activeElders = eldersFiltered.filter((elder: ElderUser) => {
           // For new format, we already filtered above
           // For old format, check status
           const elderItem = eldersData.find((item: any) => {
@@ -557,7 +562,7 @@ export default function ElderProfile({ onElderSelected, onBack }: ElderProfilePr
                 if (userData.role === 2) {
                   elder = userData;
                   console.log('Elder found with matching phone:', elder!.name);
-                  console.log('Elder phone:', elder!.contactNumber || elder!.phone);
+                  console.log('Elder phone:', elder!.contactNumber);
                   console.log('Elder object:', elder);
                   console.log('Elder userId:', elder!.userId);
                   break; // Found elder with matching phone, stop trying other endpoints
@@ -726,7 +731,7 @@ export default function ElderProfile({ onElderSelected, onBack }: ElderProfilePr
             userId: elderId,
             name: elder!.name,
             email: elder!.email || '',
-            contactNumber: elder!.contactNumber || elder!.phone || '',
+            contactNumber: elder!.contactNumber || '',
             role: 2,
             profileImage: elder!.profileImage
           };
@@ -759,7 +764,7 @@ export default function ElderProfile({ onElderSelected, onBack }: ElderProfilePr
               userId: elderId,
               name: elder!.name,
               email: elder!.email || '',
-              contactNumber: elder!.contactNumber || elder!.phone || '',
+              contactNumber: elder!.contactNumber || '',
               role: 2,
               profileImage: elder!.profileImage
             };
@@ -803,7 +808,7 @@ export default function ElderProfile({ onElderSelected, onBack }: ElderProfilePr
                   userId: elderId,
                   name: elder!.name,
                   email: elder!.email || '',
-                  contactNumber: elder!.contactNumber || elder!.phone || '',
+                  contactNumber: elder!.contactNumber || '',
                   role: 2,
                   profileImage: elder!.profileImage
                 };

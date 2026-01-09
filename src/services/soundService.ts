@@ -4,7 +4,7 @@ import * as Haptics from 'expo-haptics';
 class SoundService {
   private soundObject: Audio.Sound | null = null;
   private isPlaying = false;
-  private loopInterval: NodeJS.Timeout | null = null;
+  private loopInterval: ReturnType<typeof setInterval> | null = null;
 
   /**
    * Initialize the sound service

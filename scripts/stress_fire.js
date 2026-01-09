@@ -1,5 +1,6 @@
 // Stress test: fire many debug schedule calls and confirm MQTT publishes are made without server errors
 // Usage: node scripts/stress_fire.js
+/* eslint-env node */
 
 const mqtt = require('mqtt');
 const axios = require('axios');

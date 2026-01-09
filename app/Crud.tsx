@@ -21,20 +21,22 @@ interface DecodedToken {
 }
 
 interface UserData {
+  id: string;
   fullname: string;
   username: string;
+  type_id?: number | string;
   created_at: string;
   updated_at: string;
 }
 
 export default function UserListScreen() {
   const navigation = useNavigation<NavigationProp>();
-  const [users, setUsers] = useState([]);
-  const [filteredUsers, setFilteredUsers] = useState([]);
+  const [users, setUsers] = useState<UserData[]>([]);
+  const [filteredUsers, setFilteredUsers] = useState<UserData[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [isLoading, setIsLoading] = useState(true);
-  const [error, setError] = useState(null);
-  const [selectedUser, setSelectedUser] = useState(null);
+  const [error, setError] = useState<unknown | null>(null);
+  const [selectedUser, setSelectedUser] = useState<UserData | null>(null);
   const [newFullname, setNewFullname] = useState('');
   const [newUsername, setNewUsername] = useState('');
   const [newPassword, setNewPassword] = useState('');
@@ -70,9 +72,10 @@ export default function UserListScreen() {
       const data = await response.json();
       setUsers(data);
       setFilteredUsers(data);
-    } catch (error) {
+    } catch (error: unknown) {
       setError(error);
-      Alert.alert('Error', error.message || 'Failed to fetch users. Please try again.');
+      const message = error instanceof Error ? error.message : 'Failed to fetch users. Please try again.';
+      Alert.alert('Error', message);
       console.error('Fetch error:', error);
     } finally {
       setIsLoading(false);
@@ -87,7 +90,7 @@ export default function UserListScreen() {
     if (searchQuery.trim() === '') {
       setFilteredUsers(users);
     } else {
-      const filtered = users.filter(user => 
+      const filtered = users.filter((user: UserData) => 
         user.fullname.toLowerCase().includes(searchQuery.toLowerCase()) ||
         user.username.toLowerCase().includes(searchQuery.toLowerCase())
       );
@@ -95,7 +98,7 @@ export default function UserListScreen() {
     }
   }, [searchQuery, users]);
 
-  const prepareUpdateForm = (user) => {
+  const prepareUpdateForm = (user: UserData) => {
     setSelectedUser(user);
     setNewFullname(user.fullname || '');
     setNewUsername(user.username || '');
@@ -104,7 +107,7 @@ export default function UserListScreen() {
     setModalVisible(true);
   };
 
-  const userInfo = (user) => {
+  const userInfo = (user: UserData) => {
     setSelectedUser(user);
     setInfoModalVisible(true);
   };
@@ -150,13 +153,14 @@ export default function UserListScreen() {
       } else {
         throw new Error(`Server error: ${response.status}`);
       }
-    } catch (error) {
-      console.error('Update error:', error.message);
-      Alert.alert('Error', error.message || 'Failed to update user. Please try again.');
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : 'Failed to update user. Please try again.';
+      console.error('Update error:', error);
+      Alert.alert('Error', message);
     }
   };
 
-  const handleDeleteUser = async (id) => {
+  const handleDeleteUser = async (id: string | number) => {
     Alert.alert(
       'Confirm Delete',
       'Are you sure you want to delete this user?',
@@ -253,14 +257,14 @@ export default function UserListScreen() {
           style={styles.profileButton} 
           onPress={() => setProfileModalVisible(true)}
         >
-          <User size={24} color="#D14A99" />
+          <User size={24} {...({ color: '#D14A99' } as any)} />
         </TouchableOpacity>
       </View>
 
       {/* Search Bar */}
       <View style={styles.searchContainer}>
         <View style={styles.searchBar}>
-          <Search size={20} color="#666" style={styles.searchIcon} />
+          <Search size={20} style={styles.searchIcon} {...({ color: '#666' } as any)} />
           <TextInput
             style={styles.searchInput}
             placeholder="Search users..."
@@ -279,7 +283,7 @@ export default function UserListScreen() {
           <View style={styles.retryContainer}>
             <Text style={styles.errorText}>Failed to load users.</Text>
             <TouchableOpacity onPress={fetchUsers} style={styles.retryButton}>
-              <RefreshCcw size={18} color="#fff" />
+              <RefreshCcw size={18} {...({ color: '#fff' } as any)} />
               <Text style={styles.retryText}>Retry</Text>
             </TouchableOpacity>
           </View>
@@ -360,8 +364,8 @@ export default function UserListScreen() {
             <Text>ID: {selectedUser?.id}</Text>
             <Text>Fullname: {selectedUser?.fullname}</Text>
             <Text>Username: {selectedUser?.username}</Text>
-            <Text>Created At: {new Date(selectedUser?.created_at).toLocaleString()}</Text>
-            <Text>Updated At: {new Date(selectedUser?.updated_at).toLocaleString()}</Text>
+            <Text>Created At: {new Date(selectedUser?.created_at || 0).toLocaleString()}</Text>
+            <Text>Updated At: {new Date(selectedUser?.updated_at || 0).toLocaleString()}</Text>
             <TouchableOpacity onPress={() => setInfoModalVisible(false)} style={styles.closeButton}>
               <Text style={styles.closeButtonText}>Close</Text>
             </TouchableOpacity>

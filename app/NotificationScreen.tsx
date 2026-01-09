@@ -286,7 +286,7 @@ export default function NotificationScreen() {
                 <View style={styles.notificationContent}>
                   <View style={styles.iconContainer}>
                     <Ionicons 
-                      name={getNotificationIcon(item.type)} 
+                      name={getNotificationIcon(item.type) as any} 
                       size={24} 
                       color={getNotificationColor(item.type, theme)} 
                     />

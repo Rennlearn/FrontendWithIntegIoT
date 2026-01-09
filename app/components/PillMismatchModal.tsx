@@ -4,6 +4,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { useTheme } from '@/context/ThemeContext';
 import { lightTheme, darkTheme } from '@/styles/theme';
 import BluetoothService from '@/services/BluetoothService';
+import { soundService } from '@/services/soundService';
 
 interface PillMismatchModalProps {
   visible: boolean;
@@ -31,10 +32,16 @@ const PillMismatchModal: React.FC<PillMismatchModalProps> = ({
   const { isDarkMode } = useTheme();
   const theme = isDarkMode ? darkTheme : lightTheme;
   const [pulseAnim] = useState(new Animated.Value(1));
+  const [stopping, setStopping] = useState(false);
 
   useEffect(() => {
     if (visible) {
       console.log(`[PillMismatchModal] 🚨🚨🚨 Modal is now VISIBLE for Container ${container} 🚨🚨🚨`);
+      // Start phone-side alarm sound/haptics for mismatch as well
+      soundService.initialize()
+        .then(() => soundService.playAlarmSound('alarm'))
+        .catch((e) => console.warn('[PillMismatchModal] Failed to start alarm sound:', e));
+
       // Pulse animation
       Animated.loop(
         Animated.sequence([
@@ -50,15 +57,25 @@ const PillMismatchModal: React.FC<PillMismatchModalProps> = ({
           }),
         ])
       ).start();
+    } else {
+      // Stop phone-side alarm sound/haptics when modal is dismissed
+      soundService.stopSound().catch(() => {});
     }
-  }, [visible, container]);
+    return () => {
+      // Ensure sound is stopped when unmounting / visibility toggles
+      soundService.stopSound().catch(() => {});
+    };
+  }, [visible, container, pulseAnim]);
 
   const handleStopBuzzer = async () => {
     try {
+      if (stopping) return;
+      setStopping(true);
       // Validate container number (1, 2, or 3)
       if (container < 1 || container > 3) {
         console.error(`[PillMismatchModal] ⚠️ Invalid container number: ${container}`);
         Alert.alert('Error', `Invalid container number: ${container}. Please contact support.`);
+        setStopping(false);
         return;
       }
       
@@ -71,16 +88,36 @@ const PillMismatchModal: React.FC<PillMismatchModalProps> = ({
           'Cannot stop buzzer. Please connect to Bluetooth first.',
           [{ text: 'OK', onPress: () => onDismiss() }]
         );
+        setStopping(false);
         return;
       }
       
       console.log(`[PillMismatchModal] 📤 Sending ALARMSTOP command to Arduino...`);
-      // Send command to stop the buzzer
-      await BluetoothService.sendCommand('ALARMSTOP\n');
+      // Stop any phone-side alarm haptics/sound immediately (even if Bluetooth is flaky)
+      try {
+        await soundService.stopSound();
+      } catch {
+        // ignore
+      }
+
+      // Send command to stop the buzzer (retry a few times for reliability)
+      for (let i = 0; i < 3; i++) {
+        // eslint-disable-next-line no-await-in-loop
+        await BluetoothService.sendCommand('ALARMSTOP\n');
+        // Also stop locate mode in case it is active (Arduino supports STOPLOCATE)
+        // eslint-disable-next-line no-await-in-loop
+        await BluetoothService.sendCommand('STOPLOCATE\n');
+        // eslint-disable-next-line no-await-in-loop
+        await new Promise((r) => setTimeout(r, 150));
+      }
       console.log(`[PillMismatchModal] ✅ ALARMSTOP command sent successfully`);
       
-      // Dismiss modal immediately
-      onDismiss();
+      // IMPORTANT: Avoid "tap-through" (user tap hitting a button under the modal after dismiss).
+      // Delay dismiss slightly so the finger is released before the underlying screen can receive the tap.
+      setTimeout(() => {
+        onDismiss();
+        setStopping(false);
+      }, 250);
       
       // Show confirmation after a brief delay
       setTimeout(() => {
@@ -101,6 +138,7 @@ const PillMismatchModal: React.FC<PillMismatchModalProps> = ({
           { text: 'Cancel', onPress: () => onDismiss(), style: 'cancel' }
         ]
       );
+      setStopping(false);
     }
   };
 
@@ -166,15 +204,21 @@ const PillMismatchModal: React.FC<PillMismatchModalProps> = ({
             style={[styles.stopButton, { backgroundColor: theme.error }]}
             onPress={handleStopBuzzer}
             activeOpacity={0.8}
+            disabled={stopping}
           >
             <Ionicons name="stop-circle" size={28} color={theme.card} />
-            <Text style={[styles.stopButtonText, { color: theme.card }]}>STOP ALARM</Text>
+            <Text style={[styles.stopButtonText, { color: theme.card }]}>
+              {stopping ? 'STOPPING...' : 'STOP ALARM'}
+            </Text>
           </TouchableOpacity>
           
           <TouchableOpacity
             style={[styles.dismissButton, { borderColor: theme.border }]}
-            onPress={onDismiss}
+            onPress={() => {
+              if (!stopping) onDismiss();
+            }}
             activeOpacity={0.7}
+            disabled={stopping}
           >
             <Text style={[styles.dismissButtonText, { color: theme.textSecondary }]}>Dismiss</Text>
           </TouchableOpacity>

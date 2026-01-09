@@ -188,11 +188,11 @@ main() {
             print_status "Verifier already in PM2, restarting..."
             pm2 restart pillnow-verifier 2>/dev/null || {
                 print_status "Starting verifier with PM2..."
-                cd "$SCRIPT_DIR" && pm2 start "python3 -m uvicorn backend.verifier.main:app --host 0.0.0.0 --port 8000" --name pillnow-verifier --interpreter python3 --no-autorestart
+                cd "$SCRIPT_DIR" && pm2 start scripts/start_verifier.sh --name pillnow-verifier --no-autorestart
             }
         else
             print_status "Starting verifier with PM2..."
-            cd "$SCRIPT_DIR" && pm2 start "python3 -m uvicorn backend.verifier.main:app --host 0.0.0.0 --port 8000" --name pillnow-verifier --interpreter python3 --no-autorestart
+            cd "$SCRIPT_DIR" && pm2 start scripts/start_verifier.sh --name pillnow-verifier --no-autorestart
         fi
         
         sleep 2

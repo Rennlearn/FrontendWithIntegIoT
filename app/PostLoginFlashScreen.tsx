@@ -30,7 +30,7 @@ const PostLoginFlashScreen = () => {
 
     // Navigate to the roles screen after 2 seconds (fallback for unrecognized roles)
     const timer = setTimeout(() => {
-      router.replace('/Roles');
+      router.replace('/Roles' as any);
     }, 2000);
 
     return () => clearTimeout(timer);

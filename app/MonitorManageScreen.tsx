@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { 
   View, Text, StyleSheet, TouchableOpacity, ScrollView, Alert, ActivityIndicator, Platform, Modal, TextInput 
 } from 'react-native';
@@ -11,7 +11,6 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { jwtDecode } from 'jwt-decode';
 import BluetoothService from '@/services/BluetoothService';
 import verificationService, { VerificationResult } from '@/services/verificationService';
-import AlarmModal from '@/components/AlarmModal';
 import { BACKEND_URL, testBackendReachable } from '@/config';
 
 
@@ -581,13 +580,22 @@ const MonitorManageScreen = () => {
       const isElderUser = roleStr === '2';
       
       // Fetch medications and schedules with cache-busting to ensure fresh data
-      const medicationsResponse = await fetch('https://pillnow-database.onrender.com/api/medications', {
-        headers: {
-          'Cache-Control': 'no-cache',
-          'Pragma': 'no-cache',
-          'If-Modified-Since': '0'
+      const medsController = new AbortController();
+      const medsTimeoutId = setTimeout(() => medsController.abort(), 12000);
+      const medicationsResponse = await (async () => {
+        try {
+          return await fetch('https://pillnow-database.onrender.com/api/medications', {
+            headers: {
+              'Cache-Control': 'no-cache',
+              'Pragma': 'no-cache',
+              'If-Modified-Since': '0'
+            },
+            signal: medsController.signal,
+          });
+        } finally {
+          clearTimeout(medsTimeoutId);
         }
-      });
+      })();
       const medicationsData = await medicationsResponse.json();
       
       // Normalize medications to an array regardless of API wrapper shape
@@ -624,10 +632,19 @@ const MonitorManageScreen = () => {
       }
       // If neither caregiver with elder nor elder, just fetch all (backend will filter by token)
       
-      const schedulesResponse = await fetch(schedulesUrl, {
-        method: 'GET',
-        headers: scheduleHeaders
-      });
+      const schedulesController = new AbortController();
+      const schedulesTimeoutId = setTimeout(() => schedulesController.abort(), 12000);
+      const schedulesResponse = await (async () => {
+        try {
+          return await fetch(schedulesUrl, {
+            method: 'GET',
+            headers: scheduleHeaders,
+            signal: schedulesController.signal,
+          });
+        } finally {
+          clearTimeout(schedulesTimeoutId);
+        }
+      })();
       
       // Check if response is ok before trying to parse JSON
       if (!schedulesResponse.ok) {
@@ -702,18 +719,24 @@ const MonitorManageScreen = () => {
         if (elderName) {
           setMonitoringElder({ id: selectedElderId, name: elderName });
           console.log('[MonitorManageScreen] ✅ Monitoring status set:', { id: selectedElderId, name: elderName });
-          // Check if caregiver has active connection to elder (auto-create if missing)
-          const connectionStatus = await checkCaregiverConnection(selectedElderId, false, true);
-          // If connection check returns true, ensure hasActiveConnection is set to true
-          if (connectionStatus) {
-            setHasActiveConnection(true);
-            console.log('[MonitorManageScreen] ✅ Active connection confirmed');
-          } else {
-            // Even if check fails, if we have selectedElderId, assume connection exists (may be a timing issue)
-            // The connection check will be retried when user tries to use features
-            console.log('[MonitorManageScreen] ⚠️ Connection check returned false, but elder is selected - will allow access');
-            setHasActiveConnection(true); // Allow access, connection will be verified when needed
-          }
+          // IMPORTANT: Do NOT block screen loading on this network call.
+          // Run connection verification in the background so Monitor & Manage doesn't get stuck "Loading..."
+          setHasActiveConnection(true); // optimistic; we will update after check finishes
+          checkCaregiverConnection(selectedElderId, false, true)
+            .then((ok) => {
+              if (ok) {
+                setHasActiveConnection(true);
+                console.log('[MonitorManageScreen] ✅ Active connection confirmed (async)');
+              } else {
+                // Keep optimistic access; user will be prompted when doing protected actions
+                console.log('[MonitorManageScreen] ⚠️ Connection check returned false (async), keeping access');
+                setHasActiveConnection(true);
+              }
+            })
+            .catch((e) => {
+              console.warn('[MonitorManageScreen] Connection check failed (async):', e);
+              setHasActiveConnection(true);
+            });
         } else {
           setMonitoringElder(null);
           setHasActiveConnection(false);
@@ -842,25 +865,40 @@ const MonitorManageScreen = () => {
       });
 
       // CRITICAL: Sync schedules to backend state.containers for alarm firing
-      // The alarm system only checks state.containers, not the database
-      try {
-        const base = await verificationService.getBackendUrl();
-        const syncResponse = await fetch(`${base}/sync-schedules-from-database`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
-          },
-        });
-        if (syncResponse.ok) {
-          const syncData = await syncResponse.json();
-          console.log(`[MonitorManageScreen] ✅ Synced ${syncData.total_schedules} schedule(s) to backend alarm system (${syncData.synced_containers} container(s))`);
-        } else {
-          console.warn(`[MonitorManageScreen] ⚠️ Failed to sync schedules to backend: ${syncResponse.status}`);
+      // The alarm system only checks state.containers, not the database.
+      //
+      // IMPORTANT: Do NOT block the Monitor & Manage screen on this call.
+      // If the local backend IP is wrong/unreachable, a fetch without timeout can hang forever
+      // and keep the screen stuck on "Loading...".
+      (async () => {
+        try {
+          const base = await verificationService.getBackendUrl();
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 5000);
+          try {
+            const syncResponse = await fetch(`${base}/sync-schedules-from-database`, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
+              },
+              signal: controller.signal,
+            });
+            if (syncResponse.ok) {
+              const syncData = await syncResponse.json().catch(() => ({}));
+              console.log(
+                `[MonitorManageScreen] ✅ Synced ${syncData.total_schedules || 0} schedule(s) to backend alarm system (${syncData.synced_containers || 0} container(s))`
+              );
+            } else {
+              console.warn(`[MonitorManageScreen] ⚠️ Failed to sync schedules to backend: ${syncResponse.status}`);
+            }
+          } finally {
+            clearTimeout(timeoutId);
+          }
+        } catch (syncErr) {
+          console.warn('[MonitorManageScreen] ⚠️ Error syncing schedules to backend (alarms may not fire):', syncErr);
         }
-      } catch (syncErr) {
-        console.warn('[MonitorManageScreen] ⚠️ Error syncing schedules to backend (alarms may not fire):', syncErr);
-      }
+      })();
 
       // Also sync current schedules to Arduino over Bluetooth if connected
       // IMPORTANT: Sync happens AFTER deletion, so sortedSchedules only contains remaining (non-deleted) schedules
@@ -906,6 +944,11 @@ const MonitorManageScreen = () => {
       }
       
     } catch (err) {
+      // Surface timeouts as a friendlier message
+      if (err instanceof Error && err.name === 'AbortError') {
+        setError('Monitor & Manage is taking too long to load. Please check your internet connection and try again.');
+        return;
+      }
       console.error('Error loading schedule data:', err);
       const errorMessage = err instanceof Error ? err.message : 'Failed to load schedule data';
       setError(errorMessage);
@@ -939,10 +982,12 @@ const MonitorManageScreen = () => {
       
       if (isCaregiverUser && selectedElderId) {
         console.log('[MonitorManageScreen] Screen focused - re-checking connection for elder:', selectedElderId);
-        const connectionStatus = await checkCaregiverConnection(selectedElderId, false, true);
-        if (connectionStatus) {
-          setHasActiveConnection(true);
-        }
+        // Don't block screen focus refresh on connection checks
+        checkCaregiverConnection(selectedElderId, false, true)
+          .then((ok) => {
+            if (ok) setHasActiveConnection(true);
+          })
+          .catch(() => {});
       }
       
       await loadScheduleData(true, false, true); // Sync to Arduino, NO auto-delete, show loading
@@ -957,6 +1002,7 @@ const MonitorManageScreen = () => {
     let mounted = true;
     let pollInterval: any = null;
     let lastKnownIp: string | null = null;
+    let consecutiveUnreachable = 0;
 
     const autoUpdateBackendUrl = async () => {
       if (!mounted) return;
@@ -965,7 +1011,6 @@ const MonitorManageScreen = () => {
         // Try to get current IP from backend (if reachable)
         // First try with current override or default
         const currentUrl = backendOverride || BACKEND_URL;
-        let newBackendUrl: string | null = null;
         
         try {
           const controller = new AbortController();
@@ -980,7 +1025,7 @@ const MonitorManageScreen = () => {
           if (response.ok) {
             const data = await response.json();
             if (data.ok && data.backend_url) {
-              newBackendUrl = data.backend_url;
+              const newBackendUrl = String(data.backend_url);
               const newIp = data.ip;
               
               // Only update if IP actually changed
@@ -1021,7 +1066,7 @@ const MonitorManageScreen = () => {
               if (fallbackResponse.ok) {
                 const data = await fallbackResponse.json();
                 if (data.ok && data.backend_url) {
-                  newBackendUrl = data.backend_url;
+                  const newBackendUrl = String(data.backend_url);
                   const newIp = data.ip;
                   
                   if (newIp !== lastKnownIp) {
@@ -1060,14 +1105,33 @@ const MonitorManageScreen = () => {
         const initialReachable = await testBackendReachable(5000); // Longer timeout for initial check
         if (!mounted) return;
         setBackendReachable(initialReachable);
+        consecutiveUnreachable = initialReachable ? 0 : (consecutiveUnreachable + 1);
+
+        // If we have a saved override but it's unreachable, automatically clear it so we can fall back
+        // to the default BACKEND_URL (which is usually the current Mac IP in dev).
+        if (!initialReachable && override && String(override).trim()) {
+          console.warn(`[MonitorManageScreen] Backend override unreachable (${override}). Auto-clearing override to fall back to default.`);
+          try {
+            await AsyncStorage.removeItem('backend_url_override');
+            if (!mounted) return;
+            setBackendOverride(null);
+          } catch (e) {
+            console.warn('[MonitorManageScreen] Failed to auto-clear backend override:', e);
+          }
+          // Re-test after clearing override
+          const reachableAfterClear = await testBackendReachable(5000);
+          if (!mounted) return;
+          setBackendReachable(reachableAfterClear);
+          consecutiveUnreachable = reachableAfterClear ? 0 : (consecutiveUnreachable + 1);
+        }
         
         // If reachable, try to get current IP and auto-update
         if (initialReachable) {
           await autoUpdateBackendUrl();
           // Test again after update
-          const reachable = await testBackendReachable(3000);
-          if (!mounted) return;
-          setBackendReachable(reachable);
+        const reachable = await testBackendReachable(3000);
+        if (!mounted) return;
+        setBackendReachable(reachable);
         } else {
           // If not reachable, try to auto-update anyway (might discover new IP)
           console.log('[MonitorManageScreen] Backend not reachable, attempting auto-update to discover new IP...');
@@ -1093,6 +1157,24 @@ const MonitorManageScreen = () => {
       if (mounted) {
         const reachable = await testBackendReachable(3000);
         setBackendReachable(reachable);
+
+        // If override exists but we've been unreachable repeatedly, clear override once to recover automatically
+        if (!reachable) {
+          consecutiveUnreachable += 1;
+        } else {
+          consecutiveUnreachable = 0;
+        }
+        if (!reachable && backendOverride && consecutiveUnreachable >= 2) {
+          console.warn(`[MonitorManageScreen] Backend override still unreachable after ${consecutiveUnreachable} checks. Auto-clearing override.`);
+          try {
+            await AsyncStorage.removeItem('backend_url_override');
+            if (!mounted) return;
+            setBackendOverride(null);
+            consecutiveUnreachable = 0;
+          } catch (e) {
+            console.warn('[MonitorManageScreen] Failed to auto-clear backend override (poll):', e);
+          }
+        }
       }
     }, 10000);
     
@@ -1346,6 +1428,18 @@ const MonitorManageScreen = () => {
 
   // Listen for Bluetooth alarm notifications
   useEffect(() => {
+    // GlobalAlarmHandler is mounted at the app root (`app/_layout.tsx`) and handles:
+    // - ALARM_TRIGGERED / ALARM_STOPPED / PILLALERT
+    // - capture + verification polling
+    // - alarm/mismatch modals across all screens
+    //
+    // Keeping a second alarm listener here causes duplicate modals, duplicate captures,
+    // and inconsistent "stop alarm" behavior.
+    const ENABLE_LOCAL_ALARM_HANDLING = false;
+    if (!ENABLE_LOCAL_ALARM_HANDLING) {
+      return;
+    }
+
     console.log('[MonitorManageScreen] Setting up Bluetooth listener for alarm messages...');
     
     // Check if Bluetooth is connected
@@ -1789,6 +1883,8 @@ const MonitorManageScreen = () => {
               console.error('Error deleting all schedules:', err);
               Alert.alert('Error', `Failed to delete all schedules: ${err instanceof Error ? err.message : 'Unknown error'}`);
             } finally {
+              // CRITICAL: always reset deletingAll so the Set/Modify/Adherence buttons re-enable
+              setDeletingAll(false);
               setLoading(false);
             }
           }
@@ -1940,6 +2036,51 @@ const MonitorManageScreen = () => {
       return rawStatus || 'Pending';
     }
   }, [markAsMissedOnce]);
+
+  // For the "Current Schedules" dropdown, only show the latest *pending* schedule
+  // for each container (1, 2, 3). Keep `schedules` untouched because other flows
+  // (delete-all, syncing) rely on the full list.
+  const pendingSchedulesToShow = useMemo(() => {
+    const parseWhenMs = (schedule: any): number | null => {
+      if (!schedule?.date || !schedule?.time) return null;
+      try {
+        const [y, m, d] = String(schedule.date).split('-').map(Number);
+        const [hh, mm] = String(schedule.time).split(':').map(Number);
+        const when = new Date(y, (m || 1) - 1, d, hh, mm);
+        const ms = when.getTime();
+        return Number.isFinite(ms) ? ms : null;
+      } catch {
+        return null;
+      }
+    };
+
+    const byContainer: Record<1 | 2 | 3, any[]> = { 1: [], 2: [], 3: [] };
+    for (const s of schedules || []) {
+      const c = parseInt(s?.container);
+      if (c !== 1 && c !== 2 && c !== 3) continue;
+      if (deriveStatus(s) !== 'Pending') continue;
+      byContainer[c as 1 | 2 | 3].push(s);
+    }
+
+    // Pick the "current" pending schedule per container: the soonest upcoming time.
+    const pickSoonest = (items: any[]) => {
+      return [...items].sort((a, b) => {
+        const aMs = parseWhenMs(a);
+        const bMs = parseWhenMs(b);
+        if (aMs === null && bMs === null) return 0;
+        if (aMs === null) return 1;
+        if (bMs === null) return -1;
+        return aMs - bMs;
+      })[0];
+    };
+
+    const picked = [1, 2, 3]
+      .map((c) => pickSoonest(byContainer[c as 1 | 2 | 3]))
+      .filter(Boolean);
+
+    // Ensure stable order: container 1, 2, 3
+    return picked.sort((a: any, b: any) => (parseInt(a?.container) || 0) - (parseInt(b?.container) || 0));
+  }, [schedules, deriveStatus]);
 
   // Get container schedules
   const getContainerSchedules = (): Record<number, { pill: string | null, alarms: Date[] }> => {
@@ -2095,20 +2236,20 @@ const MonitorManageScreen = () => {
         - All API calls will use this override URL instead of the default
         - Status shows "Reachable" when backend is accessible, "Unreachable" when not
       */}
-      <View style={[styles.devRowWrapper, { backgroundColor: theme.card }]}> 
-        <View style={{ flex: 1 }}>
-          <Text style={[styles.devLabel, { color: theme.textSecondary }]}>Backend</Text>
-          <Text style={[styles.devValue, { color: theme.text }]} numberOfLines={1} ellipsizeMode="middle">{backendOverride || BACKEND_URL}</Text>
-          <Text style={[styles.devStatus, { color: backendReachable ? 'green' : backendReachable === false ? 'orange' : theme.textSecondary }]}>Status: {backendReachable === null ? 'Checking...' : (backendReachable ? 'Reachable' : 'Unreachable')}</Text>
-        </View>
-        <View style={{ justifyContent: 'center' }}>
-          <TouchableOpacity onPress={() => { setBackendInput(backendOverride || BACKEND_URL); setBackendModalVisible(true); }} style={styles.smallButton}>
-            <Text style={{ color: theme.card }}>Edit</Text>
-          </TouchableOpacity>
-          <TouchableOpacity onPress={() => clearBackendOverride()} style={[styles.smallButton, { marginTop: 8, backgroundColor: theme.background }] }>
-            <Text style={{ color: theme.primary }}>Clear</Text>
-          </TouchableOpacity>
-        </View>
+        <View style={[styles.devRowWrapper, { backgroundColor: theme.card }]}> 
+          <View style={{ flex: 1 }}>
+            <Text style={[styles.devLabel, { color: theme.textSecondary }]}>Backend</Text>
+            <Text style={[styles.devValue, { color: theme.text }]} numberOfLines={1} ellipsizeMode="middle">{backendOverride || BACKEND_URL}</Text>
+            <Text style={[styles.devStatus, { color: backendReachable ? 'green' : backendReachable === false ? 'orange' : theme.textSecondary }]}>Status: {backendReachable === null ? 'Checking...' : (backendReachable ? 'Reachable' : 'Unreachable')}</Text>
+          </View>
+          <View style={{ justifyContent: 'center' }}>
+            <TouchableOpacity onPress={() => { setBackendInput(backendOverride || BACKEND_URL); setBackendModalVisible(true); }} style={styles.smallButton}>
+              <Text style={{ color: theme.card }}>Edit</Text>
+            </TouchableOpacity>
+            <TouchableOpacity onPress={() => clearBackendOverride()} style={[styles.smallButton, { marginTop: 8, backgroundColor: theme.background }] }>
+              <Text style={{ color: theme.primary }}>Clear</Text>
+            </TouchableOpacity>
+          </View>
 
         <Modal 
           visible={backendModalVisible && !alarmVisible} 
@@ -2120,26 +2261,26 @@ const MonitorManageScreen = () => {
         >
           <View style={[styles.modalOverlay, { zIndex: 5000, elevation: 500 }]}>
             <View style={[styles.modalContent, { backgroundColor: theme.card, zIndex: 5001, elevation: 501 }]}>
-              <Text style={[styles.modalTitle, { color: theme.text }]}>Set Backend URL</Text>
-              <TextInput
-                value={backendInput}
-                onChangeText={setBackendInput}
-                placeholder="http://10.0.0.1:5001"
-                style={[styles.input, { color: theme.text, backgroundColor: theme.background }]}
-                autoCapitalize="none"
-              />
-              <View style={{ flexDirection: 'row', justifyContent: 'flex-end', gap: 8 }}>
-                <TouchableOpacity onPress={() => setBackendModalVisible(false)} style={[styles.smallButton, { backgroundColor: theme.background }]}>
-                  <Text style={{ color: theme.primary }}>Cancel</Text>
-                </TouchableOpacity>
-                <TouchableOpacity onPress={() => saveBackendOverride(backendInput)} style={styles.smallButton}>
-                  <Text style={{ color: theme.card }}>Save</Text>
-                </TouchableOpacity>
+                <Text style={[styles.modalTitle, { color: theme.text }]}>Set Backend URL</Text>
+                <TextInput
+                  value={backendInput}
+                  onChangeText={setBackendInput}
+                  placeholder="http://10.0.0.1:5001"
+                  style={[styles.input, { color: theme.text, backgroundColor: theme.background }]}
+                  autoCapitalize="none"
+                />
+                <View style={{ flexDirection: 'row', justifyContent: 'flex-end', gap: 8 }}>
+                  <TouchableOpacity onPress={() => setBackendModalVisible(false)} style={[styles.smallButton, { backgroundColor: theme.background }]}>
+                    <Text style={{ color: theme.primary }}>Cancel</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity onPress={() => saveBackendOverride(backendInput)} style={styles.smallButton}>
+                    <Text style={{ color: theme.card }}>Save</Text>
+                  </TouchableOpacity>
+                </View>
               </View>
             </View>
-          </View>
-        </Modal>
-      </View>
+          </Modal>
+        </View>
 
         {/* Current Scheduled Section - Dropdown */}
       <View style={[styles.scheduleSection, { backgroundColor: theme.card }]}> 
@@ -2152,10 +2293,10 @@ const MonitorManageScreen = () => {
         <Text style={[styles.sectionTitle, { color: theme.secondary }]}>
           Current Schedules
         </Text>
-              {schedules.length > 0 && (
+              {pendingSchedulesToShow.length > 0 && (
                 <View style={[styles.scheduleCountBadge, { backgroundColor: theme.primary }]}>
                   <Text style={[styles.scheduleCountText, { color: theme.card }]}>
-                    {schedules.length}
+                    {pendingSchedulesToShow.length}
                   </Text>
                 </View>
               )}
@@ -2169,7 +2310,7 @@ const MonitorManageScreen = () => {
           
           {schedulesExpanded && (
             <>
-        {schedules.length === 0 ? (
+        {pendingSchedulesToShow.length === 0 ? (
           <View style={styles.emptyContainer}>
             <Text style={[styles.emptyText, { color: theme.textSecondary }]}>
               No pending schedules found
@@ -2177,11 +2318,12 @@ const MonitorManageScreen = () => {
           </View>
         ) : (
           <View style={styles.schedulesList}>
-            {schedules.map((schedule: any, index: number) => {
+            {pendingSchedulesToShow.map((schedule: any, index: number) => {
               // Find medication name from ID
               const medication = medications.find(med => med.medId === schedule.medication);
               const medicationName = medication ? medication.name : `ID: ${schedule.medication}`;
               const verification = verifications[parseInt(schedule.container)];
+              const status = deriveStatus(schedule);
               
               return (
                 <View key={schedule._id || index} style={[styles.scheduleItem, { borderColor: theme.border }]}>
@@ -2191,10 +2333,10 @@ const MonitorManageScreen = () => {
                     </Text>
                     <View style={[
                       styles.statusBadge, 
-                      { backgroundColor: deriveStatus(schedule) === 'Pending' ? theme.warning : deriveStatus(schedule) === 'Missed' ? theme.error : theme.success }
+                      { backgroundColor: status === 'Pending' ? theme.warning : status === 'Missed' ? theme.error : theme.success }
                     ]}>
                       <Text style={[styles.statusText, { color: theme.card }]}>
-                        {deriveStatus(schedule)}
+                        {status}
                       </Text>
                     </View>
                   </View>
@@ -2379,14 +2521,7 @@ const MonitorManageScreen = () => {
       </View>
     </ScrollView>
 
-      {/* Alarm Modal */}
-      <AlarmModal
-        visible={alarmVisible}
-        container={alarmContainer}
-        time={alarmTime}
-        onDismiss={() => setAlarmVisible(false)}
-        onStopAlarm={(containerNum) => handleAlarmStopped(containerNum, 'modal')}
-      />
+      {/* Alarm modals are handled globally by `app/components/GlobalAlarmHandler.tsx` */}
     </View>
   );
 };

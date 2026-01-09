@@ -119,7 +119,7 @@ const Adherence = () => {
       
       // Strict check: Only role '3' is caregiver, role '2' is elder
       const roleStr = userRole ? String(userRole) : '';
-      const isCaregiverByRole = roleStr === '3' && roleStr !== '2';
+      const isCaregiverByRole = roleStr === '3';
       const isElder = roleStr === '2';
       
       // IMPORTANT: If selectedElderId exists, treat user as caregiver (backend will detect them as caregiver anyway)
@@ -156,7 +156,7 @@ const Adherence = () => {
               const monitorData = await monitorResponse.json();
               if (monitorData.success && monitorData.data && monitorData.data.elder) {
                 elderInfo = monitorData.data.elder;
-                console.log(`[Adherence] Got elder info from monitor endpoint: ${elderInfo.name}`);
+                console.log(`[Adherence] Got elder info from monitor endpoint: ${elderInfo?.name}`);
               }
             } else if (monitorResponse.status === 404) {
               // Device not connected - that's okay, we can still view schedules

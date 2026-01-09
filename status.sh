@@ -45,7 +45,7 @@ if curl -s http://localhost:8000/health > /dev/null 2>&1; then
     echo -e "${GREEN}✅ Running${NC}"
 else
     echo -e "${RED}❌ Not running${NC}"
-    echo -e "   ${YELLOW}Start with: pm2 start 'python3 -m uvicorn backend.verifier.main:app --host 0.0.0.0 --port 8000' --name pillnow-verifier --interpreter python3${NC}"
+    echo -e "   ${YELLOW}Start with: pm2 start scripts/start_verifier.sh --name pillnow-verifier${NC}"
 fi
 
 # Check Arduino Bridge

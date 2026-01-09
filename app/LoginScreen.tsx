@@ -10,7 +10,6 @@ import { lightTheme, darkTheme } from "@/styles/theme";
 import * as SMS from "expo-sms";
 
 const LoginScreen = () => {
-    const [showPasswordReq, setShowPasswordReq] = useState(false);
   const router = useRouter();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -76,78 +75,86 @@ const LoginScreen = () => {
   }, [isLoggedIn]);
 
   const handleLogin = async () => {
-    // Enhanced password validation
-    if (password.length < 8) {
-      Alert.alert(
-        "Invalid Password",
-        "Password must be at least 8 characters long."
-      );
+    // Basic input validation (login should not enforce password rules)
+    if (!email.trim() || !password) {
+      Alert.alert("Missing Info", "Please enter your email and password.");
       return;
     }
-    if (!/\d/.test(password)) {
-      Alert.alert(
-        "Invalid Password",
-        "Password must contain at least one number."
-      );
-      return;
-    }
+
+    const endpoint = "https://pillnow-database.onrender.com/api/users/login";
+
     try {
       setLoading(true);
       await AsyncStorage.removeItem("token"); // Clear previous token
 
-      // Add timeout to prevent hanging on slow API calls (15 seconds)
-      const timeoutPromise = new Promise((_, reject) => {
-        setTimeout(() => reject(new Error("Request timeout. Please check your internet connection and try again.")), 15000);
-      });
+      const response = await axios.post(
+        endpoint,
+        { email: email.trim(), password },
+        { timeout: 15000 }
+      );
 
-      const loginPromise = axios.post("https://pillnow-database.onrender.com/api/users/login", {
-        email,
-        password,
-      }, {
-        timeout: 15000, // 15 second timeout
-      });
-
-      const response = await Promise.race([loginPromise, timeoutPromise]) as any;
-
-      if (response.data?.token) {
-        await AsyncStorage.setItem("token", response.data.token);
-        
-        // Check user role and navigate accordingly
-        const userRole = response.data.user?.role || response.data.role;
-        const roleId = parseInt(userRole);
-        
-        // Clear form inputs after successful login
-        setEmail("");
-        setPassword("");
-        setIsLoggedIn(true);
-        
-        // Navigate immediately without waiting
-        if (roleId === 3) {
-          router.replace("/CaregiverDashboard");
-        } else if (roleId === 2) {
-          router.replace("/ElderDashboard");
-        } else if (roleId === 1) {
-          Alert.alert("Login Failed", "Admin access not supported in this app.");
-          setIsLoggedIn(false);
-          setLoading(false);
-        } else {
-          Alert.alert("Login Failed", "Invalid user role. Please contact support.");
-          setIsLoggedIn(false);
-          setLoading(false);
-        }
-      } else {
+      if (!response?.data?.token) {
         Alert.alert("Login Failed", "Invalid username or password");
-        setLoading(false);
+        return;
+      }
+
+      await AsyncStorage.setItem("token", response.data.token);
+
+      // Check user role and navigate accordingly
+      const userRole = response.data.user?.role || response.data.role;
+      const roleId = parseInt(userRole);
+
+      // Clear form inputs after successful login
+      setEmail("");
+      setPassword("");
+      setIsLoggedIn(true);
+
+      if (roleId === 3) {
+        router.replace("/CaregiverDashboard");
+      } else if (roleId === 2) {
+        router.replace("/ElderDashboard");
+      } else if (roleId === 1) {
+        Alert.alert("Login Failed", "Admin access not supported in this app.");
+        setIsLoggedIn(false);
+      } else {
+        Alert.alert("Login Failed", "Invalid user role. Please contact support.");
+        setIsLoggedIn(false);
       }
     } catch (error: any) {
-      setLoading(false);
-      if (error.message && error.message.includes("timeout")) {
-        Alert.alert("Login Timeout", "The login request took too long. Please check your internet connection and try again.");
-      } else if (error.code === 'ECONNABORTED' || error.message?.includes('timeout')) {
-        Alert.alert("Connection Timeout", "Unable to connect to the server. Please check your internet connection.");
-      } else {
-        Alert.alert("Login Failed", error.response?.data?.message || error.message || "Invalid credentials. Please try again.");
+      // Axios "Network Error" typically means: no internet, DNS blocked, captive portal,
+      // VPN/proxy issue, or device can't reach the remote host.
+      const axiosCode = error?.code;
+      const axiosMsg = error?.message || "Unknown error";
+      const status = error?.response?.status;
+      const serverMsg = error?.response?.data?.message;
+
+      console.warn("[Login] Request failed", {
+        endpoint,
+        code: axiosCode,
+        message: axiosMsg,
+        status,
+        serverMsg,
+      });
+
+      if (status) {
+        Alert.alert("Login Failed", serverMsg || `Server error (HTTP ${status}).`);
+        return;
       }
+
+      if (axiosCode === "ECONNABORTED" || String(axiosMsg).toLowerCase().includes("timeout")) {
+        Alert.alert(
+          "Login Timeout",
+          "Your phone couldn't reach the login server in time. Please check your internet connection and try again."
+        );
+        return;
+      }
+
+      Alert.alert(
+        "Login Failed (Network Error)",
+        "Your phone can't reach the login server (pillnow-database.onrender.com).\n\nFix:\n- Turn ON internet/cellular data\n- Disable VPN/adblock DNS\n- Make sure date/time is automatic\n- Try switching Wi‑Fi or using cellular, then try again"
+      );
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -410,27 +417,7 @@ const LoginScreen = () => {
             value={password}
             onChangeText={setPassword}
             secureTextEntry
-            onFocus={() => setShowPasswordReq(true)}
-            onBlur={() => setShowPasswordReq(false)}
           />
-
-        {/* Password requirements popup */}
-        <Modal
-          visible={showPasswordReq}
-          transparent
-          animationType="fade"
-        >
-          <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#00000080' }}>
-            <View style={{ backgroundColor: theme.card, padding: 20, borderRadius: 10, elevation: 5 }}>
-              <Text style={{ color: theme.text, fontWeight: 'bold', fontSize: 16 }}>Password Requirements</Text>
-              <Text style={{ color: theme.text, marginTop: 10 }}>• At least 8 characters</Text>
-              <Text style={{ color: theme.text }}>• Must contain at least one number</Text>
-              <TouchableOpacity style={{ marginTop: 15, alignSelf: 'flex-end' }} onPress={() => setShowPasswordReq(false)}>
-                <Text style={{ color: theme.primary }}>Close</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        </Modal>
 
             <TouchableOpacity
             style={styles.forgotButton}

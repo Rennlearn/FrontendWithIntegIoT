@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { 
-  View, Text, TextInput, TouchableOpacity, Alert, StyleSheet, ScrollView, ActivityIndicator, KeyboardAvoidingView, Platform 
+  View, Text, TextInput, TouchableOpacity, Alert, StyleSheet, ScrollView, ActivityIndicator, KeyboardAvoidingView, Platform, Modal 
 } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import axios from "axios";
@@ -220,23 +220,16 @@ const CreateScreen = () => {
             </TouchableOpacity>
           </View>
 
-          {/* Password requirements popup */}
-          <Modal
-            visible={showPasswordReq}
-            transparent
-            animationType="fade"
-          >
-            <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#00000080' }}>
-              <View style={{ backgroundColor: theme.card, padding: 20, borderRadius: 10, elevation: 5 }}>
-                <Text style={{ color: theme.text, fontWeight: 'bold', fontSize: 16 }}>Password Requirements</Text>
-                <Text style={{ color: theme.text, marginTop: 10 }}>• At least 8 characters</Text>
-                <Text style={{ color: theme.text }}>• Must contain at least one number</Text>
-                <TouchableOpacity style={{ marginTop: 15, alignSelf: 'flex-end' }} onPress={() => setShowPasswordReq(false)}>
-                  <Text style={{ color: theme.primary }}>Close</Text>
-                </TouchableOpacity>
-              </View>
+          {/* Inline password requirements (shown under the password box, in red) */}
+          {showPasswordReq && (
+            <View style={{ marginTop: -6, marginBottom: 10, paddingHorizontal: 6 }}>
+              <Text style={{ color: theme.error, fontWeight: '700', fontSize: 12 }}>
+                Password Requirements
+              </Text>
+              <Text style={{ color: theme.error, marginTop: 4, fontSize: 12 }}>• At least 8 characters</Text>
+              <Text style={{ color: theme.error, fontSize: 12 }}>• Must contain at least one number</Text>
             </View>
-          </Modal>
+          )}
           {/* Register Button */}
           <TouchableOpacity 
             style={[styles.button, { backgroundColor: theme.primary }]} 
