@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet, Image, Alert, AppState, ScrollView, FlatList, ActivityIndicator, BackHandler } from 'react-native';
-import { useRouter } from 'expo-router';
+import { useRouter, useFocusEffect } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import NotificationManager from '@/components/NotificationManager';
@@ -9,6 +9,7 @@ import { useTheme } from '@/context/ThemeContext';
 import { lightTheme, darkTheme } from '@/styles/theme';
 import BluetoothService from '@/services/BluetoothService';
 import { jwtDecode } from 'jwt-decode';
+import { performCompleteLogout } from '@/utils/logout';
 
 const CaregiverDashboard: React.FC = () => {
   const router = useRouter();
@@ -45,44 +46,70 @@ const CaregiverDashboard: React.FC = () => {
     role?: string;
   }
 
+  /**
+   * Centralized logout handler
+   * Uses the shared logout utility to ensure consistent state clearing
+   */
   const performLogout = useCallback(async () => {
-    if (loggingOut) return;
+    if (loggingOut) return; // Prevent double-clicks
     try {
       setLoggingOut(true);
-      await AsyncStorage.multiRemove([
-        'token',
-        'userRole',
-        'selectedElderId',
-      ]);
-      router.replace('/LoginScreen');
+      await performCompleteLogout(router);
     } catch (error) {
-      console.error('Logout error:', error);
+      console.error('[CaregiverDashboard] Logout error:', error);
       Alert.alert('Error', 'Failed to logout. Please try again.');
     } finally {
       setLoggingOut(false);
     }
   }, [loggingOut, router]);
 
-  useEffect(() => {
-    const backAction = () => {
-      Alert.alert('Logout and Exit', 'You need to logout first to exit the app. Do you want to logout?', [
-        {
-          text: 'Cancel',
-          onPress: () => null,
-          style: 'cancel',
-        },
-        { text: 'YES', onPress: performLogout },
-      ]);
-      return true;
-    };
+  /**
+   * Android Back Button Handler for Caregiver Dashboard
+   * 
+   * IMPORTANT: This screen blocks the back button to prevent accidental app exit.
+   * Users must explicitly log out before exiting or navigating away.
+   * 
+   * Using useFocusEffect ensures the handler is only active when this screen is focused,
+   * preventing interference with navigation on other screens.
+   */
+  useFocusEffect(
+    useCallback(() => {
+      const backAction = () => {
+        // Show blocking confirmation dialog
+        // This prevents accidental app exit and ensures proper logout
+        Alert.alert(
+          'Logout Required',
+          'You must log out before exiting the app or going back. This ensures your session is properly closed.',
+          [
+            {
+              text: 'Cancel',
+              onPress: () => null, // Stay on dashboard
+              style: 'cancel',
+            },
+            {
+              text: 'Log Out',
+              style: 'destructive',
+              onPress: performLogout, // Perform logout and navigate to login
+            },
+          ],
+          { cancelable: false } // Prevent dismissing by tapping outside
+        );
+        // Return true to prevent default back behavior
+        // This blocks the back button until user makes a choice
+        return true;
+      };
 
-    const backHandler = BackHandler.addEventListener(
-      'hardwareBackPress',
-      backAction,
-    );
+      // Register back button handler
+      const backHandler = BackHandler.addEventListener(
+        'hardwareBackPress',
+        backAction,
+      );
 
-    return () => backHandler.remove();
-  }, [performLogout]);
+      // Cleanup: Remove handler when screen loses focus
+      // This prevents memory leaks and ensures normal back navigation on other screens
+      return () => backHandler.remove();
+    }, [performLogout])
+  );
 
   // Get current caregiver ID from JWT token
   const getCurrentCaregiverId = async (): Promise<string> => {

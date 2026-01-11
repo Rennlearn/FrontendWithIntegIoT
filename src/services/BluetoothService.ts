@@ -1,4 +1,4 @@
-import { Platform, PermissionsAndroid, NativeModules, NativeEventEmitter, Linking, Alert } from 'react-native';
+import { Platform, PermissionsAndroid, NativeModules, NativeEventEmitter, DeviceEventEmitter, Linking, Alert } from 'react-native';
 
 const isDevEnv = typeof globalThis !== 'undefined' && Boolean((globalThis as any).__DEV__);
 
@@ -14,9 +14,20 @@ class BluetoothService {
   private eventEmitter: NativeEventEmitter | null = null;
 
   constructor() {
-    // Initialize native module if available
+    // Initialize native module if available and supports event emission
+    // Check if the module implements the required event emitter methods to avoid warnings
+    // Note: BluetoothManager may not exist or may not implement event emitter interface
     if (NativeModules.BluetoothManager) {
-      this.eventEmitter = new NativeEventEmitter(NativeModules.BluetoothManager);
+      const module = NativeModules.BluetoothManager;
+      // Only create emitter if module has addListener method (indicates it supports events)
+      // This prevents NativeEventEmitter warnings about missing addListener/removeListeners
+      if (module && typeof module.addListener === 'function' && typeof module.removeListeners === 'function') {
+        this.eventEmitter = new NativeEventEmitter(module);
+      } else {
+        // Module doesn't support events - don't create emitter to avoid warnings
+        // onBluetoothStateChanged will check if eventEmitter exists before using it
+        this.eventEmitter = null;
+      }
     }
   }
 
@@ -399,14 +410,15 @@ class BluetoothService {
       console.log('[BluetoothService] BluetoothAdapter module found:', !!BluetoothAdapter);
       console.log('[BluetoothService] Available methods:', BluetoothAdapter ? Object.keys(BluetoothAdapter) : 'none');
       
-      // Use NativeEventEmitter to listen for BluetoothDataReceived events
+      // Use DeviceEventEmitter to listen for BluetoothDataReceived events
+      // The native module emits events via DeviceEventManagerModule.RCTDeviceEventEmitter,
+      // which is the global event emitter, so we use DeviceEventEmitter directly
       try {
-        const { NativeEventEmitter } = require('react-native');
-        const eventEmitter = new NativeEventEmitter(NativeModules.BluetoothAdapter);
+        console.log('[BluetoothService] ✅ Setting up DeviceEventEmitter listener for BluetoothDataReceived...');
         
-        console.log('[BluetoothService] ✅ Setting up NativeEventEmitter listener for BluetoothDataReceived...');
-        
-        const subscription = eventEmitter.addListener('BluetoothDataReceived', (event: any) => {
+        // Use DeviceEventEmitter directly - this is the global event emitter that native modules use
+        // This avoids NativeEventEmitter warnings when the module doesn't implement addListener
+        const subscription = DeviceEventEmitter.addListener('BluetoothDataReceived', (event: any) => {
           // Java emits the data as a string directly, but React Native might wrap it
           let dataString: string;
           if (typeof event === 'string') {
@@ -430,14 +442,14 @@ class BluetoothService {
           }
         });
         
-        console.log('[BluetoothService] ✅ NativeEventEmitter listener registered successfully');
+        console.log('[BluetoothService] ✅ DeviceEventEmitter listener registered successfully');
         
         return () => {
-          console.log('[BluetoothService] Cleaning up NativeEventEmitter listener...');
+          console.log('[BluetoothService] Cleaning up DeviceEventEmitter listener...');
           subscription.remove();
         };
       } catch (error) {
-        console.error('[BluetoothService] ❌ Error setting up NativeEventEmitter:', error);
+        console.error('[BluetoothService] ❌ Error setting up DeviceEventEmitter:', error);
       }
     } else {
       console.warn('[BluetoothService] ⚠️ BluetoothAdapter native module not available');

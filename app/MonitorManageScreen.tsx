@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { 
-  View, Text, StyleSheet, TouchableOpacity, ScrollView, Alert, ActivityIndicator, Platform, Modal, TextInput 
+  View, Text, StyleSheet, TouchableOpacity, ScrollView, Alert, ActivityIndicator, Platform, Modal, TextInput, DeviceEventEmitter
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useNavigation } from '@react-navigation/native';
@@ -12,6 +12,8 @@ import { jwtDecode } from 'jwt-decode';
 import BluetoothService from '@/services/BluetoothService';
 import verificationService, { VerificationResult } from '@/services/verificationService';
 import { BACKEND_URL, testBackendReachable } from '@/config';
+import { updateScheduleCache, initializeScheduleCache, syncOfflineUpdates } from '@/services/scheduleStatusService';
+import { alarmTriggerTracker } from '@/services/alarmTriggerTracker';
 
 
 // Interface for decoded JWT token
@@ -891,7 +893,68 @@ const MonitorManageScreen = () => {
       });
       
       setMedications(medsArray);
-      setSchedules(sortedSchedules);
+      
+      // CRITICAL FIX: Preserve schedules in grace period when reloading from backend
+      // When loadScheduleData is called (e.g., after status updates or periodic refresh),
+      // it fetches fresh data from backend which may have schedules marked as "Done".
+      // We must preserve schedules that are within the 1-minute grace period to prevent
+      // premature removal from the UI.
+      setSchedules((prevSchedules) => {
+        // Create a map of existing schedules by container+time+date for grace period lookup
+        const existingByKey = new Map<string, any>();
+        prevSchedules.forEach((s: any) => {
+          const c = parseInt(s?.container) || 1;
+          const timeStr = s?.time ? String(s.time).substring(0, 5) : '';
+          const dateStr = s?.date || '';
+          const key = `${c}|${dateStr}|${timeStr}`;
+          existingByKey.set(key, s);
+        });
+        
+        // Merge: Keep schedules in grace period from previous state, use new data for others
+        const merged = sortedSchedules.map((newSchedule: any) => {
+          const c = parseInt(newSchedule?.container) || 1;
+          const timeStr = newSchedule?.time ? String(newSchedule.time).substring(0, 5) : '';
+          const dateStr = newSchedule?.date || '';
+          const key = `${c}|${dateStr}|${timeStr}`;
+          
+          const existing = existingByKey.get(key);
+          if (existing) {
+            // Check if existing schedule is in grace period (even if new data says "Done")
+            const isInGracePeriod = timeStr && alarmTriggerTracker.isWithinGracePeriod(c, timeStr, dateStr);
+            if (isInGracePeriod && (existing.status === 'Done' || newSchedule.status === 'Done')) {
+              // Keep the existing schedule with Done status if in grace period
+              // This ensures it remains visible even after backend reload
+              console.log(`[MonitorManageScreen] 🔄 Preserving schedule in grace period: Container ${c}, Time ${timeStr}, Date ${dateStr}`);
+              return { ...existing, status: 'Done' }; // Ensure status is Done but keep in list
+            }
+          }
+          return newSchedule;
+        });
+        
+        // Also add any schedules from previous state that are in grace period but not in new data
+        // This handles edge cases where backend might filter them out
+        existingByKey.forEach((existing, key) => {
+          const [cStr, dateStr, timeStr] = key.split('|');
+          const c = parseInt(cStr) || 1;
+          const isInGracePeriod = timeStr && alarmTriggerTracker.isWithinGracePeriod(c, timeStr, dateStr);
+          if (isInGracePeriod && existing.status === 'Done') {
+            const alreadyInMerged = merged.some((s: any) => {
+              const sKey = `${parseInt(s?.container) || 1}|${s?.date || ''}|${s?.time ? String(s.time).substring(0, 5) : ''}`;
+              return sKey === key;
+            });
+            if (!alreadyInMerged) {
+              console.log(`[MonitorManageScreen] 🔄 Adding back schedule in grace period: Container ${c}, Time ${timeStr}`);
+              merged.push(existing);
+            }
+          }
+        });
+        
+        return merged;
+      });
+      
+      // Update schedule cache for instant status lookups (synchronous)
+      // This enables instant status updates when Stop Alarm is pressed
+      updateScheduleCache(sortedSchedules);
       
       // Log summary of loaded schedules
       console.log(`[MonitorManageScreen] ✅ Loaded ${sortedSchedules.length} schedule(s) from backend:`);
@@ -1257,16 +1320,69 @@ const MonitorManageScreen = () => {
     }
   };
 
+  // Initialize schedule cache on mount and listen for instant status updates
+  useEffect(() => {
+    // Initialize cache from AsyncStorage (non-blocking)
+    initializeScheduleCache().catch(() => {});
+    // Initialize alarm trigger tracker for 1-minute grace period after alarm triggers
+    alarmTriggerTracker.initialize().catch((err) => {
+      console.error('[MonitorManageScreen] Failed to initialize alarm trigger tracker:', err);
+    });
+    
+    // Sync offline updates when app comes online
+    syncOfflineUpdates().catch(() => {});
+    
+    // Listen for INSTANT status updates (when Stop Alarm is pressed)
+    // This ensures UI updates immediately without waiting for backend or reload
+    const statusListener = DeviceEventEmitter.addListener('pillnow:scheduleStatus', (event) => {
+      const { container, time, status, scheduleId } = event;
+      
+      // INSTANT local state update - no async, no delays
+      // CRITICAL: This updates status but does NOT remove the schedule from the list
+      // The grace period check in pendingSchedulesToShow will keep it visible for 60 seconds
+      setSchedules((prevSchedules) => {
+        return prevSchedules.map((schedule) => {
+          const scheduleContainer = parseInt(schedule.container) || schedule.container;
+          const scheduleTime = String(schedule.time).substring(0, 5);
+          const eventTime = String(time).substring(0, 5);
+          
+          // Match by container and time
+          if (scheduleContainer === container && scheduleTime === eventTime) {
+            // If status is Done, update immediately
+            // NOTE: Schedule remains in the list - grace period check in pendingSchedulesToShow
+            // will keep it visible for 60 seconds even with status "Done"
+            if (status === 'Done') {
+              console.log(`[MonitorManageScreen] ✅ INSTANT status update: Schedule ${schedule._id} → TAKEN (will remain visible during grace period)`);
+              return { ...schedule, status: 'Done' };
+            }
+          }
+          return schedule;
+        });
+      });
+      
+      // Force UI refresh
+      setClockTick((t) => t + 1);
+    });
+    
+    return () => {
+      statusListener.remove();
+    };
+  }, []);
+  
   // Periodically refresh derived statuses (Pending -> Missed once time passes)
   // Also auto-delete schedules missed for more than 5 minutes
   // Note: We reload data but don't sync to Arduino to avoid constant re-syncing
   useEffect(() => {
     let cycleCount = 0;
     
-    // Update clock tick every 10 seconds to trigger status re-derivation
+    // Update clock tick every 5 seconds to trigger status re-derivation and grace period checks
+    // This ensures schedules disappear exactly when grace period expires (60 seconds)
+    // Shorter interval (5s vs 10s) provides more accurate grace period expiration
     const statusUpdateInterval = setInterval(() => {
       setClockTick((t) => t + 1);
-    }, 10000); // Update every 10 seconds for real-time status changes
+      // Clean up expired grace periods to free memory
+      alarmTriggerTracker.cleanupExpired().catch(() => {});
+    }, 5000); // Update every 5 seconds for accurate grace period expiration
     
     // Reload data every 30 seconds
     const dataReloadInterval = setInterval(async () => {
@@ -2042,10 +2158,20 @@ const MonitorManageScreen = () => {
 
   // Helper to derive status locally without mutating backend
   // Mark as "Missed" if it's been more than 1 minute past the scheduled time
+  // GRACE PERIOD: Schedules remain visible for 1 minute after alarm trigger,
+  // even if marked as TAKEN, so users can see and interact with the alarm.
   const deriveStatus = useCallback((schedule: any): 'Pending' | 'Missed' | 'Taken' | string => {
     const rawStatus = (schedule?.status || 'Pending') as string;
+    const container = parseInt(schedule?.container) || 1;
+    const timeStr = schedule?.time ? String(schedule.time).substring(0, 5) : '';
+    const dateStr = schedule?.date;
+    
+    // GRACE PERIOD: If schedule is within 1-minute grace period after alarm trigger,
+    // keep it visible even if status is Done/Taken
+    const isWithinGracePeriod = timeStr && alarmTriggerTracker.isWithinGracePeriod(container, timeStr, dateStr);
     
     // If already marked as Done, show as Taken
+    // BUT: If within grace period, we still want to show it (handled by filtering logic)
     if (rawStatus.toLowerCase() === 'done') {
       return 'Taken';
     }
@@ -2068,8 +2194,9 @@ const MonitorManageScreen = () => {
       // 1. Status is "Pending" or "Active" (not already Done/Missed)
       // 2. Current time is past scheduled time
       // 3. It's been more than 1 minute past (buffer to prevent premature marking)
+      // 4. NOT within grace period (grace period takes precedence)
       const isPendingOrActive = rawStatus === 'Pending' || rawStatus === 'Active' || !rawStatus;
-      if (isPendingOrActive && when.getTime() < oneMinuteAgo) {
+      if (isPendingOrActive && when.getTime() < oneMinuteAgo && !isWithinGracePeriod) {
         // Mark as missed in backend (only once per schedule)
         markAsMissedOnce(schedule);
         return 'Missed';
@@ -2084,6 +2211,9 @@ const MonitorManageScreen = () => {
   // For the "Current Schedules" dropdown, only show the latest *pending* schedule
   // for each container (1, 2, 3). Keep `schedules` untouched because other flows
   // (delete-all, syncing) rely on the full list.
+  // 
+  // GRACE PERIOD: Schedules remain visible for 1 minute after alarm trigger,
+  // even if marked as TAKEN, to give users time to see and interact with the alarm.
   const pendingSchedulesToShow = useMemo(() => {
     const parseWhenMs = (schedule: any): number | null => {
       if (!schedule?.date || !schedule?.time) return null;
@@ -2102,8 +2232,30 @@ const MonitorManageScreen = () => {
     for (const s of schedules || []) {
       const c = parseInt(s?.container);
       if (c !== 1 && c !== 2 && c !== 3) continue;
-      if (deriveStatus(s) !== 'Pending') continue;
-      byContainer[c as 1 | 2 | 3].push(s);
+      
+      const status = deriveStatus(s);
+      const timeStr = s?.time ? String(s.time).substring(0, 5) : '';
+      const dateStr = s?.date;
+      
+      // GRACE PERIOD: Check if schedule is within 1-minute grace period after alarm trigger
+      // CRITICAL: This check MUST happen BEFORE status filtering to prevent premature removal
+      // The grace period ensures schedules remain visible for exactly 60 seconds after alarm trigger,
+      // even if status becomes "Done" or "Taken" immediately
+      const isWithinGracePeriod = timeStr && alarmTriggerTracker.isWithinGracePeriod(c, timeStr, dateStr);
+      
+      // SINGLE SOURCE OF TRUTH: Visibility is determined by grace period OR status, not status alone
+      // Show schedule if:
+      // 1. Status is Pending (always show pending schedules), OR
+      // 2. Status is Taken/Done BUT within grace period (1 minute after alarm trigger)
+      //    This ensures the schedule stays visible even after being marked as TAKEN
+      const shouldShow = status === 'Pending' || (status === 'Taken' && isWithinGracePeriod);
+      
+      if (shouldShow) {
+        byContainer[c as 1 | 2 | 3].push(s);
+      } else if (isWithinGracePeriod) {
+        // DEBUG: Log if grace period check passes but schedule is still filtered
+        console.log(`[MonitorManageScreen] ⚠️ Schedule in grace period but filtered: Container ${c}, Time ${timeStr}, Status ${status}`);
+      }
     }
 
     // Pick the "current" pending schedule per container: the soonest upcoming time.
@@ -2124,7 +2276,7 @@ const MonitorManageScreen = () => {
 
     // Ensure stable order: container 1, 2, 3
     return picked.sort((a: any, b: any) => (parseInt(a?.container) || 0) - (parseInt(b?.container) || 0));
-  }, [schedules, deriveStatus]);
+  }, [schedules, deriveStatus, clockTick]); // Include clockTick to refresh when grace period expires
 
   // Get container schedules
   const getContainerSchedules = (): Record<number, { pill: string | null, alarms: Date[] }> => {

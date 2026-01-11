@@ -6,6 +6,9 @@ import PillMismatchModal from './PillMismatchModal';
 import verificationService from '@/services/verificationService';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { soundService } from '@/services/soundService';
+import { markScheduleTakenInstant, updateScheduleCache } from '@/services/scheduleStatusService';
+import { alarmTriggerTracker } from '@/services/alarmTriggerTracker';
+import { modalController } from '@/services/ModalController';
 
 type PendingMismatch = {
   container: number;
@@ -47,6 +50,12 @@ export default function GlobalAlarmHandler() {
   const [pillMismatchForeignPills, setPillMismatchForeignPills] = useState(false);
   const [pillMismatchForeignLabels, setPillMismatchForeignLabels] = useState<string[]>([]);
 
+  // MODAL CONTROLLER: Single source of truth for all modal state
+  // These refs are used by ModalController for synchronous state checks (no stale closures)
+  const activeModalRef = useRef<'ALARM' | 'PILL_MISMATCH' | null>(null);
+  const alarmLockRef = useRef<boolean>(false);
+  const mismatchLockRef = useRef<boolean>(false);
+
   // IMPROVED: Alarm queue for multiple simultaneous alarms
   const alarmQueueRef = useRef<AlarmQueueItem[]>([]);
   const processedAlarmsRef = useRef<Set<string>>(new Set()); // track shown alarms to prevent duplicates
@@ -57,8 +66,13 @@ export default function GlobalAlarmHandler() {
   const lastMismatchByContainerRef = useRef<Map<number, { shownAt: number; verificationTs?: string }>>(new Map());
   const mismatchInFlightRef = useRef<Set<number>>(new Set());
   const pendingMismatchRef = useRef<PendingMismatch | null>(null);
-  const pendingMismatchTimerRef = useRef<any>(null);
-  const pendingMismatchCandidateRef = useRef<number | null>(null); // container waiting to show mismatch (race with alarm)
+  // REMOVED: pendingMismatchTimerRef and pendingMismatchCandidateRef - no longer using setTimeout
+  
+  // HARD GUARD: Track handled mismatches by unique ID to prevent duplicates
+  // Key format: `${containerNum}|${verificationTs || timestamp}`
+  // This ensures each distinct mismatch event is handled only once
+  const handledMismatchIdsRef = useRef<Set<string>>(new Set());
+  const lastMismatchIdRef = useRef<string>(''); // Track last shown mismatch ID
 
   // IMPORTANT: onDataReceived callback is registered once; use refs to avoid stale state.
   const alarmVisibleRef = useRef<boolean>(false);
@@ -66,9 +80,55 @@ export default function GlobalAlarmHandler() {
   const pillMismatchVisibleRef = useRef<boolean>(false);
   const alarmSessionActiveRef = useRef<boolean>(false); // true only for "take pill" schedule alarm session
 
+  // Initialize ModalController on mount
+  // SINGLE SOURCE OF TRUTH: All modal state is managed by ModalController
+  useEffect(() => {
+    modalController.initialize(activeModalRef, alarmLockRef, mismatchLockRef);
+    
+    // Subscribe to modal state changes to sync React state
+    // CRITICAL: State sync happens SYNCHRONOUSLY - no render delays
+    const unsubscribe = modalController.onStateChange(() => {
+      // Read state directly from ref (synchronous, no stale closures)
+      const activeModal = activeModalRef.current;
+      
+      // Sync alarm visibility IMMEDIATELY (synchronous state update)
+      // Use functional updates to ensure we get latest state
+      setAlarmVisible((prev) => {
+        const shouldShow = activeModal === 'ALARM';
+        if (shouldShow !== prev) {
+          alarmVisibleRef.current = shouldShow;
+          return shouldShow;
+        }
+        return prev;
+      });
+      
+      // Sync mismatch visibility IMMEDIATELY (only if alarm is not active)
+      setPillMismatchVisible((prev) => {
+        const shouldShow = activeModal === 'PILL_MISMATCH' && activeModal !== 'ALARM';
+        if (shouldShow !== prev) {
+          pillMismatchVisibleRef.current = shouldShow;
+          return shouldShow;
+        }
+        return prev;
+      });
+    });
+
+    return unsubscribe;
+  }, []); // Only run once on mount
+
+  // SYNCHRONOUS state setters - no delays, immediate updates
+  // CRITICAL: These functions update React state AND ModalController refs synchronously
+  // Modal visibility is driven by activeModalRef.current, not React state (for instant display)
   const setAlarmVisibleSafe = (v: boolean) => {
     alarmVisibleRef.current = v;
     setAlarmVisible(v);
+    // Sync with ModalController (single source of truth)
+    // CRITICAL: activeModalRef is updated IMMEDIATELY, modal appears on next render
+    if (v) {
+      activeModalRef.current = 'ALARM';
+    } else if (activeModalRef.current === 'ALARM') {
+      activeModalRef.current = null;
+    }
   };
   const setAlarmContainerSafe = (v: number) => {
     alarmContainerRef.current = v;
@@ -77,12 +137,27 @@ export default function GlobalAlarmHandler() {
   const setPillMismatchVisibleSafe = (v: boolean) => {
     pillMismatchVisibleRef.current = v;
     setPillMismatchVisible(v);
+    // Sync with ModalController (single source of truth)
+    // CRITICAL: activeModalRef is updated IMMEDIATELY, modal appears on next render
+    if (v) {
+      activeModalRef.current = 'PILL_MISMATCH';
+    } else if (activeModalRef.current === 'PILL_MISMATCH') {
+      activeModalRef.current = null;
+    }
   };
 
   // NEW: Show next alarm from queue
+  // MODAL PRIORITY: Alarm modal has highest priority - uses ModalController to ensure no overlaps
   const showNextAlarmFromQueue = () => {
     if (alarmQueueRef.current.length === 0) {
       console.log('[GlobalAlarmHandler] 🔔 Alarm queue is empty');
+      return;
+    }
+
+    // MODAL CONTROLLER: Try to show alarm modal (will block if mismatch is showing)
+    // SYNCHRONOUS: State change happens immediately, no delays
+    if (!modalController.tryShowAlarm()) {
+      console.log('[GlobalAlarmHandler] ⏳ Alarm modal blocked by ModalController (lock active)');
       return;
     }
 
@@ -91,6 +166,7 @@ export default function GlobalAlarmHandler() {
     console.log(`[GlobalAlarmHandler] 🔔 Remaining in queue: ${alarmQueueRef.current.length}`);
 
     // Show modal INSTANTLY - no delays
+    // ModalController has already set activeModalRef, so we just sync React state
     setAlarmContainerSafe(nextAlarm.container);
     setAlarmTime(nextAlarm.time);
     setAlarmVisibleSafe(true);
@@ -98,6 +174,20 @@ export default function GlobalAlarmHandler() {
     alarmSessionActiveRef.current = true;
     lastAlarmKeyRef.current = nextAlarm.key;
     lastAlarmShownAtRef.current = nextAlarm.ts;
+
+    // GRACE PERIOD: Record alarm trigger timestamp for 1-minute visibility grace period
+    // This ensures the schedule remains visible for 60 seconds even after being marked as TAKEN
+    // 
+    // CRITICAL: We record with today's date to match schedule dates, but also support date-less lookup
+    // The alarmTriggerTracker.isWithinGracePeriod() function handles both cases
+    const today = new Date().toISOString().split('T')[0]; // YYYY-MM-DD format
+    alarmTriggerTracker.recordAlarmTrigger(nextAlarm.container, nextAlarm.time, today).catch((e) => {
+      console.warn('[GlobalAlarmHandler] Failed to record alarm trigger:', e);
+    });
+    // Also record without date as fallback (in case schedule date doesn't match)
+    alarmTriggerTracker.recordAlarmTrigger(nextAlarm.container, nextAlarm.time).catch((e) => {
+      console.warn('[GlobalAlarmHandler] Failed to record alarm trigger (no date):', e);
+    });
 
     // Start phone-side alarm sound/haptics (globalized here so MonitorManageScreen doesn't duplicate it)
     soundService.initialize()
@@ -226,75 +316,25 @@ export default function GlobalAlarmHandler() {
     }
   };
 
-  // Mark schedule as Done (Taken) when alarm is turned off
-  const markScheduleDone = async (container: number, timeStr: string) => {
-    try {
-      console.log(`[GlobalAlarmHandler] 📝 Marking schedule as Done: Container ${container} at ${timeStr}`);
-      const token = await AsyncStorage.getItem('token');
-      const headers: HeadersInit = { 'Content-Type': 'application/json' };
-      if (token) headers['Authorization'] = `Bearer ${token.trim()}`;
-
-      const resp = await fetch(`${API_BASE}/api/medication_schedules`, { headers });
-      if (!resp.ok) {
-        console.warn(`[GlobalAlarmHandler] ⚠️ Failed to fetch schedules: ${resp.status}`);
-        return;
-      }
-      const data = await resp.json();
-      const allSchedules = data.data || [];
-      const date = todayYyyyMmDd();
-
-      // Prefer matching today's schedule; fallback to first match if date missing.
-      const matchingSchedule =
-        allSchedules.find((s: any) => String(s.date || '').slice(0, 10) === date &&
-          parseInt(s.container) === container &&
-          String(s.time).substring(0, 5) === timeStr) ||
-        allSchedules.find((s: any) =>
-          parseInt(s.container) === container && String(s.time).substring(0, 5) === timeStr);
-
-      if (!matchingSchedule) {
-        console.warn(`[GlobalAlarmHandler] ⚠️ No matching schedule found for Container ${container} at ${timeStr}`);
-        return;
-      }
-
-      const currentStatus = String(matchingSchedule.status || 'Pending');
-      if (currentStatus === 'Done' || currentStatus === 'Taken') {
-        console.log(`[GlobalAlarmHandler] ⏳ Schedule already ${currentStatus}, skipping`);
-        return;
-      }
-
-      console.log(`[GlobalAlarmHandler] ✅ Found schedule ${matchingSchedule._id}, updating to Done...`);
-      const updateResp = await fetch(`${API_BASE}/api/medication_schedules/${matchingSchedule._id}`, {
-        method: 'PATCH',
-        headers,
-        body: JSON.stringify({ status: 'Done' }),
-      });
-      
-      if (updateResp.ok) {
-        console.log(`[GlobalAlarmHandler] ✅ Schedule ${matchingSchedule._id} marked as Done (Taken)`);
-        // Emit event to update UI immediately
-        DeviceEventEmitter.emit('pillnow:scheduleStatus', { container, time: timeStr, status: 'Done' });
-      } else {
-        const errorText = await updateResp.text();
-        console.warn(`[GlobalAlarmHandler] ⚠️ PATCH failed (${updateResp.status}): ${errorText}, trying PUT...`);
-        
-        // Fallback to PUT if PATCH doesn't work
-        const putResp = await fetch(`${API_BASE}/api/medication_schedules/${matchingSchedule._id}`, {
-          method: 'PUT',
-          headers,
-          body: JSON.stringify({ ...matchingSchedule, status: 'Done' }),
-        });
-        
-        if (putResp.ok) {
-          console.log(`[GlobalAlarmHandler] ✅ Schedule marked as Done (via PUT)`);
-          DeviceEventEmitter.emit('pillnow:scheduleStatus', { container, time: timeStr, status: 'Done' });
-        } else {
-          const putErrorText = await putResp.text();
-          console.warn(`[GlobalAlarmHandler] ⚠️ PUT also failed (${putResp.status}): ${putErrorText}`);
-        }
-      }
-    } catch (err) {
-      console.error(`[GlobalAlarmHandler] ❌ Error marking schedule as Done:`, err);
-      // non-fatal
+  /**
+   * Mark schedule as Done (Taken) INSTANTLY - synchronous, no delays
+   * 
+   * This function uses the scheduleStatusService which:
+   * 1. Updates local cache immediately (synchronous)
+   * 2. Emits event immediately (UI updates instantly)
+   * 3. Stores in AsyncStorage (non-blocking)
+   * 4. Syncs to backend in background (debounced)
+   * 
+   * This ensures status is TAKEN the moment Stop Alarm is pressed,
+   * with no race conditions or delays.
+   */
+  const markScheduleDone = (container: number, timeStr: string): void => {
+    // INSTANT update - synchronous, no async/await
+    const success = markScheduleTakenInstant(container, timeStr);
+    if (success) {
+      console.log(`[GlobalAlarmHandler] ✅ INSTANT status update: Container ${container} at ${timeStr} → TAKEN`);
+    } else {
+      console.log(`[GlobalAlarmHandler] ⏳ Status update skipped (already TAKEN or in progress)`);
     }
   };
 
@@ -307,14 +347,24 @@ export default function GlobalAlarmHandler() {
     
     const now = Date.now();
     
-    // Enhanced global cooldown to prevent stacking modals (15 seconds)
-    if (pillMismatchVisibleRef.current) {
-      console.log(`[GlobalAlarmHandler] ⏳ Mismatch modal already visible, skipping duplicate`);
+    // HARD GUARD #1: Prevent duplicate triggers from multiple sources (Bluetooth + HTTP polling)
+    // Generate a temporary mismatch ID based on container and current time (will be replaced with verification timestamp)
+    const tempMismatchId = `${containerNum}|${now}`;
+    
+    // MODAL CONTROLLER: Try to show mismatch modal (will be blocked if alarm is showing)
+    // This is the PRIMARY guard - ModalController enforces priority (alarm > mismatch)
+    // SYNCHRONOUS: State change happens immediately, no delays
+    if (!modalController.tryShowMismatch()) {
+      console.log(`[GlobalAlarmHandler] ⏳ Mismatch modal blocked by ModalController (alarm has priority or lock active)`);
       return;
     }
     
+    // Enhanced global cooldown to prevent stacking modals (15 seconds)
+    // This is a secondary guard for rapid-fire triggers
     if (now - lastMismatchShownAtRef.current < 15000) {
       console.log(`[GlobalAlarmHandler] ⏳ Global mismatch cooldown active (${Math.round((15000 - (now - lastMismatchShownAtRef.current)) / 1000)}s remaining), skipping`);
+      // Release the lock since we're not showing
+      modalController.closeMismatch();
       return;
     }
     
@@ -323,13 +373,15 @@ export default function GlobalAlarmHandler() {
     if (lastByContainer && now - lastByContainer.shownAt < 90000) {
       const remaining = Math.round((90000 - (now - lastByContainer.shownAt)) / 1000);
       console.log(`[GlobalAlarmHandler] ⏳ Container ${containerNum} mismatch cooldown active (${remaining}s remaining), skipping duplicate`);
+      modalController.closeMismatch();
       return;
     }
 
-    // Prevent race conditions: if multiple PILLALERTs arrive quickly, only allow one
+    // HARD GUARD #2: Prevent race conditions - if multiple PILLALERTs arrive quickly, only allow one
     // mismatch verification/modal flow per container at a time.
     if (mismatchInFlightRef.current.has(containerNum)) {
-      console.log(`[GlobalAlarmHandler] ⏳ Mismatch verification already in flight for container ${containerNum}, skipping`);
+      console.log(`[GlobalAlarmHandler] ⏳ Mismatch verification already in flight for container ${containerNum}, skipping duplicate trigger`);
+      modalController.closeMismatch();
       return;
     }
     mismatchInFlightRef.current.add(containerNum);
@@ -340,10 +392,27 @@ export default function GlobalAlarmHandler() {
     try {
       const result = await verificationService.getVerificationResult(containerId);
       const verificationTs = (result as any)?.timestamp ? String((result as any).timestamp) : undefined;
-
+      
+      // HARD GUARD #3: Generate unique mismatch ID from verification timestamp or fallback to current time
+      // This ensures each distinct mismatch event is handled only once, even if triggered from multiple sources
+      const mismatchId = verificationTs 
+        ? `${containerNum}|${verificationTs}` 
+        : `${containerNum}|${now}`;
+      
+      // CRITICAL: Check if this exact mismatch has already been handled
+      // This prevents duplicates from Bluetooth + HTTP polling triggering the same mismatch
+      if (handledMismatchIdsRef.current.has(mismatchId)) {
+        console.log(`[GlobalAlarmHandler] 🛡️ HARD GUARD: Mismatch ${mismatchId} already handled, blocking duplicate`);
+        mismatchInFlightRef.current.delete(containerNum);
+        modalController.closeMismatch();
+        return;
+      }
+      
       // If we already showed a mismatch for this exact verification result, don't show again.
       if (verificationTs && lastByContainer?.verificationTs === verificationTs) {
-        console.log(`[GlobalAlarmHandler] ⏳ Already showed mismatch for this verification, skipping`);
+        console.log(`[GlobalAlarmHandler] ⏳ Already showed mismatch for this verification timestamp, skipping`);
+        mismatchInFlightRef.current.delete(containerNum);
+        modalController.closeMismatch();
         return;
       }
 
@@ -386,6 +455,19 @@ export default function GlobalAlarmHandler() {
           console.log(`   KNN verified: ${knnData.total_verified}, Foreign pills: ${knnData.foreign_pills_detected}`);
         }
 
+        // HARD GUARD #4: Mark this mismatch as handled BEFORE showing modal
+        // This prevents duplicate modals if the same mismatch is triggered again
+        handledMismatchIdsRef.current.add(mismatchId);
+        lastMismatchIdRef.current = mismatchId;
+        
+        // Clean up old handled mismatch IDs (keep only last 10 to prevent memory leak)
+        if (handledMismatchIdsRef.current.size > 10) {
+          const idsArray = Array.from(handledMismatchIdsRef.current);
+          handledMismatchIdsRef.current = new Set(idsArray.slice(-10));
+        }
+        
+        // Set mismatch data and show modal
+        // ModalController has already set activeModalRef, so we just sync React state
         setPillMismatchContainer(containerNum);
         setPillMismatchExpected(expectedLabel);
         setPillMismatchDetected(detectedLabels);
@@ -396,6 +478,11 @@ export default function GlobalAlarmHandler() {
         setPillMismatchVisibleSafe(true);
         lastMismatchShownAtRef.current = now;
         lastMismatchByContainerRef.current.set(containerNum, { shownAt: now, verificationTs });
+        
+        // Clear in-flight flag since we've successfully shown the modal
+        mismatchInFlightRef.current.delete(containerNum);
+        
+        console.log(`[GlobalAlarmHandler] ✅ Mismatch modal shown for Container ${containerNum} (ID: ${mismatchId})`);
 
         // Local notification for pill mismatch
         try {
@@ -417,11 +504,26 @@ export default function GlobalAlarmHandler() {
         }
         return;
       } else {
-        console.log(`[GlobalAlarmHandler] Verification result: pass_=${result.result?.pass_}, success=${result.success}`);
+        // Verification passed or no mismatch detected - clear in-flight flag and close modal
+        console.log(`[GlobalAlarmHandler] Verification result: pass_=${result.result?.pass_}, success=${result.success} - no mismatch`);
+        mismatchInFlightRef.current.delete(containerNum);
+        modalController.closeMismatch();
+        return;
       }
 
       // Fallback generic modal if verification isn't available yet
-      console.log(`[GlobalAlarmHandler] ⚠️ Showing fallback mismatch modal (no detailed verification available)`);
+      // HARD GUARD: Mark this mismatch as handled even for fallback
+      handledMismatchIdsRef.current.add(mismatchId);
+      lastMismatchIdRef.current = mismatchId;
+      
+      // Clean up old handled mismatch IDs
+      if (handledMismatchIdsRef.current.size > 10) {
+        const idsArray = Array.from(handledMismatchIdsRef.current);
+        handledMismatchIdsRef.current = new Set(idsArray.slice(-10));
+      }
+      
+      // ModalController check already passed above, so we can show
+      console.log(`[GlobalAlarmHandler] ⚠️ Showing fallback mismatch modal (no detailed verification available, ID: ${mismatchId})`);
       setPillMismatchContainer(containerNum);
       setPillMismatchExpected('unknown');
       setPillMismatchDetected('Mismatch detected');
@@ -432,8 +534,14 @@ export default function GlobalAlarmHandler() {
       setPillMismatchVisibleSafe(true);
       lastMismatchShownAtRef.current = now;
       lastMismatchByContainerRef.current.set(containerNum, { shownAt: now, verificationTs });
-    } finally {
+      
+      // Clear in-flight flag
       mismatchInFlightRef.current.delete(containerNum);
+    } catch (err) {
+      // Error fetching verification - clear in-flight flag and close modal
+      console.warn(`[GlobalAlarmHandler] ⚠️ Error fetching verification for container ${containerNum}:`, err);
+      mismatchInFlightRef.current.delete(containerNum);
+      modalController.closeMismatch();
     }
   };
 
@@ -636,11 +744,11 @@ export default function GlobalAlarmHandler() {
                   console.log(`[GlobalAlarmHandler] 📨 HTTP Poll: ALARM_TRIGGERED for Container ${containerNum} at ${timeStr}`);
                   
                   // Process alarm same as Bluetooth message
-                  if (pendingMismatchTimerRef.current) {
-                    clearTimeout(pendingMismatchTimerRef.current);
-                    pendingMismatchTimerRef.current = null;
+                  // MODAL PRIORITY: Alarm has priority - close mismatch if showing
+                  if (pillMismatchVisibleRef.current) {
+                    modalController.closeMismatch();
+                    setPillMismatchVisibleSafe(false);
                   }
-                  if (pillMismatchVisibleRef.current) setPillMismatchVisibleSafe(false);
                   
                   const wasAdded = addAlarmToQueue(containerNum, timeStr);
                   if (wasAdded && !alarmVisibleRef.current) {
@@ -652,8 +760,13 @@ export default function GlobalAlarmHandler() {
                   
                   if (alarmVisibleRef.current) {
                     pendingMismatchRef.current = { container: containerNum, ts: Date.now() };
+                    console.log(`[GlobalAlarmHandler] ⏳ HTTP Poll: Alarm active, queuing mismatch for Container ${containerNum}`);
                   } else {
-                    showMismatchForContainer(containerNum).catch(() => {});
+                    // All triggers go through the same centralized function with hard guards
+                    console.log(`[GlobalAlarmHandler] 📨 HTTP Poll: Triggering mismatch for Container ${containerNum}`);
+                    showMismatchForContainer(containerNum).catch((err) => {
+                      console.warn(`[GlobalAlarmHandler] Error showing mismatch from HTTP poll trigger:`, err);
+                    });
                   }
                 }
               }
@@ -728,18 +841,15 @@ export default function GlobalAlarmHandler() {
 
         console.log(`[GlobalAlarmHandler] 📨 Received ALARM_TRIGGERED for Container ${container} at ${timeStr}`);
 
-        // If a mismatch alert came in slightly earlier, cancel its immediate display and queue it instead.
-        if (pendingMismatchTimerRef.current) {
-          clearTimeout(pendingMismatchTimerRef.current);
-          pendingMismatchTimerRef.current = null;
-        }
-        if (pendingMismatchCandidateRef.current) {
-          pendingMismatchRef.current = { container: pendingMismatchCandidateRef.current, ts: Date.now() };
-          pendingMismatchCandidateRef.current = null;
-        }
+        // MODAL PRIORITY: If mismatch was queued, it will be handled by ModalController
+        // No need to cancel timers - we're using state-driven logic now
 
-        // Don't stack on mismatch modal
-        if (pillMismatchVisibleRef.current) setPillMismatchVisibleSafe(false);
+        // MODAL PRIORITY: Alarm has priority - close mismatch modal if showing
+        // ModalController will handle this, but we also close React state immediately
+        if (pillMismatchVisibleRef.current) {
+          modalController.closeMismatch();
+          setPillMismatchVisibleSafe(false);
+        }
 
         // IMPROVED: Add to queue instead of immediately showing
         // This handles multiple simultaneous alarms (e.g., 3 containers at same time)
@@ -796,9 +906,10 @@ export default function GlobalAlarmHandler() {
 
         console.log(`[GlobalAlarmHandler] 🛑 Alarm stopped for Container ${container}`);
 
-        // Mark schedule as Done immediately when alarm is stopped (medicine taken)
+        // INSTANT status update when ALARM_STOPPED is received from hardware
+        // This ensures status is TAKEN immediately, even if user pressed hardware button
         if (container && timeStr) {
-          markScheduleDone(container, timeStr).catch(() => {});
+          markScheduleDone(container, timeStr);
         }
 
         // Stop phone-side alarm sound/haptics immediately when hardware stop arrives
@@ -808,12 +919,8 @@ export default function GlobalAlarmHandler() {
           // ignore
         }
 
-        // Cancel any pending mismatch timer/candidate to avoid duplicates after stop.
-        if (pendingMismatchTimerRef.current) {
-          clearTimeout(pendingMismatchTimerRef.current);
-          pendingMismatchTimerRef.current = null;
-        }
-        pendingMismatchCandidateRef.current = null;
+        // MODAL STATE MANAGER: Mismatch queuing is handled by ModalController
+        // No need to cancel timers - we're using state-driven logic now
 
         // If a stop is already in flight (e.g., user pressed Stop inside modal and modal's onStop is handling capture), don't double-trigger
         if (stopInFlightRef.current) {
@@ -822,11 +929,14 @@ export default function GlobalAlarmHandler() {
           // Start post-pill capture + verification and show result in modal
           alarmSessionActiveRef.current = false;
 
-          (async () => {
-            // Re-open modal so user can see 'verifying' and then the annotated image
-            setAlarmContainerSafe(container);
-            setAlarmVisibleSafe(true);
+          // CRITICAL: Re-open modal SYNCHRONOUSLY so user can see 'verifying' state immediately
+          // Do NOT wrap in async - modal must open instantly, verification happens in background
+          setAlarmContainerSafe(container);
+          setAlarmVisibleSafe(true); // Modal opens IMMEDIATELY, no async delay
 
+          // Fetch verification in background (non-blocking)
+          // Modal is already visible, verification result will update it when ready
+          (async () => {
             const verification = await fetchVerificationAfterCapture(container);
             if (verification) {
               // setAlarmVerification will cause AlarmModal to display the annotated image
@@ -834,21 +944,23 @@ export default function GlobalAlarmHandler() {
             }
 
             // If there was a pending mismatch queued while alarm was visible, show it now (after verification)
+            // SYNCHRONOUS: Check and show immediately - no delays
             const pending = pendingMismatchRef.current;
             pendingMismatchRef.current = null;
             if (pending && pending.container === container) {
-              setTimeout(() => {
-                showMismatchForContainer(container).catch(() => {});
-              }, 2000);
+              // Alarm verification complete, close alarm and show mismatch immediately
+              modalController.closeAlarm();
+              setAlarmVisibleSafe(false);
+              showMismatchForContainer(container).catch(() => {});
+              return; // Don't show next alarm if mismatch is showing
             }
 
             // Show next queued alarm if any
+            // SYNCHRONOUS: Show immediately - state-driven, no delays
             if (alarmQueueRef.current.length > 0) {
               const remaining = alarmQueueRef.current.length;
-              console.log(`[GlobalAlarmHandler] 🔔 More alarms in queue (${remaining} remaining), showing next in 1.5s...`);
-              setTimeout(() => {
-                showNextAlarmFromQueue();
-              }, 1500);
+              console.log(`[GlobalAlarmHandler] 🔔 More alarms in queue (${remaining} remaining), showing next immediately...`);
+              showNextAlarmFromQueue();
             } else {
               console.log(`[GlobalAlarmHandler] ✅ All alarms processed - queue is empty`);
               setRemainingAlarms(0);
@@ -856,9 +968,9 @@ export default function GlobalAlarmHandler() {
           })();
         } else {
           // Not a schedule session; just dismiss any visible alarm UI
-          // But still mark as Done if we have container/time info
+          // But still mark as Done if we have container/time info (INSTANT update)
           if (container && timeStr) {
-            markScheduleDone(container, timeStr).catch(() => {});
+            markScheduleDone(container, timeStr);
           }
           setAlarmVisibleSafe(false);
         }
@@ -880,27 +992,27 @@ export default function GlobalAlarmHandler() {
         // If we already showed a mismatch modal recently for this container, ignore spammy repeats.
         const lastShown = lastMismatchByContainerRef.current.get(container);
         if (lastShown && Date.now() - lastShown.shownAt < 60000) {
+          console.log(`[GlobalAlarmHandler] ⏳ Bluetooth PILLALERT: Container ${container} mismatch shown recently, ignoring duplicate`);
           return;
         }
 
-        // Important: when alarm+capture fires, backend may immediately emit PILLALERT
-        // and Bluetooth delivery can reorder messages. Buffer mismatch briefly so ALARM_TRIGGERED
-        // can show the "take your pill" modal first.
-        if (pendingMismatchTimerRef.current) {
-          clearTimeout(pendingMismatchTimerRef.current);
-          pendingMismatchTimerRef.current = null;
+        // MODAL PRIORITY: Check if alarm is showing - if so, queue mismatch
+        // NO SETTIMEOUT: Use ModalController to check state synchronously
+        // This ensures mismatch is blocked if alarm is active, without delays
+        if (alarmVisibleRef.current || modalController.isAlarmActive()) {
+          // Alarm is active - queue mismatch to show after alarm closes
+          pendingMismatchRef.current = { container, ts: Date.now() };
+          console.log(`[GlobalAlarmHandler] ⏳ Bluetooth PILLALERT: Alarm active, queuing mismatch for Container ${container}`);
+          return;
         }
-        pendingMismatchCandidateRef.current = container;
-        pendingMismatchTimerRef.current = setTimeout(() => {
-          // If alarm became visible while waiting, keep it queued for after stop.
-          if (alarmVisibleRef.current) {
-            pendingMismatchRef.current = { container, ts: Date.now() };
-            pendingMismatchCandidateRef.current = null;
-            return;
-          }
-          showMismatchForContainer(container).catch(() => {});
-          pendingMismatchCandidateRef.current = null;
-        }, 2500);
+
+        // No alarm active - try to show mismatch immediately
+        // ModalController will block if alarm becomes active (synchronous check)
+        // All triggers go through the same centralized function with hard guards
+        console.log(`[GlobalAlarmHandler] 📨 Bluetooth PILLALERT: Triggering mismatch for Container ${container}`);
+        showMismatchForContainer(container).catch((err) => {
+          console.warn(`[GlobalAlarmHandler] Error showing mismatch from Bluetooth trigger:`, err);
+        });
         return;
       }
     });
@@ -911,14 +1023,8 @@ export default function GlobalAlarmHandler() {
         clearTimeout(httpPollTimer);
         httpPollTimer = null;
       }
-      try {
-        if (pendingMismatchTimerRef.current) {
-          clearTimeout(pendingMismatchTimerRef.current);
-          pendingMismatchTimerRef.current = null;
-        }
-      } catch {
-        // ignore
-      }
+      // MODAL STATE MANAGER: Clean up all modals on unmount
+      modalController.closeAll();
       try {
         cleanup?.();
       } catch {
@@ -929,10 +1035,25 @@ export default function GlobalAlarmHandler() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // CRITICAL: Ensure only one modal shows at a time
-  // Alarm modal has priority over mismatch modal
-  const shouldShowAlarm = alarmVisible;
-  const shouldShowMismatch = pillMismatchVisible && !alarmVisible; // Only show if alarm is not visible
+  // MODAL CONTROLLER: Single source of truth for modal visibility
+  // CRITICAL: Visibility is derived DIRECTLY from ModalController ref (synchronous, no delays)
+  // This ensures modals appear instantly without waiting for React state updates or render cycles
+  // Priority: ALARM > PILL_MISMATCH (enforced by ModalController)
+  const activeModal = activeModalRef.current;
+  const shouldShowAlarm = activeModal === 'ALARM';
+  const shouldShowMismatch = activeModal === 'PILL_MISMATCH' && activeModal !== 'ALARM';
+  
+  // Sync React state with ModalController state (for consistency, but visibility uses ref directly)
+  // This ensures React state matches, but modal visibility is driven by ref for instant display
+  // No delays - state sync happens synchronously
+  if (shouldShowAlarm !== alarmVisible) {
+    alarmVisibleRef.current = shouldShowAlarm;
+    setAlarmVisible(shouldShowAlarm);
+  }
+  if (shouldShowMismatch !== pillMismatchVisible) {
+    pillMismatchVisibleRef.current = shouldShowMismatch;
+    setPillMismatchVisible(shouldShowMismatch);
+  }
 
   return (
     <>
@@ -942,19 +1063,32 @@ export default function GlobalAlarmHandler() {
         time={alarmTime}
         remainingAlarms={remainingAlarms}
         onDismiss={() => {
-          // When alarm is dismissed, mark schedule as Done (medicine taken)
+          // INSTANT status update when alarm is dismissed (e.g., via Dismiss button)
+          // This ensures status is TAKEN even if Stop Alarm wasn't pressed
           if (alarmContainerRef.current && alarmTime) {
-            markScheduleDone(alarmContainerRef.current, alarmTime).catch(() => {});
+            markScheduleDone(alarmContainerRef.current, alarmTime);
           }
+          // MODAL STATE MANAGER: Close alarm modal and reset state
+          modalController.closeAlarm();
           setAlarmVisibleSafe(false);
           setAlarmVerification(null);
+          
+          // Show next alarm from queue if any (state-driven, no setTimeout)
+          if (alarmQueueRef.current.length > 0) {
+            showNextAlarmFromQueue();
+          }
         }}
         onStopImmediate={() => {
-          // Make UI status update immediate when user hits Stop Alarm
-          DeviceEventEmitter.emit('pillnow:scheduleStatus', { container: alarmContainerRef.current, time: alarmTime, status: 'Done' });
-          // Mark schedule as Done in backend immediately
+          // INSTANT status update - synchronous, happens BEFORE modal closes
+          // This is called the moment "Stop Alarm" is pressed
           if (alarmContainerRef.current && alarmTime) {
-            markScheduleDone(alarmContainerRef.current, alarmTime).catch(() => {});
+            markScheduleDone(alarmContainerRef.current, alarmTime);
+            // Event is already emitted by markScheduleDone, but emit again for immediate UI feedback
+            DeviceEventEmitter.emit('pillnow:scheduleStatus', {
+              container: alarmContainerRef.current,
+              time: alarmTime,
+              status: 'Done',
+            });
           }
         }}
         onStop={async (containerNum: number) => {
@@ -974,7 +1108,18 @@ export default function GlobalAlarmHandler() {
         expectedCount={pillMismatchExpectedCount}
         foreignPillsDetected={pillMismatchForeignPills}
         foreignPillLabels={pillMismatchForeignLabels}
-        onDismiss={() => setPillMismatchVisibleSafe(false)}
+        onDismiss={() => {
+          // MODAL CONTROLLER: Close mismatch modal and reset state
+          // NOTE: handledMismatchIdsRef is NOT cleared here - it prevents reopening the same mismatch
+          // The guard is reset only when a NEW distinct mismatch occurs (different ID)
+          modalController.closeMismatch();
+          setPillMismatchVisibleSafe(false);
+          
+          // Clear in-flight flag when modal is dismissed
+          mismatchInFlightRef.current.delete(pillMismatchContainer);
+          
+          console.log(`[GlobalAlarmHandler] ✅ Mismatch modal dismissed for Container ${pillMismatchContainer}`);
+        }}
       />
     </>
   );

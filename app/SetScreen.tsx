@@ -887,12 +887,15 @@ const SetScreen = () => {
             
             console.log(`[SetScreen] Saving schedules for ${containerId}: ${schedulesArray.length} schedule(s)`);
             
-            // Add timeout to prevent hanging
+            // Add timeout to prevent hanging (increased to 15 seconds for slow networks)
             const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 5000); // 5 second timeout
+            const timeoutId = setTimeout(() => {
+              console.warn(`[SetScreen] ⏱️ Request timeout for ${containerId}, aborting...`);
+              controller.abort();
+            }, 15000); // 15 second timeout (increased from 5s)
             
             try {
-              await fetch(`${BACKEND_URL}/set-schedule`, {
+              const response = await fetch(`${BACKEND_URL}/set-schedule`, {
                 method: 'POST',
                 headers: {
                   'Content-Type': 'application/json',
@@ -907,11 +910,27 @@ const SetScreen = () => {
                 }),
                 signal: controller.signal,
               });
+              
+              // Clear timeout on success
               clearTimeout(timeoutId);
+              
+              // Check response status
+              if (!response.ok) {
+                const errorText = await response.text().catch(() => 'Unknown error');
+                throw new Error(`HTTP ${response.status}: ${errorText}`);
+              }
+              
               console.log(`[SetScreen] ✅ Saved pill config and ${schedulesArray.length} schedule(s) for ${containerId}`);
               
               // CRITICAL: Also sync to backend alarm system after saving
               // This ensures alarms fire correctly
+              // Use separate timeout for sync request
+              const syncController = new AbortController();
+              const syncTimeoutId = setTimeout(() => {
+                console.warn(`[SetScreen] ⏱️ Sync request timeout, aborting...`);
+                syncController.abort();
+              }, 15000); // 15 second timeout for sync
+              
               try {
                 // Build sync request body with elderId or userId for proper database query
                 const syncBody: any = {};
@@ -929,20 +948,47 @@ const SetScreen = () => {
                     ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
                   },
                   body: JSON.stringify(syncBody),
+                  signal: syncController.signal,
                 });
+                
+                clearTimeout(syncTimeoutId);
+                
                 if (syncResponse.ok) {
                   const syncData = await syncResponse.json();
                   console.log(`[SetScreen] ✅ Synced schedules to backend alarm system (${syncData.synced_containers} container(s))`);
+                } else {
+                  const syncErrorText = await syncResponse.text().catch(() => 'Unknown error');
+                  console.warn(`[SetScreen] ⚠️ Sync failed with status ${syncResponse.status}: ${syncErrorText}`);
                 }
               } catch (syncErr) {
-                console.warn('[SetScreen] ⚠️ Failed to sync schedules to backend alarm system:', syncErr);
+                clearTimeout(syncTimeoutId);
+                // Don't throw - sync failure is non-critical, main save succeeded
+                if (syncErr instanceof Error && syncErr.name === 'AbortError') {
+                  console.warn('[SetScreen] ⚠️ Sync request timed out (non-critical)');
+                } else {
+                  console.warn('[SetScreen] ⚠️ Failed to sync schedules to backend alarm system:', syncErr);
+                }
               }
             } catch (err) {
               clearTimeout(timeoutId);
-              throw err;
+              
+              // Better error handling - distinguish between timeout and other errors
+              if (err instanceof Error && err.name === 'AbortError') {
+                console.warn(`[SetScreen] ⏱️ Request timed out for container ${containerNum} (15s timeout exceeded)`);
+                // Could implement retry logic here if needed
+              } else {
+                // Re-throw non-timeout errors to be caught by outer catch
+                throw err;
+              }
             }
           } catch (err) {
-            console.warn(`Failed to save pill config/schedules for container ${containerNum}:`, err);
+            // Log error with more context
+            if (err instanceof Error && err.name === 'AbortError') {
+              console.warn(`[SetScreen] ⚠️ Request aborted for container ${containerNum} (likely timeout)`);
+            } else {
+              console.warn(`[SetScreen] ⚠️ Failed to save pill config/schedules for container ${containerNum}:`, err);
+            }
+            // Don't throw - continue saving other containers even if one fails
           }
         }
       }
