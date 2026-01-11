@@ -90,6 +90,7 @@ export default function GlobalAlarmHandler() {
     console.log(`[GlobalAlarmHandler] 🔔 Showing next alarm from queue: Container ${nextAlarm.container} at ${nextAlarm.time}`);
     console.log(`[GlobalAlarmHandler] 🔔 Remaining in queue: ${alarmQueueRef.current.length}`);
 
+    // Show modal INSTANTLY - no delays
     setAlarmContainerSafe(nextAlarm.container);
     setAlarmTime(nextAlarm.time);
     setAlarmVisibleSafe(true);
@@ -103,16 +104,14 @@ export default function GlobalAlarmHandler() {
       .then(() => soundService.playAlarmSound('alarm'))
       .catch((e) => console.warn('[GlobalAlarmHandler] Failed to start alarm sound:', e));
 
-    // Mark schedule as Active
+    // Mark schedule as Active (non-blocking, runs in background)
     DeviceEventEmitter.emit('pillnow:scheduleStatus', { container: nextAlarm.container, time: nextAlarm.time, status: 'Active' });
     markScheduleActive(nextAlarm.container, nextAlarm.time).catch(() => {});
 
-    // Trigger capture for this container
-    setTimeout(() => {
-      triggerCaptureForContainer(nextAlarm.container).catch(() => {});
-    }, 800);
+    // Trigger capture for this container (non-blocking, runs in background)
+    triggerCaptureForContainer(nextAlarm.container).catch(() => {});
 
-    // Tell Arduino which container to light up
+    // Tell Arduino which container to light up (non-blocking)
     BluetoothService.sendCommand(`ALARMTEST${nextAlarm.container}\n`).catch(() => {});
   };
 
@@ -223,6 +222,78 @@ export default function GlobalAlarmHandler() {
       }
     } catch (err) {
       console.error(`[GlobalAlarmHandler] ❌ Error marking schedule as Active:`, err);
+      // non-fatal
+    }
+  };
+
+  // Mark schedule as Done (Taken) when alarm is turned off
+  const markScheduleDone = async (container: number, timeStr: string) => {
+    try {
+      console.log(`[GlobalAlarmHandler] 📝 Marking schedule as Done: Container ${container} at ${timeStr}`);
+      const token = await AsyncStorage.getItem('token');
+      const headers: HeadersInit = { 'Content-Type': 'application/json' };
+      if (token) headers['Authorization'] = `Bearer ${token.trim()}`;
+
+      const resp = await fetch(`${API_BASE}/api/medication_schedules`, { headers });
+      if (!resp.ok) {
+        console.warn(`[GlobalAlarmHandler] ⚠️ Failed to fetch schedules: ${resp.status}`);
+        return;
+      }
+      const data = await resp.json();
+      const allSchedules = data.data || [];
+      const date = todayYyyyMmDd();
+
+      // Prefer matching today's schedule; fallback to first match if date missing.
+      const matchingSchedule =
+        allSchedules.find((s: any) => String(s.date || '').slice(0, 10) === date &&
+          parseInt(s.container) === container &&
+          String(s.time).substring(0, 5) === timeStr) ||
+        allSchedules.find((s: any) =>
+          parseInt(s.container) === container && String(s.time).substring(0, 5) === timeStr);
+
+      if (!matchingSchedule) {
+        console.warn(`[GlobalAlarmHandler] ⚠️ No matching schedule found for Container ${container} at ${timeStr}`);
+        return;
+      }
+
+      const currentStatus = String(matchingSchedule.status || 'Pending');
+      if (currentStatus === 'Done' || currentStatus === 'Taken') {
+        console.log(`[GlobalAlarmHandler] ⏳ Schedule already ${currentStatus}, skipping`);
+        return;
+      }
+
+      console.log(`[GlobalAlarmHandler] ✅ Found schedule ${matchingSchedule._id}, updating to Done...`);
+      const updateResp = await fetch(`${API_BASE}/api/medication_schedules/${matchingSchedule._id}`, {
+        method: 'PATCH',
+        headers,
+        body: JSON.stringify({ status: 'Done' }),
+      });
+      
+      if (updateResp.ok) {
+        console.log(`[GlobalAlarmHandler] ✅ Schedule ${matchingSchedule._id} marked as Done (Taken)`);
+        // Emit event to update UI immediately
+        DeviceEventEmitter.emit('pillnow:scheduleStatus', { container, time: timeStr, status: 'Done' });
+      } else {
+        const errorText = await updateResp.text();
+        console.warn(`[GlobalAlarmHandler] ⚠️ PATCH failed (${updateResp.status}): ${errorText}, trying PUT...`);
+        
+        // Fallback to PUT if PATCH doesn't work
+        const putResp = await fetch(`${API_BASE}/api/medication_schedules/${matchingSchedule._id}`, {
+          method: 'PUT',
+          headers,
+          body: JSON.stringify({ ...matchingSchedule, status: 'Done' }),
+        });
+        
+        if (putResp.ok) {
+          console.log(`[GlobalAlarmHandler] ✅ Schedule marked as Done (via PUT)`);
+          DeviceEventEmitter.emit('pillnow:scheduleStatus', { container, time: timeStr, status: 'Done' });
+        } else {
+          const putErrorText = await putResp.text();
+          console.warn(`[GlobalAlarmHandler] ⚠️ PUT also failed (${putResp.status}): ${putErrorText}`);
+        }
+      }
+    } catch (err) {
+      console.error(`[GlobalAlarmHandler] ❌ Error marking schedule as Done:`, err);
       // non-fatal
     }
   };
@@ -721,8 +792,14 @@ export default function GlobalAlarmHandler() {
       if (trimmed.toUpperCase().includes('ALARM_STOPPED')) {
         const m = trimmed.match(/ALARM_STOPPED\s+C(\d+)/i);
         const container = m ? parseInt(m[1]) : alarmContainerRef.current;
+        const timeStr = alarmTime; // Use current alarm time
 
         console.log(`[GlobalAlarmHandler] 🛑 Alarm stopped for Container ${container}`);
+
+        // Mark schedule as Done immediately when alarm is stopped (medicine taken)
+        if (container && timeStr) {
+          markScheduleDone(container, timeStr).catch(() => {});
+        }
 
         // Stop phone-side alarm sound/haptics immediately when hardware stop arrives
         try {
@@ -779,6 +856,10 @@ export default function GlobalAlarmHandler() {
           })();
         } else {
           // Not a schedule session; just dismiss any visible alarm UI
+          // But still mark as Done if we have container/time info
+          if (container && timeStr) {
+            markScheduleDone(container, timeStr).catch(() => {});
+          }
           setAlarmVisibleSafe(false);
         }
 
@@ -861,12 +942,20 @@ export default function GlobalAlarmHandler() {
         time={alarmTime}
         remainingAlarms={remainingAlarms}
         onDismiss={() => {
+          // When alarm is dismissed, mark schedule as Done (medicine taken)
+          if (alarmContainerRef.current && alarmTime) {
+            markScheduleDone(alarmContainerRef.current, alarmTime).catch(() => {});
+          }
           setAlarmVisibleSafe(false);
           setAlarmVerification(null);
         }}
         onStopImmediate={() => {
           // Make UI status update immediate when user hits Stop Alarm
           DeviceEventEmitter.emit('pillnow:scheduleStatus', { container: alarmContainerRef.current, time: alarmTime, status: 'Done' });
+          // Mark schedule as Done in backend immediately
+          if (alarmContainerRef.current && alarmTime) {
+            markScheduleDone(alarmContainerRef.current, alarmTime).catch(() => {});
+          }
         }}
         onStop={async (containerNum: number) => {
           // Called when user presses Stop inside the modal

@@ -32,58 +32,53 @@ export default function AlarmModal({ visible, container, time, remainingAlarms =
   }, [externalVerification]);
 
   const handleStop = async () => {
-    // Stop any phone-side alarm haptics/sound immediately (even if Bluetooth command fails)
-    try {
-      await soundService.stopSound();
-    } catch {
-      // ignore
-    }
+    // Stop sound INSTANTLY - no delays
+    soundService.stopSound().catch(() => {});
 
-    try {
-      // Send stop commands to Arduino (via Bluetooth) with retries for reliability.
-      // `STOPLOCATE` stops both locate buzzer and alarm buzzer in the Arduino sketch.
-      for (let i = 0; i < 3; i++) {
-        // eslint-disable-next-line no-await-in-loop
-        await BluetoothService.sendCommand('ALARMSTOP\n');
-        // eslint-disable-next-line no-await-in-loop
-        await BluetoothService.sendCommand('STOPLOCATE\n');
-        // eslint-disable-next-line no-await-in-loop
-        await new Promise((r) => setTimeout(r, 150));
-      }
-      console.log('[AlarmModal] ✅ Stop commands sent (ALARMSTOP + STOPLOCATE)');
-    } catch (e) {
-      console.warn('[AlarmModal] Error sending stop commands:', e);
-    }
-
-    // Immediate UI callback (e.g., mark schedule Done in UI)
+    // Call immediate callback INSTANTLY for UI update
     try {
       if (typeof onStopImmediate === 'function') onStopImmediate();
     } catch (e) {
       // ignore
     }
 
+    // Send stop commands in background (non-blocking, fire and forget)
+    // Don't wait for Bluetooth - stop UI immediately
+    (async () => {
+      try {
+        // Send stop commands to Arduino (via Bluetooth) with retries for reliability.
+        // `STOPLOCATE` stops both locate buzzer and alarm buzzer in the Arduino sketch.
+        for (let i = 0; i < 3; i++) {
+          BluetoothService.sendCommand('ALARMSTOP\n').catch(() => {});
+          BluetoothService.sendCommand('STOPLOCATE\n').catch(() => {});
+          // Small delay between retries but don't block UI
+          if (i < 2) {
+            await new Promise((r) => setTimeout(r, 50));
+          }
+        }
+        console.log('[AlarmModal] ✅ Stop commands sent (ALARMSTOP + STOPLOCATE)');
+      } catch (e) {
+        console.warn('[AlarmModal] Error sending stop commands:', e);
+      }
+    })();
+
     // If a custom onStop handler was provided, call it and show verification result inside the modal
     if (typeof onStop === 'function') {
       setLoading(true);
-      try {
-        const v = await onStop(container);
+      // Run verification in background, don't block UI
+      onStop(container).then((v) => {
         if (v) setVerification(v);
-      } catch (err) {
-        console.warn('[AlarmModal] onStop handler failed:', err);
-      } finally {
         setLoading(false);
-      }
+      }).catch((err) => {
+        console.warn('[AlarmModal] onStop handler failed:', err);
+        setLoading(false);
+      });
     } else {
-      // Dismiss the modal if there's no verification flow
+      // Dismiss the modal INSTANTLY if there's no verification flow
       try {
         onDismiss();
       } catch (e) {
         // ignore
-      }
-
-      // Friendly feedback
-      if (Platform.OS !== 'web') {
-        Alert.alert('✅ Buzzer Stopped', 'The alarm has been stopped. Verifying medication...');
       }
     }
   };
@@ -109,12 +104,10 @@ export default function AlarmModal({ visible, container, time, remainingAlarms =
                 <Text style={styles.buttonText}>{loading ? 'Stopping...' : 'Stop Alarm'}</Text>
               </TouchableOpacity>
               <TouchableOpacity
-                onPress={async () => {
-                  try {
-                    await soundService.stopSound();
-                  } catch {
-                    // ignore
-                  }
+                onPress={() => {
+                  // Stop sound INSTANTLY
+                  soundService.stopSound().catch(() => {});
+                  // Dismiss INSTANTLY
                   onDismiss();
                 }}
                 style={[styles.button, styles.dismissButton]}
@@ -153,12 +146,10 @@ export default function AlarmModal({ visible, container, time, remainingAlarms =
               )}
 
               <TouchableOpacity
-                onPress={async () => {
-                  try {
-                    await soundService.stopSound();
-                  } catch {
-                    // ignore
-                  }
+                onPress={() => {
+                  // Stop sound INSTANTLY
+                  soundService.stopSound().catch(() => {});
+                  // Dismiss INSTANTLY
                   onDismiss();
                 }}
                 style={[styles.button, { backgroundColor: '#28a745' }]}

@@ -250,33 +250,131 @@ const ModifyScheduleScreen = () => {
         headers['Authorization'] = `Bearer ${token.trim()}`;
       }
       
-      // Fetch all schedules and filter by user ID (same approach as MonitorManageScreen)
-      const response = await fetch('https://pillnow-database.onrender.com/api/medication_schedules', {
+      // Check if there's a selected elder (for caregivers) - need to do this BEFORE fetching schedules
+      const selectedElderId = await getSelectedElderId();
+      const userRole = await getUserRole();
+      const roleStr = userRole ? String(userRole) : '';
+      const isCaregiverUser = roleStr === '3';
+      const isElderUser = roleStr === '2';
+      
+      // Build URL with query parameters - API requires elderId for caregivers
+      let schedulesUrl = 'https://pillnow-database.onrender.com/api/medication_schedules';
+      
+      if (selectedElderId) {
+        // If we have a selected elder ID, include it (user is likely a caregiver monitoring an elder)
+        schedulesUrl += `?elderId=${selectedElderId}`;
+        console.log(`[ModifyScheduleScreen] Fetching schedules for elder: ${selectedElderId}`);
+      } else if (isElderUser) {
+        // Elder viewing own schedules - add userId parameter
+        schedulesUrl += `?userId=${userId}`;
+        console.log(`[ModifyScheduleScreen] Elder fetching own schedules: ${userId}`);
+      } else if (isCaregiverUser && !selectedElderId) {
+        // Caregiver but no elder selected - backend will require elderId
+        console.log(`[ModifyScheduleScreen] Caregiver detected but no elder selected - backend may require elderId`);
+      }
+      
+      // Fetch schedules with proper query parameters
+      const response = await fetch(schedulesUrl, {
         headers
       });
       
       if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
+        const errorText = await response.text();
+        console.error(`[ModifyScheduleScreen] Failed to fetch schedules (${response.status}): ${errorText}`);
+        
+        // If 400 and error mentions elderId, and we don't have selectedElderId, try to get it
+        if (response.status === 400 && errorText.includes('elderId') && !selectedElderId) {
+          const storedElderId = await AsyncStorage.getItem('selectedElderId');
+          if (storedElderId) {
+            console.log(`[ModifyScheduleScreen] Retrying with elderId from storage: ${storedElderId}`);
+            const retryUrl = `https://pillnow-database.onrender.com/api/medication_schedules?elderId=${storedElderId}`;
+            const retryResponse = await fetch(retryUrl, {
+              headers
+            });
+            
+            if (retryResponse.ok) {
+              const retryData = await retryResponse.json();
+              const allSchedules = retryData.data || retryData || [];
+              // Continue with processing using retryData
+              const responseData = { data: allSchedules };
+              // Update selectedElderId for filtering
+              const updatedSelectedElderId = storedElderId;
+              // Continue with the rest of the processing...
+              // We'll process this in the next part
+              const userSchedules = allSchedules.filter((schedule: any) => {
+                const scheduleUserIdNum = parseInt(schedule.user);
+                const scheduleUserIdStr = schedule.user?.toString?.() || '';
+                return scheduleUserIdStr === updatedSelectedElderId || scheduleUserIdNum === parseInt(updatedSelectedElderId);
+              });
+              
+              const currentMedications = await loadMedications();
+              const enrichedSchedules = userSchedules.map((schedule: any) => {
+                const medication = currentMedications.find(med => med.medId === schedule.medication);
+                const rawContainer = schedule.container;
+                const parsedContainer =
+                  parseInt(rawContainer) ||
+                  parseInt(String(rawContainer).replace(/[^0-9]/g, '')) ||
+                  1;
+                return {
+                  ...schedule,
+                  container: parsedContainer,
+                  medicationName: medication?.name || `Medication ID: ${schedule.medication}`
+                } as Schedule;
+              });
+              
+              const pendingSchedules = enrichedSchedules.filter((schedule: Schedule) => {
+                const statusLower = (schedule.status || 'Pending').toLowerCase();
+                return statusLower === 'pending';
+              });
+              
+              console.log(`[ModifyScheduleScreen] ✅ Loaded ${enrichedSchedules.length} total schedule(s), ${pendingSchedules.length} pending schedule(s) available for modification`);
+              setSchedules(pendingSchedules);
+              
+              const counts: Record<number, number> = { 1: 0, 2: 0, 3: 0 };
+              const locked: Record<number, boolean> = { 1: false, 2: false, 3: false };
+              pendingSchedules.forEach((schedule: Schedule) => {
+                const containerNum = schedule.container;
+                const scheduleCount = pendingSchedules.filter((s: Schedule) => s.container === containerNum).length;
+                if (!counts[containerNum] || counts[containerNum] < scheduleCount) {
+                  counts[containerNum] = scheduleCount;
+                }
+                if (scheduleCount > 0) {
+                  locked[containerNum] = true;
+                }
+              });
+              setEditPillCount(counts);
+              setPillCountsLocked(locked);
+              return;
+            }
+          }
+          
+          // If we still don't have elderId, show helpful error
+          setError('You need to select an elder to monitor. Please go to the Caregiver Dashboard and select an elder first.');
+          setLoading(false);
+          return;
+        }
+        
+        throw new Error(`HTTP error! status: ${response.status} - ${errorText}`);
       }
       
       const responseData = await response.json();
-      const allSchedules = responseData.data || [];
+      const allSchedules = responseData.data || responseData || [];
       
       console.log(`[ModifyScheduleScreen] Fetched ${allSchedules.length} total schedule(s) from API`);
       
-      // Check if there's a selected elder (for caregivers)
-      const selectedElderId = await getSelectedElderId();
+      // Use selectedElderId that was already fetched above (or from retry)
+      const finalSelectedElderId = selectedElderId || await getSelectedElderId();
       
       // Filter schedules based on user role and selected elder (same as MonitorManageScreen)
       let userSchedules;
-      if (selectedElderId) {
+      if (finalSelectedElderId) {
         // If caregiver has selected an elder, show that elder's schedules
         userSchedules = allSchedules.filter((schedule: any) => {
           const scheduleUserIdNum = parseInt(schedule.user);
           const scheduleUserIdStr = schedule.user?.toString?.() || '';
-          return scheduleUserIdStr === selectedElderId || scheduleUserIdNum === parseInt(selectedElderId);
+          return scheduleUserIdStr === finalSelectedElderId || scheduleUserIdNum === parseInt(finalSelectedElderId);
         });
-        console.log(`[ModifyScheduleScreen] Filtered to ${userSchedules.length} schedule(s) for elder ${selectedElderId}`);
+        console.log(`[ModifyScheduleScreen] Filtered to ${userSchedules.length} schedule(s) for elder ${finalSelectedElderId}`);
       } else {
         // Otherwise, show current user's schedules
         userSchedules = allSchedules.filter((schedule: any) => {
@@ -529,28 +627,41 @@ const ModifyScheduleScreen = () => {
     try {
       setSaving(true);
       
+      // Get token for authentication
+      const token = await AsyncStorage.getItem('token');
+      const headers: HeadersInit = {
+        'Content-Type': 'application/json',
+      };
+      if (token) {
+        headers['Authorization'] = `Bearer ${token.trim()}`;
+      }
+      
       // Update date/time format
       const newTime = `${String(editDateTime.getHours()).padStart(2, '0')}:${String(editDateTime.getMinutes()).padStart(2, '0')}`;
       const newDate = `${editDateTime.getFullYear()}-${String(editDateTime.getMonth() + 1).padStart(2, '0')}-${String(editDateTime.getDate()).padStart(2, '0')}`;
       
-      // Update schedule in backend
+      // Update schedule in backend - include all required fields
       const updateData = {
+        scheduleId: editingSchedule.scheduleId, // Keep existing scheduleId
+        user: editingSchedule.user, // Keep existing user
+        medication: editingSchedule.medication, // Keep existing medication
+        container: editingSchedule.container, // Keep existing container
         time: newTime,
         date: newDate,
-        status: editingSchedule.status, // Keep status as Pending
-        alertSent: editingSchedule.alertSent
+        status: editingSchedule.status || 'Pending', // Keep status as Pending
+        alertSent: editingSchedule.alertSent || false
       };
       
       const response = await fetch(`https://pillnow-database.onrender.com/api/medication_schedules/${editingSchedule._id}`, {
         method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers,
         body: JSON.stringify(updateData),
       });
       
       if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
+        const errorText = await response.text();
+        console.error('[ModifyScheduleScreen] API Error Response:', errorText);
+        throw new Error(`HTTP error! status: ${response.status} - ${errorText}`);
       }
       
       // Immediately sync to Arduino via Bluetooth

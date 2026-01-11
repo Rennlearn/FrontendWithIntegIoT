@@ -27,6 +27,7 @@ const mqtt = require("mqtt");
 const multer = require("multer");
 const fs = require("fs");
 const crypto = require("crypto");
+const { FormData } = require("undici");
 let nodemailer = null;
 try {
   // Optional dependency; only used if SMTP env vars are provided.
@@ -981,9 +982,22 @@ app.post("/sync-schedules-from-database", async (req, res) => {
       headers['Authorization'] = `Bearer ${token}`;
     }
     
-    const response = await fetch(`${base}/api/medication_schedules`, { headers });
+    // Build URL with query parameters if provided (for caregivers/elders)
+    let schedulesUrl = `${base}/api/medication_schedules`;
+    const elderId = req.body?.elderId || req.query?.elderId;
+    const userId = req.body?.userId || req.query?.userId;
+    
+    if (elderId) {
+      schedulesUrl += `?elderId=${elderId}`;
+    } else if (userId) {
+      schedulesUrl += `?userId=${userId}`;
+    }
+    
+    const response = await fetch(schedulesUrl, { headers });
     if (!response.ok) {
-      return res.status(response.status).json({ ok: false, message: `Database fetch failed: ${response.status}` });
+      const errorText = await response.text().catch(() => 'Unknown error');
+      console.error(`[backend] Database fetch failed (${response.status}): ${errorText}`);
+      return res.status(response.status).json({ ok: false, message: `Database fetch failed: ${response.status} - ${errorText}` });
     }
     
     const data = await response.json();
@@ -1212,12 +1226,15 @@ app.post("/ingest/:deviceId/:container", upload.single("image"), async (req, res
   let verifierRespText = "";
   let verifierJson = null;
   try {
-    // IMPORTANT: Node's built-in `fetch` expects WHATWG `FormData`, not the npm `form-data` package.
+    // IMPORTANT: Node's built-in `fetch` expects WHATWG `FormData` from `undici`, not the npm `form-data` package.
     // Using the wrong FormData breaks multipart parsing on FastAPI (400 "error parsing body").
     const form = new FormData();
     const mime = req.file.mimetype || "image/jpeg";
-    // `form-data` accepts Buffers directly; this avoids relying on `Blob` globals.
-    form.append("image", req.file.buffer, { filename: rawName, contentType: mime });
+    // undici FormData accepts Blob or File. Convert Buffer to Blob for compatibility.
+    // Ensure we have a proper Buffer
+    const buffer = Buffer.isBuffer(req.file.buffer) ? req.file.buffer : Buffer.from(req.file.buffer);
+    const imageBlob = new Blob([buffer], { type: mime });
+    form.append("image", imageBlob, rawName);
     form.append("expected", JSON.stringify(expected || {}));
 
     const vr = await fetch(VERIFIER_URL, { method: "POST", body: form });

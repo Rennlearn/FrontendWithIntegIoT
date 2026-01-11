@@ -913,12 +913,22 @@ const SetScreen = () => {
               // CRITICAL: Also sync to backend alarm system after saving
               // This ensures alarms fire correctly
               try {
+                // Build sync request body with elderId or userId for proper database query
+                const syncBody: any = {};
+                if (selectedElderId) {
+                  syncBody.elderId = selectedElderId;
+                } else {
+                  // If no selectedElderId, use currentUserId (for elders or caregivers without selected elder)
+                  syncBody.userId = currentUserId;
+                }
+                
                 const syncResponse = await fetch(`${BACKEND_URL}/sync-schedules-from-database`, {
                   method: 'POST',
                   headers: {
                     'Content-Type': 'application/json',
                     ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
                   },
+                  body: JSON.stringify(syncBody),
                 });
                 if (syncResponse.ok) {
                   const syncData = await syncResponse.json();

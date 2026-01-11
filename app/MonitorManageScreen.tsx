@@ -283,7 +283,51 @@ const MonitorManageScreen = () => {
 
       console.log(`[MonitorManageScreen] Caregiver ID: ${caregiverId}, Elder ID: ${elderId}`);
 
-      // Try multiple endpoint formats to find the connection
+      const headers = {
+        'Authorization': `Bearer ${token.trim()}`,
+        'Content-Type': 'application/json',
+      };
+
+      let response: Response | null = null;
+
+      // Try the newer endpoint first (same as CaregiverDashboard)
+      try {
+        const newEndpoint = `https://pillnow-database.onrender.com/api/caregivers/${caregiverId}/elders`;
+        console.log(`[MonitorManageScreen] Trying new endpoint: ${newEndpoint}`);
+        const resp = await fetch(newEndpoint, { headers });
+        
+        if (resp.ok) {
+          const data = await resp.json();
+          console.log('[MonitorManageScreen] New endpoint response:', JSON.stringify(data, null, 2));
+          
+          const eldersData = data?.data && Array.isArray(data.data) ? data.data : Array.isArray(data) ? data : [];
+          const found = eldersData.find((elderItem: any) => {
+            const itemId = elderItem.id || elderItem.userId || elderItem._id;
+            const matches = String(itemId) === String(elderId);
+            if (!matches) return false;
+            if (elderItem.connections && Array.isArray(elderItem.connections)) {
+              const activeConn = elderItem.connections.find((c: any) => {
+                const status = String(c.status || '').toLowerCase();
+                return status === 'active' || status === 'connected' || status === 'enabled';
+              });
+              return !!activeConn;
+            }
+            return false;
+          });
+          
+          if (found) {
+            console.log('[MonitorManageScreen] ✅ Active connection found via new endpoint');
+            setHasActiveConnection(true);
+            return true;
+          }
+        } else if (resp.status !== 404) {
+          console.log('[MonitorManageScreen] New endpoint returned', resp.status);
+        }
+      } catch (err) {
+        console.log('[MonitorManageScreen] New endpoint check failed:', err);
+      }
+
+      // Fallback: Try old endpoint with multiple query parameter formats
       const endpoints = [
         `https://pillnow-database.onrender.com/api/caregiver-connections?caregiver=${caregiverId}&elder=${elderId}`,
         `https://pillnow-database.onrender.com/api/caregiver-connections?caregiverId=${caregiverId}&elderId=${elderId}`,
@@ -291,39 +335,30 @@ const MonitorManageScreen = () => {
         `https://pillnow-database.onrender.com/api/caregiver-connections?caregiverId=${caregiverId}&elder=${elderId}`,
       ];
 
-      let response: Response | null = null;
-      let lastError: any = null;
-
       for (const url of endpoints) {
         try {
           console.log(`[MonitorManageScreen] Trying URL: ${url}`);
-          response = await fetch(url, {
-            headers: {
-              'Authorization': `Bearer ${token.trim()}`,
-              'Content-Type': 'application/json',
-            }
-          });
-
+          response = await fetch(url, { headers });
           console.log(`[MonitorManageScreen] Response status: ${response.status}`);
           
           // If we get a successful response, break out of the loop
-          if (response.ok || response.status !== 404) {
+          if (response.ok) {
             break;
           }
         } catch (error) {
           console.log(`[MonitorManageScreen] Error with URL ${url}:`, error);
-          lastError = error;
           response = null;
         }
       }
 
       // If all endpoints returned 404 or failed, handle it
-      if (!response) {
+      if (!response || !response.ok) {
         // All endpoints failed - connection not found via GET
         // But this doesn't mean connection doesn't exist (POST creation succeeded)
-        console.log(`[MonitorManageScreen] All GET endpoints failed for connection check`);
-        // Create a default 404 response object
-        response = { status: 404, ok: false } as Response;
+        console.log(`[MonitorManageScreen] ❌ Connection not found (404)`);
+        if (!response) {
+          response = { status: 404, ok: false } as Response;
+        }
       }
 
       // At this point, response is guaranteed to be non-null
@@ -585,13 +620,13 @@ const MonitorManageScreen = () => {
       const medicationsResponse = await (async () => {
         try {
           return await fetch('https://pillnow-database.onrender.com/api/medications', {
-            headers: {
-              'Cache-Control': 'no-cache',
-              'Pragma': 'no-cache',
-              'If-Modified-Since': '0'
+        headers: {
+          'Cache-Control': 'no-cache',
+          'Pragma': 'no-cache',
+          'If-Modified-Since': '0'
             },
             signal: medsController.signal,
-          });
+      });
         } finally {
           clearTimeout(medsTimeoutId);
         }
@@ -637,10 +672,10 @@ const MonitorManageScreen = () => {
       const schedulesResponse = await (async () => {
         try {
           return await fetch(schedulesUrl, {
-            method: 'GET',
+        method: 'GET',
             headers: scheduleHeaders,
             signal: schedulesController.signal,
-          });
+      });
         } finally {
           clearTimeout(schedulesTimeoutId);
         }
@@ -725,9 +760,9 @@ const MonitorManageScreen = () => {
           checkCaregiverConnection(selectedElderId, false, true)
             .then((ok) => {
               if (ok) {
-                setHasActiveConnection(true);
+            setHasActiveConnection(true);
                 console.log('[MonitorManageScreen] ✅ Active connection confirmed (async)');
-              } else {
+          } else {
                 // Keep optimistic access; user will be prompted when doing protected actions
                 console.log('[MonitorManageScreen] ⚠️ Connection check returned false (async), keeping access');
                 setHasActiveConnection(true);
@@ -876,12 +911,21 @@ const MonitorManageScreen = () => {
           const controller = new AbortController();
           const timeoutId = setTimeout(() => controller.abort(), 5000);
           try {
+            // Build sync request body with elderId or userId for proper database query
+            const syncBody: any = {};
+            if (selectedElderId) {
+              syncBody.elderId = selectedElderId;
+            } else if (isElderUser) {
+              syncBody.userId = currentUserId;
+            }
+            
             const syncResponse = await fetch(`${base}/sync-schedules-from-database`, {
               method: 'POST',
               headers: {
                 'Content-Type': 'application/json',
                 ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
               },
+              body: JSON.stringify(syncBody),
               signal: controller.signal,
             });
             if (syncResponse.ok) {
