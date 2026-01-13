@@ -34,21 +34,37 @@ const LoginScreen = () => {
       const checkAuth = async () => {
         const token = await AsyncStorage.getItem("token");
         if (token) {
-          setIsLoggedIn(true);
-          // User is already logged in, redirect to appropriate dashboard
           try {
+            // Decode JWT token to check expiration
             const decodedToken = JSON.parse(atob(token.split('.')[1]));
             const roleId = parseInt(decodedToken.role || decodedToken.user?.role || "0");
             
+            // CRITICAL: Check token expiration (exp is in seconds, Date.now() is in milliseconds)
+            const exp = decodedToken.exp;
+            if (exp && exp * 1000 < Date.now()) {
+              // Token expired, clear it and require re-login
+              console.warn("[LoginScreen] Token expired, clearing and requiring re-login");
+              await AsyncStorage.removeItem("token");
+              setIsLoggedIn(false);
+              setEmail("");
+              setPassword("");
+              return;
+            }
+            
+            setIsLoggedIn(true);
+            // User is already logged in with valid token, redirect to appropriate dashboard
             if (roleId === 3) {
               router.replace("/CaregiverDashboard");
             } else if (roleId === 2) {
               router.replace("/ElderDashboard");
             }
           } catch (error) {
-            // If token is invalid, clear it and stay on login
+            // If token is invalid or malformed, clear it and stay on login
+            console.warn("[LoginScreen] Invalid token format, clearing:", error);
             await AsyncStorage.removeItem("token");
             setIsLoggedIn(false);
+            setEmail("");
+            setPassword("");
           }
         } else {
           setIsLoggedIn(false);
@@ -75,8 +91,14 @@ const LoginScreen = () => {
   }, [isLoggedIn]);
 
   const handleLogin = async () => {
+    // Trim and normalize inputs to ensure consistency with registration
+    // CRITICAL: Email must be lowercased to match backend normalization
+    // Backend stores emails in lowercase, so login must also lowercase to match
+    const trimmedEmail = email.trim().toLowerCase();
+    const trimmedPassword = password.trim(); // CRITICAL: Trim password to match registration
+
     // Basic input validation (login should not enforce password rules)
-    if (!email.trim() || !password) {
+    if (!trimmedEmail || !trimmedPassword) {
       Alert.alert("Missing Info", "Please enter your email and password.");
       return;
     }
@@ -87,9 +109,11 @@ const LoginScreen = () => {
       setLoading(true);
       await AsyncStorage.removeItem("token"); // Clear previous token
 
+      // CRITICAL: Send normalized (lowercased) email and trimmed password
+      // Backend normalizes emails to lowercase during registration, so login must match
       const response = await axios.post(
         endpoint,
-        { email: email.trim(), password },
+        { email: trimmedEmail, password: trimmedPassword },
         { timeout: 15000 }
       );
 
@@ -128,12 +152,15 @@ const LoginScreen = () => {
       const status = error?.response?.status;
       const serverMsg = error?.response?.data?.message;
 
+      // Enhanced error logging for debugging login issues
       console.warn("[Login] Request failed", {
         endpoint,
+        email: trimmedEmail, // Log trimmed email for debugging
         code: axiosCode,
         message: axiosMsg,
         status,
         serverMsg,
+        responseData: error?.response?.data
       });
 
       if (status) {

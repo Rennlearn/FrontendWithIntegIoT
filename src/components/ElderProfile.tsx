@@ -312,9 +312,12 @@ export default function ElderProfile({ onElderSelected, onBack }: ElderProfilePr
       return;
     }
 
-    // Validate email format
+    // CRITICAL: Normalize email to lowercase to match backend and login normalization
+    const normalizedEmail = elderEmail.trim().toLowerCase();
+
+    // Validate email format (on normalized email)
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(elderEmail.trim())) {
+    if (!emailRegex.test(normalizedEmail)) {
       Alert.alert('Error', 'Please enter a valid email address');
       return;
     }
@@ -338,6 +341,7 @@ export default function ElderProfile({ onElderSelected, onBack }: ElderProfilePr
       const password = elderPassword.trim() || generateDefaultPassword();
       
       // Create elder account
+      // CRITICAL: Send normalized (lowercased) email to match backend storage and login
       const response = await fetch('https://pillnow-database.onrender.com/api/users/register', {
         method: 'POST',
         headers: {
@@ -345,7 +349,7 @@ export default function ElderProfile({ onElderSelected, onBack }: ElderProfilePr
         },
         body: JSON.stringify({
           name: elderName.trim(),
-          email: elderEmail.trim(),
+          email: normalizedEmail, // CRITICAL: Use normalized email to ensure login works
           phone: elderPhoneCreate.trim(),
           password: password,
           role: 2, // Elder role

@@ -57,55 +57,149 @@ const Generate = () => {
               body {
                 font-family: Arial, sans-serif;
                 padding: 20px;
+                margin: 0;
               }
               h1 {
                 color: #D14A99;
                 text-align: center;
+                margin-bottom: 10px;
               }
-              .summary { margin: 16px 0; padding: 12px; border: 1px solid #ddd; border-radius: 8px; }
-              .container {
+              .generated-date {
+                text-align: center;
+                color: #666;
                 margin-bottom: 20px;
-                padding: 15px;
-                border: 1px solid #ddd;
-                border-radius: 5px;
+                font-size: 14px;
               }
-              .header {
-                color: #4A90E2;
+              .summary {
+                margin: 20px 0;
+                padding: 16px;
+                border: 1px solid #ddd;
+                border-radius: 8px;
+                background-color: #f9f9f9;
+                display: flex;
+                justify-content: space-around;
+                flex-wrap: wrap;
+              }
+              .summary-item {
+                text-align: center;
+                margin: 8px;
+              }
+              .summary-label {
+                font-size: 12px;
+                color: #666;
+                margin-bottom: 4px;
+              }
+              .summary-value {
+                font-size: 18px;
+                font-weight: bold;
+                color: #333;
+              }
+              table {
+                width: 100%;
+                border-collapse: collapse;
+                margin-top: 20px;
+                box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+                background-color: #fff;
+              }
+              thead {
+                background-color: #4A90E2;
+                color: white;
+              }
+              th {
+                padding: 12px 8px;
+                text-align: left;
+                font-weight: bold;
+                border-bottom: 2px solid #357ABD;
+                font-size: 14px;
+              }
+              td {
+                padding: 10px 8px;
+                border-bottom: 1px solid #e0e0e0;
+                font-size: 13px;
+              }
+              tbody tr:hover {
+                background-color: #f5f5f5;
+              }
+              tbody tr:last-child td {
+                border-bottom: none;
+              }
+              .status-taken {
+                color: #4CAF50;
                 font-weight: bold;
               }
-              .status {
-                color: #4CAF50;
-              }
-              .pending {
+              .status-pending {
                 color: #FFA500;
+                font-weight: bold;
               }
-              .missed {
+              .status-missed {
                 color: #E53935;
+                font-weight: bold;
+              }
+              .container-cell {
+                font-weight: 600;
+                color: #4A90E2;
+              }
+              @media print {
+                body {
+                  padding: 10px;
+                }
+                table {
+                  page-break-inside: auto;
+                }
+                tr {
+                  page-break-inside: avoid;
+                  page-break-after: auto;
+                }
               }
             </style>
           </head>
           <body>
             <h1>Medication Adherence Report</h1>
-            <p>Generated on: ${new Date().toLocaleString()}</p>
+            <p class="generated-date">Generated on: ${new Date().toLocaleString()}</p>
+            
             <div class="summary">
-              <p><strong>Total doses:</strong> ${total}</p>
-              <p><strong>Taken:</strong> ${taken} (${adherencePct}%)</p>
-              <p><strong>Missed:</strong> ${missed}</p>
-              <p><strong>Pending:</strong> ${pending}</p>
-            </div>
-            ${data.map(med => `
-              <div class="container">
-                <h2 class="header">Container ${med.containerId}</h2>
-                <p><strong>Medicine:</strong> ${med.medicineName}</p>
-                <p><strong>Scheduled Time:</strong> ${med.scheduledTime}</p>
-                <p><strong>Date:</strong> ${med.date}</p>
-                <p><strong>Status:</strong> 
-                  <span class="${med.status === 'Taken' ? 'status' : med.status === 'Missed' ? 'missed' : 'pending'}">
-                    ${med.status}
-                  </span>
-                </p>
+              <div class="summary-item">
+                <div class="summary-label">Total Doses</div>
+                <div class="summary-value">${total}</div>
               </div>
-            `).join('')}
+              <div class="summary-item">
+                <div class="summary-label">Taken</div>
+                <div class="summary-value" style="color: #4CAF50;">${taken} (${adherencePct}%)</div>
+              </div>
+              <div class="summary-item">
+                <div class="summary-label">Missed</div>
+                <div class="summary-value" style="color: #E53935;">${missed}</div>
+              </div>
+              <div class="summary-item">
+                <div class="summary-label">Pending</div>
+                <div class="summary-value" style="color: #FFA500;">${pending}</div>
+              </div>
+            </div>
+
+            <table>
+              <thead>
+                <tr>
+                  <th>Container</th>
+                  <th>Medicine Name</th>
+                  <th>Date</th>
+                  <th>Scheduled Time</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${data.map(med => `
+                  <tr>
+                    <td class="container-cell">Container ${med.containerId}</td>
+                    <td>${med.medicineName || 'N/A'}</td>
+                    <td>${med.date || 'N/A'}</td>
+                    <td>${med.scheduledTime || 'N/A'}</td>
+                    <td class="${med.status === 'Taken' ? 'status-taken' : med.status === 'Missed' ? 'status-missed' : 'status-pending'}">
+                      ${med.status}
+                    </td>
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
           </body>
         </html>
       `;

@@ -68,19 +68,19 @@ const PillMismatchModal: React.FC<PillMismatchModalProps> = ({
   }, [visible, container, pulseAnim]);
 
   const handleStopBuzzer = async () => {
-    if (stopping) return;
-    setStopping(true);
+      if (stopping) return;
+      setStopping(true);
     
-    // Validate container number (1, 2, or 3)
-    if (container < 1 || container > 3) {
-      console.error(`[PillMismatchModal] ⚠️ Invalid container number: ${container}`);
+      // Validate container number (1, 2, or 3)
+      if (container < 1 || container > 3) {
+        console.error(`[PillMismatchModal] ⚠️ Invalid container number: ${container}`);
       setStopping(false);
-      Alert.alert('Error', `Invalid container number: ${container}. Please contact support.`);
-      return;
-    }
-    
-    console.log(`[PillMismatchModal] 🛑 Stop buzzer button pressed for Container ${container}`);
-    
+        Alert.alert('Error', `Invalid container number: ${container}. Please contact support.`);
+        return;
+      }
+      
+      console.log(`[PillMismatchModal] 🛑 Stop buzzer button pressed for Container ${container}`);
+      
     // Stop sound INSTANTLY - no delays
     soundService.stopSound().catch(() => {});
     
@@ -91,26 +91,26 @@ const PillMismatchModal: React.FC<PillMismatchModalProps> = ({
     // Send stop commands in background (non-blocking, fire and forget)
     (async () => {
       try {
-        const isConnected = await BluetoothService.isConnectionActive();
-        if (!isConnected) {
+      const isConnected = await BluetoothService.isConnectionActive();
+      if (!isConnected) {
           console.warn('[PillMismatchModal] Bluetooth not connected, skipping stop commands');
-          return;
-        }
-        
-        console.log(`[PillMismatchModal] 📤 Sending ALARMSTOP command to Arduino...`);
-        // Send command to stop the buzzer (retry a few times for reliability)
-        for (let i = 0; i < 3; i++) {
+        return;
+      }
+      
+      console.log(`[PillMismatchModal] 📤 Sending ALARMSTOP command to Arduino...`);
+      // Send command to stop the buzzer (retry a few times for reliability)
+      for (let i = 0; i < 3; i++) {
           BluetoothService.sendCommand('ALARMSTOP\n').catch(() => {});
-          // Also stop locate mode in case it is active (Arduino supports STOPLOCATE)
+        // Also stop locate mode in case it is active (Arduino supports STOPLOCATE)
           BluetoothService.sendCommand('STOPLOCATE\n').catch(() => {});
           // Small delay between retries but don't block UI
           if (i < 2) {
             await new Promise((r) => setTimeout(r, 50));
           }
-        }
-        console.log(`[PillMismatchModal] ✅ ALARMSTOP command sent successfully`);
-      } catch (error) {
-        console.error('[PillMismatchModal] ❌ Error stopping buzzer:', error);
+      }
+      console.log(`[PillMismatchModal] ✅ ALARMSTOP command sent successfully`);
+    } catch (error) {
+      console.error('[PillMismatchModal] ❌ Error stopping buzzer:', error);
         // Non-fatal - UI already dismissed
       }
     })();

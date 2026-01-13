@@ -29,20 +29,28 @@ const CreateScreen = () => {
   };
 
   const handleCreate = async () => {
-    if (!name || !email || !phone || !password) {
+    // Trim and normalize all inputs to prevent whitespace and case issues
+    const trimmedName = name.trim();
+    // CRITICAL: Email must be lowercased to match backend normalization
+    // Backend stores emails in lowercase, so registration must also lowercase to ensure login works
+    const trimmedEmail = email.trim().toLowerCase();
+    const trimmedPhone = phone.trim();
+    const trimmedPassword = password.trim();
+
+    if (!trimmedName || !trimmedEmail || !trimmedPhone || !trimmedPassword) {
       Alert.alert("Error", "All fields are required!");
       return;
     }
 
-    // Password validation
-    if (password.length < 8) {
+    // Password validation (on trimmed password)
+    if (trimmedPassword.length < 8) {
       Alert.alert(
         "Invalid Password",
         "Password must be at least 8 characters long."
       );
       return;
     }
-    if (!/\d/.test(password)) {
+    if (!/\d/.test(trimmedPassword)) {
       Alert.alert(
         "Invalid Password",
         "Password must contain at least one number."
@@ -54,19 +62,41 @@ const CreateScreen = () => {
       setLoading(true);
       await AsyncStorage.removeItem("token"); // Clear old token before registration
 
+      // CRITICAL: Send normalized (lowercased) email and trimmed password
+      // Backend normalizes emails to lowercase, so registration must match to ensure login works
       const response = await axios.post("https://pillnow-database.onrender.com/api/users/register", {
-        name,
-        email,
-        phone,
-        password,
+        name: trimmedName,
+        email: trimmedEmail,
+        phone: trimmedPhone,
+        password: trimmedPassword, // Trimmed password ensures no whitespace issues
         role: selectedRole
+      });
+
+      // Log successful registration for debugging
+      console.log("[Create] Account created successfully:", {
+        email: trimmedEmail,
+        name: trimmedName,
+        phone: trimmedPhone,
+        role: selectedRole,
+        responseData: response.data
       });
 
       Alert.alert("Success", "Account created successfully!");
       // Navigate to login screen after successful registration
       navigation.navigate("LoginScreen" as never);
     } catch (error: any) {
-      Alert.alert("Registration Failed", error.response?.data?.message || "Something went wrong.");
+      // Enhanced error logging for debugging
+      const errorMessage = error.response?.data?.message || error.message || "Something went wrong.";
+      const statusCode = error.response?.status;
+      
+      console.error("[Create] Registration failed:", {
+        email: trimmedEmail,
+        error: errorMessage,
+        status: statusCode,
+        responseData: error.response?.data
+      });
+
+      Alert.alert("Registration Failed", errorMessage);
     } finally {
       setLoading(false);
     }
