@@ -926,70 +926,76 @@ app.post("/api/password-reset/reset-with-token", async (req, res) => {
  * Body: { container_id: "container1", pill_config: {count,label?}, times: ["HH:MM", ...] }
  */
 app.post("/set-schedule", (req, res) => {
-  const containerId = normalizeContainerId(req.body?.container_id);
-  const pill_config = req.body?.pill_config || {};
-  const timesInput = req.body?.times;
-  const schedulesInput = req.body?.schedules;
-  const notifyEmailInput = req.body?.notify_email;
-
-  if (!containerId) {
-    return res.status(400).json({ ok: false, message: "container_id is required" });
-  }
-
-  const prev = state.containers[containerId] || { pill_config: { count: 0 }, times: [], schedules: [], notify_email: "" };
-
-  // If a client passes `times: []` just to update pill_config (e.g. ModifyScheduleScreen),
-  // we preserve existing times by default. To explicitly clear times, send `replace_times: true`.
-  let nextTimes = prev.times || [];
-  const replaceTimes = Boolean(req.body?.replace_times);
-  if (Array.isArray(timesInput)) {
-    if (timesInput.length > 0 || replaceTimes) {
-      nextTimes = timesInput
-        .map((t) => String(t).trim())
-        .filter(Boolean)
-        .map((t) => normalizeHhMm(t))
-        .filter(Boolean);
+  try {
+    // CRITICAL: Validate request body exists
+    if (!req.body || typeof req.body !== 'object') {
+      return res.status(400).json({ ok: false, message: "Request body is required" });
     }
-  }
+    
+    const containerId = normalizeContainerId(req.body?.container_id);
+    const pill_config = req.body?.pill_config || {};
+    const timesInput = req.body?.times;
+    const schedulesInput = req.body?.schedules;
+    const notifyEmailInput = req.body?.notify_email;
 
-  // Date-aware schedules: preserve if not provided (or empty without replace_schedules).
-  let nextSchedules = Array.isArray(prev.schedules) ? prev.schedules : [];
-  const replaceSchedules = Boolean(req.body?.replace_schedules);
-  if (Array.isArray(schedulesInput)) {
-    if (schedulesInput.length > 0 || replaceSchedules) {
-      nextSchedules = schedulesInput
-        .map((s) => ({
-          date: normalizeYyyyMmDd(s?.date),
-          time: normalizeHhMm(s?.time),
-        }))
-        .filter((s) => Boolean(s.date) && Boolean(s.time));
+    if (!containerId) {
+      return res.status(400).json({ ok: false, message: "container_id is required" });
     }
-  }
 
-  const nextPillConfig = {
-    count: Number(pill_config?.count ?? prev.pill_config?.count ?? 0),
-    ...(typeof pill_config?.label === "string" && pill_config.label.trim()
-      ? { label: pill_config.label.trim() }
-      : prev.pill_config?.label
-        ? { label: prev.pill_config.label }
-        : {}),
-  };
+    const prev = state.containers[containerId] || { pill_config: { count: 0 }, times: [], schedules: [], notify_email: "" };
 
-  const nextNotifyEmail =
-    typeof notifyEmailInput === "string" && notifyEmailInput.trim()
-      ? notifyEmailInput.trim().toLowerCase()
-      : prev.notify_email || "";
+    // If a client passes `times: []` just to update pill_config (e.g. ModifyScheduleScreen),
+    // we preserve existing times by default. To explicitly clear times, send `replace_times: true`.
+    let nextTimes = prev.times || [];
+    const replaceTimes = Boolean(req.body?.replace_times);
+    if (Array.isArray(timesInput)) {
+      if (timesInput.length > 0 || replaceTimes) {
+        nextTimes = timesInput
+          .map((t) => String(t).trim())
+          .filter(Boolean)
+          .map((t) => normalizeHhMm(t))
+          .filter(Boolean);
+      }
+    }
 
-  state.containers[containerId] = {
-    pill_config: nextPillConfig,
-    times: nextTimes,
-    schedules: nextSchedules,
-    notify_email: nextNotifyEmail,
-  };
-  saveStateSoon();
+    // Date-aware schedules: preserve if not provided (or empty without replace_schedules).
+    let nextSchedules = Array.isArray(prev.schedules) ? prev.schedules : [];
+    const replaceSchedules = Boolean(req.body?.replace_schedules);
+    if (Array.isArray(schedulesInput)) {
+      if (schedulesInput.length > 0 || replaceSchedules) {
+        nextSchedules = schedulesInput
+          .map((s) => ({
+            date: normalizeYyyyMmDd(s?.date),
+            time: normalizeHhMm(s?.time),
+          }))
+          .filter((s) => Boolean(s.date) && Boolean(s.time));
+      }
+    }
 
-  console.log(`[backend] set-schedule: ${containerId}`, state.containers[containerId]);
-  return res.json({ ok: true, container_id: containerId, ...state.containers[containerId] });
+    const nextPillConfig = {
+      count: Number(pill_config?.count ?? prev.pill_config?.count ?? 0),
+      ...(typeof pill_config?.label === "string" && pill_config.label.trim()
+        ? { label: pill_config.label.trim() }
+        : prev.pill_config?.label
+          ? { label: prev.pill_config.label }
+          : {}),
+    };
+
+    const nextNotifyEmail =
+      typeof notifyEmailInput === "string" && notifyEmailInput.trim()
+        ? notifyEmailInput.trim().toLowerCase()
+        : prev.notify_email || "";
+
+    state.containers[containerId] = {
+      pill_config: nextPillConfig,
+      times: nextTimes,
+      schedules: nextSchedules,
+      notify_email: nextNotifyEmail,
+    };
+    saveStateSoon();
+
+    console.log(`[backend] set-schedule: ${containerId}`, state.containers[containerId]);
+    return res.json({ ok: true, container_id: containerId, ...state.containers[containerId] });
 });
 
 /**
@@ -999,32 +1005,53 @@ app.post("/set-schedule", (req, res) => {
  */
 app.post("/sync-schedules-from-database", async (req, res) => {
   try {
-    const base = "https://pillnow-database.onrender.com";
-    const token = req.headers.authorization?.replace('Bearer ', '') || req.body?.token;
+    // CRITICAL: Add timeout to prevent hanging requests
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout
     
-    // Fetch all schedules from database
-    const headers = { 'Content-Type': 'application/json' };
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-    }
-    
-    // Build URL with query parameters if provided (for caregivers/elders)
-    let schedulesUrl = `${base}/api/medication_schedules`;
-    const elderId = req.body?.elderId || req.query?.elderId;
-    const userId = req.body?.userId || req.query?.userId;
-    
-    if (elderId) {
-      schedulesUrl += `?elderId=${elderId}`;
-    } else if (userId) {
-      schedulesUrl += `?userId=${userId}`;
-    }
-    
-    const response = await fetch(schedulesUrl, { headers });
-    if (!response.ok) {
-      const errorText = await response.text().catch(() => 'Unknown error');
-      console.error(`[backend] Database fetch failed (${response.status}): ${errorText}`);
-      return res.status(response.status).json({ ok: false, message: `Database fetch failed: ${response.status} - ${errorText}` });
-    }
+    try {
+      const base = "https://pillnow-database.onrender.com";
+      const token = req.headers.authorization?.replace('Bearer ', '') || req.body?.token;
+      
+      // Fetch all schedules from database
+      const headers = { 'Content-Type': 'application/json' };
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`;
+      }
+      
+      // Build URL with query parameters if provided (for caregivers/elders)
+      let schedulesUrl = `${base}/api/medication_schedules`;
+      const elderId = req.body?.elderId || req.query?.elderId;
+      const userId = req.body?.userId || req.query?.userId;
+      
+      // CRITICAL: Validate elderId and userId are strings/numbers, not objects
+      if (elderId && (typeof elderId !== 'string' && typeof elderId !== 'number')) {
+        clearTimeout(timeoutId);
+        return res.status(400).json({ ok: false, message: "Invalid elderId format" });
+      }
+      if (userId && (typeof userId !== 'string' && typeof userId !== 'number')) {
+        clearTimeout(timeoutId);
+        return res.status(400).json({ ok: false, message: "Invalid userId format" });
+      }
+      
+      if (elderId) {
+        schedulesUrl += `?elderId=${encodeURIComponent(String(elderId))}`;
+      } else if (userId) {
+        schedulesUrl += `?userId=${encodeURIComponent(String(userId))}`;
+      }
+      
+      const response = await fetch(schedulesUrl, { 
+        headers,
+        signal: controller.signal 
+      });
+      
+      clearTimeout(timeoutId);
+      
+      if (!response.ok) {
+        const errorText = await response.text().catch(() => 'Unknown error');
+        console.error(`[backend] Database fetch failed (${response.status}): ${errorText}`);
+        return res.status(response.status).json({ ok: false, message: `Database fetch failed: ${response.status} - ${errorText}` });
+      }
     
     const data = await response.json();
     const allSchedules = Array.isArray(data) ? data : (data?.data || []);
@@ -1060,47 +1087,71 @@ app.post("/sync-schedules-from-database", async (req, res) => {
         });
       }
       
-      // Update pill_config from medication if available
-      if (schedule.medication) {
-        // Try to fetch medication details
-        try {
-          const medResponse = await fetch(`${base}/api/medications/${schedule.medication}`, { headers });
-          if (medResponse.ok) {
-            const med = await medResponse.json();
-            if (med?.name) {
-              container.pill_config = {
-                count: container.pill_config?.count || 1,
-                label: med.name,
-              };
+        // Update pill_config from medication if available
+        if (schedule.medication) {
+          // Try to fetch medication details
+          try {
+            const medController = new AbortController();
+            const medTimeoutId = setTimeout(() => medController.abort(), 5000);
+            try {
+              const medResponse = await fetch(`${base}/api/medications/${schedule.medication}`, { 
+                headers,
+                signal: medController.signal 
+              });
+              clearTimeout(medTimeoutId);
+              
+              if (medResponse.ok) {
+                const med = await medResponse.json();
+                if (med?.name) {
+                  container.pill_config = {
+                    count: container.pill_config?.count || 1,
+                    label: med.name,
+                  };
+                }
+              }
+            } catch (medError) {
+              clearTimeout(medTimeoutId);
+              // Ignore medication fetch errors (non-critical)
             }
+          } catch (e) {
+            // Ignore medication fetch errors
           }
-        } catch (e) {
-          // Ignore medication fetch errors
         }
       }
+      
+      // Update state.containers with synced data
+      let syncedCount = 0;
+      for (const [containerId, data] of containerMap.entries()) {
+        state.containers[containerId] = {
+          pill_config: data.pill_config,
+          times: [], // Legacy format - not used if schedules are present
+          schedules: data.schedules,
+          notify_email: data.notify_email,
+        };
+        syncedCount++;
+        console.log(`[backend] ✅ Synced ${data.schedules.length} schedule(s) for ${containerId}`);
+      }
+      
+      saveStateSoon();
+      
+      return res.json({ 
+        ok: true, 
+        synced_containers: syncedCount,
+        total_schedules: allSchedules.length,
+        containers: Object.keys(state.containers),
+      });
+    } catch (fetchError) {
+      clearTimeout(timeoutId);
+      
+      // Handle AbortError (timeout)
+      if (fetchError instanceof Error && fetchError.name === 'AbortError') {
+        console.error('[backend] Database fetch timed out after 30 seconds');
+        return res.status(504).json({ ok: false, message: 'Database fetch timed out' });
+      }
+      
+      // Re-throw to outer catch
+      throw fetchError;
     }
-    
-    // Update state.containers with synced data
-    let syncedCount = 0;
-    for (const [containerId, data] of containerMap.entries()) {
-      state.containers[containerId] = {
-        pill_config: data.pill_config,
-        times: [], // Legacy format - not used if schedules are present
-        schedules: data.schedules,
-        notify_email: data.notify_email,
-      };
-      syncedCount++;
-      console.log(`[backend] ✅ Synced ${data.schedules.length} schedule(s) for ${containerId}`);
-    }
-    
-    saveStateSoon();
-    
-    return res.json({ 
-      ok: true, 
-      synced_containers: syncedCount,
-      total_schedules: allSchedules.length,
-      containers: Object.keys(state.containers),
-    });
   } catch (e) {
     console.error('[backend] Error syncing schedules from database:', e);
     return res.status(500).json({ ok: false, message: String(e?.message || e) });

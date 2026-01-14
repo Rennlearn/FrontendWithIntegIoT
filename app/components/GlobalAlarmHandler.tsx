@@ -1071,17 +1071,18 @@ export default function GlobalAlarmHandler() {
   const shouldShowAlarm = activeModal === 'ALARM';
   const shouldShowMismatch = activeModal === 'PILL_MISMATCH' && activeModal !== 'ALARM';
   
-  // Sync React state with ModalController state (for consistency, but visibility uses ref directly)
+  // CRITICAL: Sync React state with ModalController state using useEffect to avoid render-time state updates
   // This ensures React state matches, but modal visibility is driven by ref for instant display
-  // No delays - state sync happens synchronously
-  if (shouldShowAlarm !== alarmVisible) {
-    alarmVisibleRef.current = shouldShowAlarm;
-    setAlarmVisible(shouldShowAlarm);
-  }
-  if (shouldShowMismatch !== pillMismatchVisible) {
-    pillMismatchVisibleRef.current = shouldShowMismatch;
-    setPillMismatchVisible(shouldShowMismatch);
-  }
+  useEffect(() => {
+    if (shouldShowAlarm !== alarmVisible) {
+      alarmVisibleRef.current = shouldShowAlarm;
+      setAlarmVisible(shouldShowAlarm);
+    }
+    if (shouldShowMismatch !== pillMismatchVisible) {
+      pillMismatchVisibleRef.current = shouldShowMismatch;
+      setPillMismatchVisible(shouldShowMismatch);
+    }
+  }, [shouldShowAlarm, shouldShowMismatch, alarmVisible, pillMismatchVisible]);
 
   return (
     <>

@@ -1553,22 +1553,37 @@ const MonitorManageScreen = () => {
         console.log(`[Auto Capture] ✅ Post-pill capture triggered successfully for Container ${container}`);
         
         // Wait a bit and check result
-        setTimeout(async () => {
-          const result = await verificationService.getVerificationResult(containerId);
-          console.log(`[Auto Capture] Post-pill verification result:`, result);
+        const verificationTimeoutId = setTimeout(async () => {
+          pendingTimeouts.delete(verificationTimeoutId);
           
-          // Send verification result notification (alarm modal is already dismissed)
+          // Check if component is still mounted
+          if (!listenerActive) {
+            console.log('[Auto Capture] Component unmounted, skipping verification check');
+            return;
+          }
+          
           try {
-            // @ts-expect-error - Dynamic import for lazy loading (works at runtime)
-            const Notifications = await import('expo-notifications');
-            if (Notifications.default && typeof Notifications.default.scheduleNotificationAsync === 'function') {
-              const verificationStatus = result.success && result.result?.pass_ ? '✅ Verified' : '⚠️ Verification Failed';
-              await Notifications.default.scheduleNotificationAsync({
-                content: {
-                  title: verificationStatus,
-                  body: result.success && result.result?.pass_ 
-                    ? `Container ${container} medication verified successfully!`
-                    : `Container ${container} verification failed. Please check the medication.`,
+            const result = await verificationService.getVerificationResult(containerId);
+            console.log(`[Auto Capture] Post-pill verification result:`, result);
+            
+            // Check mounted state again before async operations
+            if (!listenerActive) {
+              console.log('[Auto Capture] Component unmounted during verification check');
+              return;
+            }
+            
+            // Send verification result notification (alarm modal is already dismissed)
+            try {
+              // @ts-expect-error - Dynamic import for lazy loading (works at runtime)
+              const Notifications = await import('expo-notifications');
+              if (Notifications.default && typeof Notifications.default.scheduleNotificationAsync === 'function') {
+                const verificationStatus = result.success && result.result?.pass_ ? '✅ Verified' : '⚠️ Verification Failed';
+                await Notifications.default.scheduleNotificationAsync({
+                  content: {
+                    title: verificationStatus,
+                    body: result.success && result.result?.pass_ 
+                      ? `Container ${container} medication verified successfully!`
+                      : `Container ${container} verification failed. Please check the medication.`,
                   sound: result.success && result.result?.pass_,
                   ...(Platform.OS === 'android' && { priority: 'default' as const }),
                   data: { container, verificationResult: result, source },
@@ -1647,6 +1662,8 @@ const MonitorManageScreen = () => {
     checkConnection();
     
     let listenerActive = true;
+    const pendingTimeouts = new Set<ReturnType<typeof setTimeout>>();
+    
     const cleanup = BluetoothService.onDataReceived(async (data: string) => {
       if (!listenerActive) {
         console.log('[MonitorManageScreen] Listener inactive, ignoring data');
@@ -1701,7 +1718,17 @@ const MonitorManageScreen = () => {
           
           // Automatically trigger ESP32-CAM capture BEFORE user takes pill
           // Use setTimeout to ensure modal state is set first, then trigger capture
-          setTimeout(async () => {
+          // CRITICAL: Store timeout ID for cleanup and check mounted state
+          const captureTimeoutId = setTimeout(async () => {
+            // Remove from tracking set when executed
+            pendingTimeouts.delete(captureTimeoutId);
+            
+            // Check if component is still mounted before proceeding
+            if (!listenerActive) {
+              console.log('[Auto Capture] Component unmounted, skipping capture');
+              return;
+            }
+            
             try {
               const containerId = verificationService.getContainerId(container);
               console.log(`[Auto Capture] Alarm triggered for Container ${container}, mapping to containerId: ${containerId}`);
@@ -1710,21 +1737,39 @@ const MonitorManageScreen = () => {
               // Get pill count from backend
               let pillCount = 0;
               try {
-                const configResponse = await fetch(`${BACKEND_URL}/get-pill-config/${containerId}`, {
-                  method: 'GET',
-                  headers: { 'Content-Type': 'application/json' },
-                  signal: AbortSignal.timeout(5000) // 5 second timeout
-                });
-                if (configResponse.ok) {
-                  const configData = await configResponse.json();
-                  pillCount = configData.pill_config?.count || 0;
-                  console.log(`[Auto Capture] Got pill count: ${pillCount} for ${containerId}`);
-                } else {
-                  console.warn(`[Auto Capture] Failed to get pill config: HTTP ${configResponse.status}`);
+                const configController = new AbortController();
+                const configTimeoutId = setTimeout(() => configController.abort(), 5000);
+                try {
+                  const configResponse = await fetch(`${BACKEND_URL}/get-pill-config/${containerId}`, {
+                    method: 'GET',
+                    headers: { 'Content-Type': 'application/json' },
+                    signal: configController.signal
+                  });
+                  clearTimeout(configTimeoutId);
+                  
+                  if (configResponse.ok) {
+                    const configData = await configResponse.json();
+                    pillCount = configData.pill_config?.count || 0;
+                    console.log(`[Auto Capture] Got pill count: ${pillCount} for ${containerId}`);
+                  } else {
+                    console.warn(`[Auto Capture] Failed to get pill config: HTTP ${configResponse.status}`);
+                  }
+                } catch (configError) {
+                  clearTimeout(configTimeoutId);
+                  if (configError instanceof Error && configError.name !== 'AbortError') {
+                    console.warn(`[Auto Capture] Error fetching pill config:`, configError);
+                  }
+                  // Continue with pillCount = 0 if config fetch fails
                 }
               } catch (configError) {
-                console.warn(`[Auto Capture] Error fetching pill config:`, configError);
+                console.warn(`[Auto Capture] Error setting up config fetch:`, configError);
                 // Continue with pillCount = 0 if config fetch fails
+              }
+              
+              // Check mounted state again before async operations
+              if (!listenerActive) {
+                console.log('[Auto Capture] Component unmounted during config fetch, skipping capture');
+                return;
               }
               
               // Trigger capture with retry logic
@@ -1732,10 +1777,17 @@ const MonitorManageScreen = () => {
               let captureResult = await verificationService.triggerCapture(containerId, { count: pillCount });
               console.log(`[Auto Capture] 📸 Capture result:`, captureResult);
               
-              // Retry once if it fails
-              if (!captureResult.ok) {
+              // Retry once if it fails (only if still mounted)
+              if (!captureResult.ok && listenerActive) {
                 console.warn(`[Auto Capture] ⚠️ First capture attempt failed, retrying in 2 seconds...`);
                 await new Promise(resolve => setTimeout(resolve, 2000));
+                
+                // Final mounted check before retry
+                if (!listenerActive) {
+                  console.log('[Auto Capture] Component unmounted during retry delay, skipping retry');
+                  return;
+                }
+                
                 captureResult = await verificationService.triggerCapture(containerId, { count: pillCount });
                 console.log(`[Auto Capture] 📸 Retry capture result:`, captureResult);
               }
@@ -1744,19 +1796,25 @@ const MonitorManageScreen = () => {
                 console.log(`[Auto Capture] ✅ Pre-pill capture triggered successfully for Container ${container}`);
                 // Don't check verification result immediately - just log that capture was triggered
                 // The verification will be checked after user takes pill (post-pill capture)
-              } else {
+              } else if (listenerActive) {
                 console.error(`[Auto Capture] ❌ Failed to trigger capture after retry: ${captureResult.message}`);
                 // Don't show alert here - it might interfere with the alarm modal
                 // Just log the error - user can still take the pill
                 console.error(`[Auto Capture] Error details: ${captureResult.message}`);
               }
             } catch (error) {
-              console.error(`[Auto Capture] ❌ Exception during pre-pill capture for Container ${container}:`, error);
-              if (error instanceof Error) {
-                console.error(`[Auto Capture] Error details: ${error.message}\n${error.stack}`);
+              // Only log if component is still mounted
+              if (listenerActive) {
+                console.error(`[Auto Capture] ❌ Exception during pre-pill capture for Container ${container}:`, error);
+                if (error instanceof Error) {
+                  console.error(`[Auto Capture] Error details: ${error.message}\n${error.stack}`);
+                }
               }
             }
           }, 500); // Small delay to ensure modal state is set first
+          
+          // CRITICAL: Track timeout for cleanup
+          pendingTimeouts.add(captureTimeoutId);
           
           // Play alarm sound
           try {
@@ -1818,7 +1876,15 @@ const MonitorManageScreen = () => {
           }
           
           // Reload schedule data to update status (mark as "Active" or remove if needed)
-          setTimeout(async () => {
+          const reloadTimeoutId = setTimeout(async () => {
+            pendingTimeouts.delete(reloadTimeoutId);
+            
+            // Check if component is still mounted
+            if (!listenerActive) {
+              console.log('[MonitorManageScreen] Component unmounted, skipping schedule reload');
+              return;
+            }
+            
             console.log('[MonitorManageScreen] Reloading schedules after alarm trigger...');
             try {
               await loadScheduleData(false, false, false); // Don't sync to Arduino, don't auto-delete, no loading
@@ -1826,6 +1892,9 @@ const MonitorManageScreen = () => {
               console.warn('[MonitorManageScreen] Error reloading schedules after alarm:', err);
             }
           }, 1000);
+          
+          // CRITICAL: Track timeout for cleanup
+          pendingTimeouts.add(reloadTimeoutId);
         }
       }
       
@@ -1853,6 +1922,17 @@ const MonitorManageScreen = () => {
     return () => {
       console.log('[MonitorManageScreen] 🧹 Cleaning up Bluetooth listener...');
       listenerActive = false; // Mark listener as inactive
+      
+      // CRITICAL: Clear all pending timeouts to prevent memory leaks
+      pendingTimeouts.forEach((timeoutId) => {
+        try {
+          clearTimeout(timeoutId);
+        } catch (err) {
+          // Ignore errors during cleanup
+        }
+      });
+      pendingTimeouts.clear();
+      
       // Cleanup should be synchronous and not block navigation
       try {
         if (cleanup) {

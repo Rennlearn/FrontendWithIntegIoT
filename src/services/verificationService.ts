@@ -63,71 +63,75 @@ class VerificationService {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
       
-      // Use the dedicated trigger-capture endpoint
-      // Send pill config in request body so backend can use it if not in memory
-      // IMPORTANT: Include both count AND label for proper verification
-      const response = await fetch(`${base}/trigger-capture/${containerId}`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ expected: pillConfig }), // Send full pill config (count + label)
-        signal: controller.signal,
-      });
+      try {
+        // Use the dedicated trigger-capture endpoint
+        // Send pill config in request body so backend can use it if not in memory
+        // IMPORTANT: Include both count AND label for proper verification
+        const response = await fetch(`${base}/trigger-capture/${containerId}`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ expected: pillConfig }), // Send full pill config (count + label)
+          signal: controller.signal,
+        });
 
-      clearTimeout(timeoutId);
+        clearTimeout(timeoutId);
 
-      if (!response.ok) {
-        const errorText = await response.text();
-        let errorMessage = `Backend error: ${response.status} - ${errorText}`;
-        
-        // Handle rate limiting (429) with retry logic
-        if (response.status === 429) {
-          if (retryCount < maxRetries) {
-            const retryAfter = response.headers.get('Retry-After') || retryDelay / 1000;
-            console.warn(`[VerificationService] Rate limited (429), retrying in ${retryAfter}s... (attempt ${retryCount + 1}/${maxRetries})`);
-            await new Promise(resolve => setTimeout(resolve, retryDelay * (retryCount + 1))); // Exponential backoff
-            return this.triggerCapture(containerId, pillConfig, retryCount + 1);
+        if (!response.ok) {
+          const errorText = await response.text();
+          let errorMessage = `Backend error: ${response.status} - ${errorText}`;
+          
+          // Handle rate limiting (429) with retry logic
+          if (response.status === 429) {
+            if (retryCount < maxRetries) {
+              const retryAfter = response.headers.get('Retry-After') || retryDelay / 1000;
+              console.warn(`[VerificationService] Rate limited (429), retrying in ${retryAfter}s... (attempt ${retryCount + 1}/${maxRetries})`);
+              await new Promise(resolve => setTimeout(resolve, retryDelay * (retryCount + 1))); // Exponential backoff
+              return this.triggerCapture(containerId, pillConfig, retryCount + 1);
+            } else {
+              errorMessage = `Too many requests. Please wait a moment before trying again.`;
+              console.error(`[VerificationService] Rate limited (429) after ${maxRetries} retries`);
+            }
           } else {
-            errorMessage = `Too many requests. Please wait a moment before trying again.`;
-            console.error(`[VerificationService] Rate limited (429) after ${maxRetries} retries`);
+            // Append response status for better diagnostics
+            errorMessage = `${errorMessage} (status: ${response.status})`;
+            console.error(`[VerificationService] Backend error (${response.status}):`, errorText);
+            console.warn(`[VerificationService] Diagnostic: Check BACKEND_URL (${await this.getBackendUrl()}) and network connectivity`);
           }
-        } else {
-          // Append response status for better diagnostics
-          errorMessage = `${errorMessage} (status: ${response.status})`;
-          console.error(`[VerificationService] Backend error (${response.status}):`, errorText);
-          console.warn(`[VerificationService] Diagnostic: Check BACKEND_URL (${await this.getBackendUrl()}) and network connectivity`);
+          
+          return { ok: false, message: errorMessage };
+        }
+
+        const data = await response.json();
+        console.log(`[VerificationService] Capture triggered successfully:`, data);
+        return { ok: data.ok || false, message: data.message || 'Capture triggered' };
+      } catch (error) {
+        // CRITICAL: Always clear timeout on error to prevent memory leaks
+        clearTimeout(timeoutId);
+        
+        // Handle network errors gracefully - don't throw, return error status
+        if (error instanceof TypeError) {
+          if (error.message.includes('fetch') || error.message.includes('Network request failed') || error.message.includes('Failed to fetch')) {
+            console.warn(`[VerificationService] Network error - backend unreachable at ${BACKEND_URL}`);
+            return { 
+              ok: false, 
+              message: 'Backend unreachable. ESP32-CAM verification may still work via MQTT.' 
+            };
+          }
         }
         
-        return { ok: false, message: errorMessage };
-      }
-
-      const data = await response.json();
-      console.log(`[VerificationService] Capture triggered successfully:`, data);
-      return { ok: data.ok || false, message: data.message || 'Capture triggered' };
-    } catch (error) {
-      // Handle network errors gracefully - don't throw, return error status
-      if (error instanceof TypeError) {
-        if (error.message.includes('fetch') || error.message.includes('Network request failed') || error.message.includes('Failed to fetch')) {
-          console.warn(`[VerificationService] Network error - backend unreachable at ${BACKEND_URL}`);
-          return { 
-            ok: false, 
-            message: 'Backend unreachable. ESP32-CAM verification may still work via MQTT.' 
-          };
+        if (error instanceof Error && error.name === 'AbortError') {
+          console.warn('[VerificationService] Request timed out');
+          return { ok: false, message: 'Request timed out' };
         }
+        
+        console.warn('[VerificationService] Error triggering capture:', error);
+        return { 
+          ok: false, 
+          message: error instanceof Error ? error.message : 'Unknown error' 
+        };
       }
-      
-      if (error instanceof Error && error.name === 'AbortError') {
-        console.warn('[VerificationService] Request timed out');
-        return { ok: false, message: 'Request timed out' };
-      }
-      
-      console.warn('[VerificationService] Error triggering capture:', error);
-      return { 
-        ok: false, 
-        message: error instanceof Error ? error.message : 'Unknown error' 
-      };
-    }
   }
 
   /**
