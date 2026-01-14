@@ -4,6 +4,7 @@ import { useRoute, useNavigation } from '@react-navigation/native';
 import * as Print from 'expo-print';
 import * as Sharing from 'expo-sharing';
 import * as FileSystem from 'expo-file-system';
+import verificationService from '@/services/verificationService';
 
 interface MedicationRow {
   _id: string;
@@ -12,6 +13,7 @@ interface MedicationRow {
   scheduledTime: string;
   date: string;
   status: 'Taken' | 'Pending' | 'Missed';
+  imageBase64?: string; // Base64 encoded image for PDF
 }
 
 const Generate = () => {
@@ -40,10 +42,84 @@ const Generate = () => {
     generatePDF();
   };
 
+  // Fetch latest capture image for a container and convert to base64
+  const fetchContainerImage = async (containerId: number): Promise<string | null> => {
+    try {
+      const base = await verificationService.getBackendUrl();
+      const containerIdStr = `container${containerId}`;
+      const response = await fetch(`${base}/captures/latest/${containerIdStr}?t=${Date.now()}`, {
+        method: 'GET',
+        headers: {
+          'Content-Type': 'application/json',
+          'Cache-Control': 'no-cache',
+        },
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        const imagePath = data.latest?.annotated || data.latest?.raw;
+        
+        if (imagePath) {
+          // Construct full URL
+          const fullUrl = imagePath.startsWith('http') 
+            ? imagePath 
+            : `${base}${imagePath}`;
+          
+          // Download image using expo-file-system and convert to base64
+          try {
+            // Download the image to a temporary file
+            const fileUri = `${FileSystem.cacheDirectory}container_${containerId}_${Date.now()}.jpg`;
+            const downloadResult = await FileSystem.downloadAsync(fullUrl, fileUri);
+            
+            if (downloadResult.status === 200) {
+              // Read the file as base64
+              const base64String = await FileSystem.readAsStringAsync(downloadResult.uri, {
+                encoding: FileSystem.EncodingType.Base64,
+              });
+              
+              // Clean up temporary file
+              try {
+                await FileSystem.deleteAsync(downloadResult.uri, { idempotent: true });
+              } catch (cleanupError) {
+                // Ignore cleanup errors
+              }
+              
+              // Return data URL format for HTML img src
+              return `data:image/jpeg;base64,${base64String}`;
+            }
+          } catch (downloadError) {
+            console.warn(`[Generate] Failed to download image for container ${containerId}:`, downloadError);
+          }
+        }
+      }
+    } catch (error) {
+      console.warn(`[Generate] Failed to fetch image for container ${containerId}:`, error);
+    }
+    return null;
+  };
+
   const generatePDF = async () => {
     setGenerating(true);
     try {
       const data: MedicationRow[] = JSON.parse(adherenceDataParam || '[]');
+      
+      // Fetch images for each unique container
+      const uniqueContainers = [...new Set(data.map(d => d.containerId))];
+      const containerImages: Record<number, string | null> = {};
+      
+      console.log(`[Generate] Fetching images for ${uniqueContainers.length} containers...`);
+      for (const containerId of uniqueContainers) {
+        const imageBase64 = await fetchContainerImage(containerId);
+        containerImages[containerId] = imageBase64;
+        console.log(`[Generate] ${imageBase64 ? '✅' : '❌'} Container ${containerId} image ${imageBase64 ? 'loaded' : 'not available'}`);
+      }
+      
+      // Add images to data rows
+      const dataWithImages = data.map(med => ({
+        ...med,
+        imageBase64: containerImages[med.containerId] || null,
+      }));
+      
       const total = data.length;
       const taken = data.filter(d => d.status === 'Taken').length;
       const missed = data.filter(d => d.status === 'Missed').length;
@@ -116,12 +192,31 @@ const Generate = () => {
                 padding: 10px 8px;
                 border-bottom: 1px solid #e0e0e0;
                 font-size: 13px;
+                vertical-align: middle;
               }
               tbody tr:hover {
                 background-color: #f5f5f5;
               }
               tbody tr:last-child td {
                 border-bottom: none;
+              }
+              .image-cell {
+                text-align: center;
+                width: 120px;
+              }
+              .container-image {
+                max-width: 100px;
+                max-height: 100px;
+                object-fit: contain;
+                border: 1px solid #ddd;
+                border-radius: 4px;
+                padding: 4px;
+                background-color: #f9f9f9;
+              }
+              .no-image {
+                color: #999;
+                font-size: 11px;
+                font-style: italic;
               }
               .status-taken {
                 color: #4CAF50;
@@ -180,6 +275,7 @@ const Generate = () => {
               <thead>
                 <tr>
                   <th>Container</th>
+                  <th>Image</th>
                   <th>Medicine Name</th>
                   <th>Date</th>
                   <th>Scheduled Time</th>
@@ -187,9 +283,15 @@ const Generate = () => {
                 </tr>
               </thead>
               <tbody>
-                ${data.map(med => `
+                ${dataWithImages.map(med => `
                   <tr>
                     <td class="container-cell">Container ${med.containerId}</td>
+                    <td class="image-cell">
+                      ${med.imageBase64 
+                        ? `<img src="${med.imageBase64}" alt="Container ${med.containerId} capture" class="container-image" />` 
+                        : `<span class="no-image">No image available</span>`
+                      }
+                    </td>
                     <td>${med.medicineName || 'N/A'}</td>
                     <td>${med.date || 'N/A'}</td>
                     <td>${med.scheduledTime || 'N/A'}</td>

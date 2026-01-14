@@ -41,6 +41,22 @@ interface Medication {
   medId: number;
 }
 
+// CRITICAL: Normalize container IDs to prevent data mixing
+// Ensures consistent parsing of container identifiers (numeric, "container1", "morning", etc.)
+const normalizeContainer = (raw: any): 1 | 2 | 3 => {
+  if (raw === null || raw === undefined) return 1;
+  const s = String(raw).trim().toLowerCase();
+  const m = s.match(/(\d+)/);
+  if (m) {
+    const n = parseInt(m[1], 10);
+    if (n === 1 || n === 2 || n === 3) return n as 1 | 2 | 3;
+  }
+  if (s === 'morning') return 1;
+  if (s === 'noon') return 2;
+  if (s === 'evening' || s === 'night') return 3;
+  return 1;
+};
+
 const ModifyScheduleScreen = () => {
   const navigation = useNavigation();
   const { isDarkMode } = useTheme();
@@ -310,11 +326,8 @@ const ModifyScheduleScreen = () => {
               const currentMedications = await loadMedications();
               const enrichedSchedules = userSchedules.map((schedule: any) => {
                 const medication = currentMedications.find(med => med.medId === schedule.medication);
-                const rawContainer = schedule.container;
-                const parsedContainer =
-                  parseInt(rawContainer) ||
-                  parseInt(String(rawContainer).replace(/[^0-9]/g, '')) ||
-                  1;
+                // CRITICAL: Use normalizeContainer to prevent data mixing
+                const parsedContainer = normalizeContainer(schedule.container);
                 return {
                   ...schedule,
                   container: parsedContainer,
@@ -393,12 +406,8 @@ const ModifyScheduleScreen = () => {
       const enrichedSchedules = userSchedules.map((schedule: any) => {
         const medication = currentMedications.find(med => med.medId === schedule.medication);
 
-        // Normalize container to a number (supports string like "container1" or "1")
-        const rawContainer = schedule.container;
-        const parsedContainer =
-          parseInt(rawContainer) ||
-          parseInt(String(rawContainer).replace(/[^0-9]/g, '')) ||
-          1;
+        // CRITICAL: Use normalizeContainer to prevent data mixing
+        const parsedContainer = normalizeContainer(schedule.container);
 
         return {
           ...schedule,

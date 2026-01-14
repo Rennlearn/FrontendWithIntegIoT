@@ -33,6 +33,28 @@ type AlarmQueueItem = {
  * When 3 pills are scheduled at the same time (1 per container), all 3 alarms are queued
  * and shown one-by-one as each is dismissed.
  */
+// CRITICAL: Normalize container IDs to prevent data mixing
+// Ensures consistent parsing of container identifiers (numeric, "container1", "morning", etc.)
+const normalizeContainer = (raw: any): 1 | 2 | 3 => {
+  if (raw === null || raw === undefined) return 1;
+  const s = String(raw).trim().toLowerCase();
+
+  // Extract first digit sequence (handles "1", "01", "container2", etc.)
+  const m = s.match(/(\d+)/);
+  if (m) {
+    const n = parseInt(m[1], 10);
+    if (n === 1 || n === 2 || n === 3) return n as 1 | 2 | 3;
+  }
+
+  // Legacy string labels
+  if (s === 'morning') return 1;
+  if (s === 'noon') return 2;
+  if (s === 'evening' || s === 'night') return 3;
+
+  // Fallback to container 1 for any unknown format
+  return 1;
+};
+
 export default function GlobalAlarmHandler() {
   const [alarmVisible, setAlarmVisible] = useState(false);
   const [alarmContainer, setAlarmContainer] = useState(1);
@@ -279,12 +301,13 @@ export default function GlobalAlarmHandler() {
       console.log(`[GlobalAlarmHandler] 📊 Total schedules: ${allSchedules.length}`);
 
       // Prefer matching today's schedule; fallback to first match if date missing.
+      // CRITICAL: Use normalizeContainer to ensure consistent container matching
       const matchingSchedule =
         allSchedules.find((s: any) => String(s.date || '').slice(0, 10) === date &&
-          parseInt(s.container) === container &&
+          normalizeContainer(s.container) === container &&
           String(s.time).substring(0, 5) === timeStr) ||
         allSchedules.find((s: any) =>
-          parseInt(s.container) === container && String(s.time).substring(0, 5) === timeStr);
+          normalizeContainer(s.container) === container && String(s.time).substring(0, 5) === timeStr);
 
       if (!matchingSchedule) {
         console.warn(`[GlobalAlarmHandler] ⚠️ No matching schedule found for Container ${container} at ${timeStr}`);
@@ -739,7 +762,8 @@ export default function GlobalAlarmHandler() {
                 }
                 
                 if (event.type === 'alarm_triggered') {
-                  const containerNum = parseInt(event.container.replace('container', ''));
+                  // CRITICAL: Use normalizeContainer to prevent data mixing
+                  const containerNum = normalizeContainer(event.container);
                   const timeStr = event.time || '00:00';
                   console.log(`[GlobalAlarmHandler] 📨 HTTP Poll: ALARM_TRIGGERED for Container ${containerNum} at ${timeStr}`);
                   
@@ -755,7 +779,8 @@ export default function GlobalAlarmHandler() {
                     showNextAlarmFromQueue();
                   }
                 } else if (event.type === 'pill_mismatch') {
-                  const containerNum = parseInt((event.container || 'container1').replace('container', ''));
+                  // CRITICAL: Use normalizeContainer to prevent data mixing
+                  const containerNum = normalizeContainer(event.container || 'container1');
                   console.log(`[GlobalAlarmHandler] 📨 HTTP Poll: PILLALERT for Container ${containerNum}`);
                   
                   if (alarmVisibleRef.current) {
@@ -836,7 +861,8 @@ export default function GlobalAlarmHandler() {
         // - ALARM_TRIGGERED C2 2025-12-14 23:07
         const match = trimmed.match(/ALARM_TRIGGERED\s+C(\d+)\s+(?:\d{4}-\d{2}-\d{2}\s+)?(\d{1,2}):(\d{2})/i);
         if (!match) return;
-        const container = parseInt(match[1]);
+        // CRITICAL: Use normalizeContainer to prevent data mixing
+        const container = normalizeContainer(match[1]);
         const timeStr = `${match[2].padStart(2, '0')}:${match[3]}`;
 
         console.log(`[GlobalAlarmHandler] 📨 Received ALARM_TRIGGERED for Container ${container} at ${timeStr}`);
@@ -901,7 +927,8 @@ export default function GlobalAlarmHandler() {
       // --- Alarm stopped (user pressed stop) ---
       if (trimmed.toUpperCase().includes('ALARM_STOPPED')) {
         const m = trimmed.match(/ALARM_STOPPED\s+C(\d+)/i);
-        const container = m ? parseInt(m[1]) : alarmContainerRef.current;
+        // CRITICAL: Use normalizeContainer to prevent data mixing
+        const container = m ? normalizeContainer(m[1]) : alarmContainerRef.current;
         const timeStr = alarmTime; // Use current alarm time
 
         console.log(`[GlobalAlarmHandler] 🛑 Alarm stopped for Container ${container}`);
@@ -981,7 +1008,8 @@ export default function GlobalAlarmHandler() {
       // --- Pill mismatch ---
       if (trimmed.toUpperCase().includes('PILLALERT')) {
         const m = trimmed.match(/PILLALERT\s+C(\d+)/i);
-        const container = m ? parseInt(m[1]) : 1;
+        // CRITICAL: Use normalizeContainer to prevent data mixing
+        const container = m ? normalizeContainer(m[1]) : 1;
 
         // If alarm modal is up, queue mismatch to show after user stops alarm (prevents duplicates/stacking)
         if (alarmVisibleRef.current) {

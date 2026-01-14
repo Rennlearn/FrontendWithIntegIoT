@@ -64,6 +64,32 @@ const MonitorManageScreen = () => {
   const [monitoringElder, setMonitoringElder] = useState<{ id: string; name: string } | null>(null);
   const [hasActiveConnection, setHasActiveConnection] = useState<boolean>(true); // Default to true for elders
 
+  // Normalize a container identifier from schedules/events into a stable numeric container index (1, 2, or 3).
+  // Supports:
+  // - numeric values (1, 2, 3)
+  // - strings "1", "2", "3"
+  // - strings like "container1", "container2"
+  // - legacy labels "morning", "noon", "evening"
+  const normalizeContainer = useCallback((raw: any): 1 | 2 | 3 => {
+    if (raw === null || raw === undefined) return 1;
+    const s = String(raw).trim().toLowerCase();
+
+    // Extract first digit sequence (handles "1", "01", "container2", etc.)
+    const m = s.match(/(\d+)/);
+    if (m) {
+      const n = parseInt(m[1], 10);
+      if (n === 1 || n === 2 || n === 3) return n as 1 | 2 | 3;
+    }
+
+    // Legacy string labels
+    if (s === 'morning') return 1;
+    if (s === 'noon') return 2;
+    if (s === 'evening' || s === 'night') return 3;
+
+    // Fallback to container 1 for any unknown format
+    return 1;
+  }, []);
+
   // Configure notification handler (lazy load)
   // Note: expo-notifications requires a development build, not Expo Go
   useEffect(() => {
@@ -870,8 +896,8 @@ const MonitorManageScreen = () => {
       // - Keep every schedule (no per-container reduction)
       // - Order by container (1,2,3) then by time ascending
       const sortedSchedules = [...userSchedules].sort((a: any, b: any) => {
-        const containerA = parseInt(a.container) || 1;
-        const containerB = parseInt(b.container) || 1;
+        const containerA = normalizeContainer(a.container);
+        const containerB = normalizeContainer(b.container);
         if (containerA !== containerB) {
           return containerA - containerB;
         }
@@ -903,7 +929,7 @@ const MonitorManageScreen = () => {
         // Create a map of existing schedules by container+time+date for grace period lookup
         const existingByKey = new Map<string, any>();
         prevSchedules.forEach((s: any) => {
-          const c = parseInt(s?.container) || 1;
+          const c = normalizeContainer(s?.container);
           const timeStr = s?.time ? String(s.time).substring(0, 5) : '';
           const dateStr = s?.date || '';
           const key = `${c}|${dateStr}|${timeStr}`;
@@ -912,7 +938,7 @@ const MonitorManageScreen = () => {
         
         // Merge: Keep schedules in grace period from previous state, use new data for others
         const merged = sortedSchedules.map((newSchedule: any) => {
-          const c = parseInt(newSchedule?.container) || 1;
+          const c = normalizeContainer(newSchedule?.container);
           const timeStr = newSchedule?.time ? String(newSchedule.time).substring(0, 5) : '';
           const dateStr = newSchedule?.date || '';
           const key = `${c}|${dateStr}|${timeStr}`;
@@ -935,11 +961,11 @@ const MonitorManageScreen = () => {
         // This handles edge cases where backend might filter them out
         existingByKey.forEach((existing, key) => {
           const [cStr, dateStr, timeStr] = key.split('|');
-          const c = parseInt(cStr) || 1;
+          const c = normalizeContainer(cStr);
           const isInGracePeriod = timeStr && alarmTriggerTracker.isWithinGracePeriod(c, timeStr, dateStr);
           if (isInGracePeriod && existing.status === 'Done') {
             const alreadyInMerged = merged.some((s: any) => {
-              const sKey = `${parseInt(s?.container) || 1}|${s?.date || ''}|${s?.time ? String(s.time).substring(0, 5) : ''}`;
+              const sKey = `${normalizeContainer(s?.container)}|${s?.date || ''}|${s?.time ? String(s.time).substring(0, 5) : ''}`;
               return sKey === key;
             });
             if (!alreadyInMerged) {
@@ -1030,7 +1056,7 @@ const MonitorManageScreen = () => {
               await new Promise(resolve => setTimeout(resolve, 300)); // Increased delay
               
               for (const sched of sortedSchedules) {
-                const containerNum = parseInt(sched.container) || 1;
+                const containerNum = normalizeContainer(sched.container);
                 console.log(`[MonitorManageScreen] Sending to Arduino: SCHED ADD ${sched.time} ${containerNum}`);
                 await BluetoothService.sendCommand(`SCHED ADD ${sched.time} ${containerNum}\n`);
                 await new Promise(resolve => setTimeout(resolve, 300)); // Increased delay for reliability
@@ -1342,7 +1368,8 @@ const MonitorManageScreen = () => {
       // The grace period check in pendingSchedulesToShow will keep it visible for 60 seconds
       setSchedules((prevSchedules) => {
         return prevSchedules.map((schedule) => {
-          const scheduleContainer = parseInt(schedule.container) || schedule.container;
+          // Use stable container mapping to avoid mixing container IDs like "container2" and 2
+          const scheduleContainer = normalizeContainer(schedule.container);
           const scheduleTime = String(schedule.time).substring(0, 5);
           const eventTime = String(time).substring(0, 5);
           
@@ -1636,7 +1663,7 @@ const MonitorManageScreen = () => {
         // More flexible regex to handle variations
         const match = trimmedData.match(/ALARM_TRIGGERED\s+C(\d+)\s+(\d{1,2}):(\d{2})/);
         if (match) {
-          const container = parseInt(match[1]);
+          const container = normalizeContainer(match[1]);
           const hour = match[2].padStart(2, '0');
           const minute = match[3];
           const timeStr = `${hour}:${minute}`;
@@ -1809,7 +1836,7 @@ const MonitorManageScreen = () => {
         let container = 0;
         const match = data.match(/ALARM_STOPPED C(\d+)/);
         if (match) {
-          container = parseInt(match[1]);
+          container = normalizeContainer(match[1]);
         } else {
           // If no container in message, use the last known alarm container
           container = alarmContainer;
@@ -2162,7 +2189,7 @@ const MonitorManageScreen = () => {
   // even if marked as TAKEN, so users can see and interact with the alarm.
   const deriveStatus = useCallback((schedule: any): 'Pending' | 'Missed' | 'Taken' | string => {
     const rawStatus = (schedule?.status || 'Pending') as string;
-    const container = parseInt(schedule?.container) || 1;
+    const container = normalizeContainer(schedule?.container);
     const timeStr = schedule?.time ? String(schedule.time).substring(0, 5) : '';
     const dateStr = schedule?.date;
     
@@ -2230,8 +2257,7 @@ const MonitorManageScreen = () => {
 
     const byContainer: Record<1 | 2 | 3, any[]> = { 1: [], 2: [], 3: [] };
     for (const s of schedules || []) {
-      const c = parseInt(s?.container);
-      if (c !== 1 && c !== 2 && c !== 3) continue;
+      const c = normalizeContainer(s?.container);
       
       const status = deriveStatus(s);
       const timeStr = s?.time ? String(s.time).substring(0, 5) : '';
@@ -2275,7 +2301,7 @@ const MonitorManageScreen = () => {
       .filter(Boolean);
 
     // Ensure stable order: container 1, 2, 3
-    return picked.sort((a: any, b: any) => (parseInt(a?.container) || 0) - (parseInt(b?.container) || 0));
+    return picked.sort((a: any, b: any) => normalizeContainer(a?.container) - normalizeContainer(b?.container));
   }, [schedules, deriveStatus, clockTick]); // Include clockTick to refresh when grace period expires
 
   // Get container schedules
@@ -2293,7 +2319,7 @@ const MonitorManageScreen = () => {
     // Group schedules by container
     const schedulesByContainer: Record<number, any[]> = {};
     schedules.forEach((schedule: any) => {
-      const containerNum = parseInt(schedule.container) || 1;
+      const containerNum = normalizeContainer(schedule.container);
       if (!schedulesByContainer[containerNum]) {
         schedulesByContainer[containerNum] = [];
       }
@@ -2356,7 +2382,7 @@ const MonitorManageScreen = () => {
     );
   }
 
-  const containerSchedules = getContainerSchedules();
+    const containerSchedules = getContainerSchedules();
 
   return (
     <View style={{ flex: 1 }}>
@@ -2419,7 +2445,7 @@ const MonitorManageScreen = () => {
         </TouchableOpacity>
       </View>
 
-      {/* Backend override (available in all builds) */}
+      {/* Backend override - Hidden display, accessible via settings icon */}
       {/* 
         Backend IP Override Function:
         - AUTOMATIC: The app automatically detects and updates the backend URL when your Mac's IP changes
@@ -2430,53 +2456,70 @@ const MonitorManageScreen = () => {
         - Clear: Remove the override and use automatic detection
         - The override is saved locally and persists across app restarts
         - All API calls will use this override URL instead of the default
-        - Status shows "Reachable" when backend is accessible, "Unreachable" when not
       */}
-        <View style={[styles.devRowWrapper, { backgroundColor: theme.card }]}> 
-          <View style={{ flex: 1 }}>
-            <Text style={[styles.devLabel, { color: theme.textSecondary }]}>Backend</Text>
-            <Text style={[styles.devValue, { color: theme.text }]} numberOfLines={1} ellipsizeMode="middle">{backendOverride || BACKEND_URL}</Text>
-            <Text style={[styles.devStatus, { color: backendReachable ? 'green' : backendReachable === false ? 'orange' : theme.textSecondary }]}>Status: {backendReachable === null ? 'Checking...' : (backendReachable ? 'Reachable' : 'Unreachable')}</Text>
-          </View>
-          <View style={{ justifyContent: 'center' }}>
-            <TouchableOpacity onPress={() => { setBackendInput(backendOverride || BACKEND_URL); setBackendModalVisible(true); }} style={styles.smallButton}>
-              <Text style={{ color: theme.card }}>Edit</Text>
-            </TouchableOpacity>
-            <TouchableOpacity onPress={() => clearBackendOverride()} style={[styles.smallButton, { marginTop: 8, backgroundColor: theme.background }] }>
-              <Text style={{ color: theme.primary }}>Clear</Text>
-            </TouchableOpacity>
-          </View>
-
-        <Modal 
-          visible={backendModalVisible && !alarmVisible} 
-          transparent 
-          animationType="slide"
-          statusBarTranslucent
-          hardwareAccelerated
-          onRequestClose={() => setBackendModalVisible(false)}
+      <View style={{ alignItems: 'flex-end', marginTop: 10, marginBottom: -10 }}>
+        <TouchableOpacity 
+          onPress={() => { 
+            setBackendInput(backendOverride || BACKEND_URL); 
+            setBackendModalVisible(true); 
+          }} 
+          style={[styles.backendSettingsButton, { backgroundColor: theme.card }]}
         >
-          <View style={[styles.modalOverlay, { zIndex: 5000, elevation: 500 }]}>
-            <View style={[styles.modalContent, { backgroundColor: theme.card, zIndex: 5001, elevation: 501 }]}>
-                <Text style={[styles.modalTitle, { color: theme.text }]}>Set Backend URL</Text>
-                <TextInput
-                  value={backendInput}
-                  onChangeText={setBackendInput}
-                  placeholder="http://10.0.0.1:5001"
-                  style={[styles.input, { color: theme.text, backgroundColor: theme.background }]}
-                  autoCapitalize="none"
-                />
-                <View style={{ flexDirection: 'row', justifyContent: 'flex-end', gap: 8 }}>
-                  <TouchableOpacity onPress={() => setBackendModalVisible(false)} style={[styles.smallButton, { backgroundColor: theme.background }]}>
-                    <Text style={{ color: theme.primary }}>Cancel</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity onPress={() => saveBackendOverride(backendInput)} style={styles.smallButton}>
-                    <Text style={{ color: theme.card }}>Save</Text>
-                  </TouchableOpacity>
-                </View>
-              </View>
+          <Ionicons 
+            name="settings-outline" 
+            size={20} 
+            color={theme.textSecondary} 
+          />
+        </TouchableOpacity>
+      </View>
+
+      <Modal 
+        visible={backendModalVisible && !alarmVisible} 
+        transparent 
+        animationType="slide"
+        statusBarTranslucent
+        hardwareAccelerated
+        onRequestClose={() => setBackendModalVisible(false)}
+      >
+        <View style={[styles.modalOverlay, { zIndex: 5000, elevation: 500 }]}>
+          <View style={[styles.modalContent, { backgroundColor: theme.card, zIndex: 5001, elevation: 501 }]}>
+            <Text style={[styles.modalTitle, { color: theme.text }]}>Backend URL Settings</Text>
+            <Text style={[styles.modalSubtitle, { color: theme.textSecondary, marginBottom: 16, fontSize: 12 }]}>
+              Current: {backendOverride || BACKEND_URL}
+            </Text>
+            <Text style={[styles.modalSubtitle, { color: theme.textSecondary, marginBottom: 12, fontSize: 12 }]}>
+              Status: {backendReachable === null ? 'Checking...' : (backendReachable ? '✅ Reachable' : '⚠️ Unreachable')}
+            </Text>
+            <TextInput
+              value={backendInput}
+              onChangeText={setBackendInput}
+              placeholder="http://10.0.0.1:5001"
+              style={[styles.input, { color: theme.text, backgroundColor: theme.background }]}
+              autoCapitalize="none"
+            />
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', gap: 8, marginTop: 8 }}>
+              <TouchableOpacity 
+                onPress={() => clearBackendOverride()} 
+                style={[styles.smallButton, { backgroundColor: theme.background, flex: 1 }]}
+              >
+                <Text style={{ color: theme.primary }}>Clear Override</Text>
+              </TouchableOpacity>
+              <TouchableOpacity 
+                onPress={() => setBackendModalVisible(false)} 
+                style={[styles.smallButton, { backgroundColor: theme.background, flex: 1 }]}
+              >
+                <Text style={{ color: theme.primary }}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity 
+                onPress={() => saveBackendOverride(backendInput)} 
+                style={[styles.smallButton, { flex: 1 }]}
+              >
+                <Text style={{ color: theme.card }}>Save</Text>
+              </TouchableOpacity>
             </View>
-          </Modal>
+          </View>
         </View>
+      </Modal>
 
         {/* Current Scheduled Section - Dropdown */}
       <View style={[styles.scheduleSection, { backgroundColor: theme.card }]}> 
@@ -2518,7 +2561,7 @@ const MonitorManageScreen = () => {
               // Find medication name from ID
               const medication = medications.find(med => med.medId === schedule.medication);
               const medicationName = medication ? medication.name : `ID: ${schedule.medication}`;
-              const verification = verifications[parseInt(schedule.container)];
+              const verification = verifications[normalizeContainer(schedule.container)];
               const status = deriveStatus(schedule);
               
               return (
@@ -2961,7 +3004,17 @@ const styles = StyleSheet.create({
     fontWeight: '500',
   },
 
-  /* Dev UI styles */
+  /* Backend settings button - small, unobtrusive */
+  backendSettingsButton: {
+    padding: 8,
+    borderRadius: 20,
+    width: 36,
+    height: 36,
+    justifyContent: 'center',
+    alignItems: 'center',
+    elevation: 2,
+  },
+  /* Dev UI styles (kept for compatibility, but no longer displayed) */
   devRowWrapper: {
     marginTop: 12,
     padding: 12,
@@ -2989,6 +3042,11 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     minWidth: 64,
+  },
+  modalSubtitle: {
+    fontSize: 13,
+    marginBottom: 16,
+    textAlign: 'center',
   },
   modalOverlay: {
     flex: 1,

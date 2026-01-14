@@ -133,6 +133,32 @@ function normalizeContainerId(id) {
   return s;
 }
 
+// Normalize a container identifier from database/cloud schedule records to a stable
+// numeric container index (1, 2, or 3). Supports:
+// - numeric values (1, 2, 3)
+// - strings "1", "2", "3"
+// - strings like "container1", "container2"
+// - legacy labels "morning", "noon", "evening"
+function normalizeContainerNumber(raw) {
+  if (raw === null || raw === undefined) return 1;
+  const s = String(raw).trim().toLowerCase();
+
+  // Extract first digit sequence (handles "1", "01", "container2", etc.)
+  const m = s.match(/(\d+)/);
+  if (m) {
+    const n = parseInt(m[1], 10);
+    if (n >= 1 && n <= 3) return n;
+  }
+
+  // Legacy string labels
+  if (s === "morning") return 1;
+  if (s === "noon") return 2;
+  if (s === "evening" || s === "night") return 3;
+
+  // Fallback to container1 for any unknown format
+  return 1;
+}
+
 // If you only have one ESP32-CAM, set SINGLE_CAMERA_DEVICE_ID in backend.env (e.g., "container2")
 // All MQTT publishes will target that device's topic while preserving the logical container in payloads.
 function resolveDeviceId(containerId) {
@@ -1009,7 +1035,9 @@ app.post("/sync-schedules-from-database", async (req, res) => {
     const containerMap = new Map(); // containerId -> { schedules: [], pill_config: {}, notify_email: "" }
     
     for (const schedule of allSchedules) {
-      const containerNum = parseInt(schedule.container) || 1;
+      // CRITICAL: normalize container field from database to a stable 1–3 index
+      // Supports numeric, "container2", "morning"/"noon"/"evening", etc.
+      const containerNum = normalizeContainerNumber(schedule.container);
       const containerId = `container${containerNum}`;
       
       if (!containerMap.has(containerId)) {

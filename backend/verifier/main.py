@@ -19,6 +19,7 @@ if not MOCK_VERIFIER:
     import numpy as np
     from ultralytics import YOLO
     from sklearn.neighbors import KNeighborsClassifier
+    from sklearn.cluster import KMeans
 else:
     # Provide light fallback types in mock mode
     Image = None
@@ -26,6 +27,7 @@ else:
     cv2 = None
     YOLO = None
     KNeighborsClassifier = None
+    KMeans = None
     pickle = None
 
 app = FastAPI(title="PillNow Verifier", version="0.1.0")
@@ -33,20 +35,23 @@ app = FastAPI(title="PillNow Verifier", version="0.1.0")
 # Load models on startup
 MODEL_DIR = Path(__file__).parent / "models"
 YOLO_MODEL_PATH = MODEL_DIR / "best_new.pt"
-KNN_MODEL_PATH = MODEL_DIR / "knn_pills_2.pkl"
+KNN_MODEL_PATH = MODEL_DIR / "knn_pills_new.pkl"
+KMEANS_MODEL_PATH = MODEL_DIR / "kmeans_pills.pkl"
 
 yolo_model = None
 knn_model = None
+kmeans_model = None
 knn_scaler = None  # Feature scaler if KNN model uses one
 
 @app.on_event("startup")
 async def load_models():
-    """Load YOLOv8 and KNN models on server startup (skipped in MOCK mode)"""
-    global yolo_model, knn_model, knn_scaler
+    """Load YOLOv8, KNN, and KMeans models on server startup (skipped in MOCK mode)"""
+    global yolo_model, knn_model, kmeans_model, knn_scaler
     if MOCK_VERIFIER:
         print("⚡ MOCK_VERIFIER enabled — skipping heavy model loads")
         yolo_model = None
         knn_model = None
+        kmeans_model = None
         knn_scaler = None
         return
 
@@ -59,46 +64,91 @@ async def load_models():
         else:
             print(f"Warning: YOLOv8 model not found at {YOLO_MODEL_PATH}")
             
-        # Load KNN classifier - DISABLED FOR TESTING (YOLO only)
-        # KNN verification is disabled to test YOLO-only performance
-        knn_model = None
-        knn_scaler = None
-        print("KNN model loading disabled - using YOLO only for testing")
-        # if KNN_MODEL_PATH.exists():
-        #     print(f"Loading KNN model from {KNN_MODEL_PATH}")
-        #     try:
-        #         # Some sklearn artifacts are saved with joblib, others with raw pickle.
-        #         # Your `knn_pills_2.pkl` loads via joblib but fails with pickle.
-        #         knn_data = None
-        #         try:
-        #             with open(KNN_MODEL_PATH, 'rb') as f:
-        #                 knn_data = pickle.load(f)
-        #         except Exception as pickle_err:
-        #             try:
-        #                 import joblib  # type: ignore
-        #                 knn_data = joblib.load(str(KNN_MODEL_PATH))
-        #                 print(f"KNN model loaded via joblib (pickle failed: {pickle_err})")
-        #             except Exception as joblib_err:
-        #                 raise Exception(f"Failed to load KNN model. pickle_err={pickle_err} joblib_err={joblib_err}")
-        #
-        #             # Handle different KNN model formats
-        #             if isinstance(knn_data, dict):
-        #                 knn_model = knn_data.get('model') or knn_data.get('classifier') or knn_data.get('knn')
-        #                 knn_scaler = knn_data.get('scaler') or knn_data.get('feature_scaler')
-        #                 print(f"KNN model loaded: {type(knn_model)}")
-        #                 if knn_scaler:
-        #                     print("KNN scaler loaded")
-        #             elif hasattr(knn_data, 'predict'):  # Direct KNN model
-        #                 knn_model = knn_data
-        #                 print("KNN model loaded (direct)")
-        #             else:
-        #                 print(f"Warning: Unknown KNN model format: {type(knn_data)}")
-        #                 knn_model = None
-        #     except Exception as e:
-        #         print(f"Error loading KNN model: {e}")
-        #         knn_model = None
-        # else:
-        #     print(f"Warning: KNN model not found at {KNN_MODEL_PATH}")
+        # Load KNN classifier (knn_pills_new.pkl)
+        if KNN_MODEL_PATH.exists():
+            print(f"Loading KNN model from {KNN_MODEL_PATH}")
+            try:
+                # Try both pickle and joblib loading methods
+                knn_data = None
+                try:
+                    with open(KNN_MODEL_PATH, 'rb') as f:
+                        knn_data = pickle.load(f)
+                    print(f"KNN model loaded via pickle")
+                except Exception as pickle_err:
+                    try:
+                        import joblib  # type: ignore
+                        knn_data = joblib.load(str(KNN_MODEL_PATH))
+                        print(f"KNN model loaded via joblib (pickle failed: {pickle_err})")
+                    except Exception as joblib_err:
+                        raise Exception(f"Failed to load KNN model. pickle_err={pickle_err} joblib_err={joblib_err}")
+
+                # Handle different KNN model formats
+                if isinstance(knn_data, dict):
+                    knn_model = knn_data.get('model') or knn_data.get('classifier') or knn_data.get('knn')
+                    knn_scaler = knn_data.get('scaler') or knn_data.get('feature_scaler')
+                    print(f"KNN model loaded: {type(knn_model)}")
+                    if knn_scaler:
+                        print("KNN scaler loaded")
+                elif hasattr(knn_data, 'predict'):  # Direct KNN model
+                    knn_model = knn_data
+                    print("KNN model loaded (direct)")
+                else:
+                    print(f"Warning: Unknown KNN model format: {type(knn_data)}")
+                    knn_model = None
+            except Exception as e:
+                print(f"Error loading KNN model: {e}")
+                knn_model = None
+        else:
+            print(f"Warning: KNN model not found at {KNN_MODEL_PATH}")
+        
+        # Load KMeans model (kmeans_pills.pkl) for clustering-based verification
+        if KMEANS_MODEL_PATH.exists():
+            print(f"Loading KMeans model from {KMEANS_MODEL_PATH}")
+            try:
+                # Try both pickle and joblib loading methods
+                kmeans_data = None
+                try:
+                    with open(KMEANS_MODEL_PATH, 'rb') as f:
+                        kmeans_data = pickle.load(f)
+                    print(f"KMeans model loaded via pickle")
+                except Exception as pickle_err:
+                    try:
+                        import joblib  # type: ignore
+                        kmeans_data = joblib.load(str(KMEANS_MODEL_PATH))
+                        print(f"KMeans model loaded via joblib (pickle failed: {pickle_err})")
+                    except Exception as joblib_err:
+                        print(f"Warning: Failed to load KMeans model. pickle_err={pickle_err} joblib_err={joblib_err}")
+                        kmeans_data = None
+
+                # Handle different KMeans model formats
+                if kmeans_data is not None:
+                    if isinstance(kmeans_data, dict):
+                        kmeans_model = kmeans_data.get('model') or kmeans_data.get('kmeans') or kmeans_data.get('clusterer')
+                        print(f"KMeans model loaded: {type(kmeans_model)}")
+                    elif hasattr(kmeans_data, 'predict') or hasattr(kmeans_data, 'fit_predict'):  # Direct KMeans model
+                        kmeans_model = kmeans_data
+                        print("KMeans model loaded (direct)")
+                    else:
+                        print(f"Warning: Unknown KMeans model format: {type(kmeans_data)}")
+                        kmeans_model = None
+            except Exception as e:
+                print(f"Error loading KMeans model: {e}")
+                kmeans_model = None
+        else:
+            print(f"Warning: KMeans model not found at {KMEANS_MODEL_PATH}")
+            
+        # Summary
+        models_loaded = []
+        if knn_model is not None:
+            models_loaded.append("KNN")
+            print("✅ KNN verification enabled")
+        if kmeans_model is not None:
+            models_loaded.append("KMeans")
+            print("✅ KMeans clustering enabled")
+        if not models_loaded:
+            print("⚠️ No KNN/KMeans models loaded - using YOLO only")
+        else:
+            print(f"✅ Using both models: {', '.join(models_loaded)}")
             
     except Exception as e:
         print(f"Error loading models: {e}")
@@ -532,17 +582,14 @@ async def verify(image: UploadFile = File(...), expected: str = Form("{}")):
         print(f"   confidence = {confidence:.2f}")
         print(f"   ==========================================")
         
-        # KNN verification: DISABLED FOR TESTING (YOLO only)
-        # KNN verification is disabled to test YOLO-only performance
+        # KNN + KMeans verification: Use both models for enhanced verification
         knn_verification_results = []
         knn_foreign_pills = []
         knn_attempted = 0
         knn_successful = 0
         
-        # Skip KNN verification - using YOLO only
-        print("[KNN DEBUG] KNN verification disabled - using YOLO only for testing")
-        
-        if False and knn_model is not None and len(filtered_detections) > 0:  # Disabled
+        # Enable KNN verification if model is loaded
+        if knn_model is not None and len(filtered_detections) > 0:
             print(f"[KNN DEBUG] ========== KNN VERIFICATION ==========")
             print(f"[KNN DEBUG] Expected pill type: '{expected_label or 'any'}'")
             try:
@@ -606,6 +653,13 @@ async def verify(image: UploadFile = File(...), expected: str = Form("{}")):
                         features = knn_scaler.transform([features])[0]
                     
                     # Predict with KNN
+                    knn_class = None
+                    knn_confidence = 0.0
+                    kmeans_cluster = None
+                    kmeans_distance = None
+                    matches_expected = True
+                    matches_yolo = False
+                    
                     try:
                         knn_prediction = knn_model.predict([features])[0]
                         knn_class = str(knn_prediction).lower()
@@ -616,45 +670,89 @@ async def verify(image: UploadFile = File(...), expected: str = Form("{}")):
                             knn_proba = knn_model.predict_proba([features])[0]
                             max_proba = np.max(knn_proba)
                         
+                        knn_confidence = float(max_proba)
+                        
                         # Check if this pill matches expected type
                         matches_expected = (knn_class == expected_label) if expected_label else True
                         matches_yolo = det['class_name'].lower() == knn_class
                         
-                        print(f"[KNN DEBUG] Pill {i+1}: YOLO='{det['class_name']}' KNN='{knn_class}' (conf: {max_proba:.2f}) " +
-                              f"{'✅ matches expected' if matches_expected else '❌ FOREIGN PILL!'}")
-                        
-                        knn_verification_results.append({
-                            'detection_index': i,
-                            'yolo_class': det['class_name'],
-                            'yolo_confidence': det['confidence'],
-                            'knn_class': knn_class,
-                            'knn_confidence': float(max_proba),
-                            'matches_yolo': matches_yolo,
-                            'matches_expected': matches_expected
-                        })
-                        knn_successful += 1
-                        
-                        # Track foreign pills (KNN says it's different from expected)
-                        if expected_label and not matches_expected:
-                            knn_foreign_pills.append({
-                                'index': i,
-                                'expected': expected_label,
-                                'detected_knn': knn_class,
-                                'detected_yolo': det['class_name'],
-                                'confidence': max_proba
-                            })
-                            
                     except Exception as e:
                         print(f"[KNN DEBUG] Error during KNN prediction: {e}")
+                        knn_class = None
+                        knn_confidence = 0.0
+                    
+                    # Predict with KMeans (if available) for additional verification
+                    if kmeans_model is not None:
+                        try:
+                            # KMeans can use predict or fit_predict depending on model type
+                            if hasattr(kmeans_model, 'predict'):
+                                kmeans_cluster = int(kmeans_model.predict([features])[0])
+                            elif hasattr(kmeans_model, 'fit_predict'):
+                                kmeans_cluster = int(kmeans_model.fit_predict([features])[0])
+                            
+                            # Calculate distance to cluster center (closer = more confident)
+                            if hasattr(kmeans_model, 'cluster_centers_') and kmeans_cluster is not None:
+                                cluster_center = kmeans_model.cluster_centers_[kmeans_cluster]
+                                kmeans_distance = float(np.linalg.norm(features - cluster_center))
+                                print(f"[KMEANS DEBUG] Pill {i+1}: Assigned to cluster {kmeans_cluster}, distance to center: {kmeans_distance:.2f}")
+                            else:
+                                print(f"[KMEANS DEBUG] Pill {i+1}: Assigned to cluster {kmeans_cluster}")
+                        except Exception as e:
+                            print(f"[KMEANS DEBUG] Error during KMeans prediction: {e}")
+                            kmeans_cluster = None
+                            kmeans_distance = None
+                    
+                    # Log combined results
+                    log_msg = f"[KNN DEBUG] Pill {i+1}: YOLO='{det['class_name']}'"
+                    if knn_class:
+                        log_msg += f" KNN='{knn_class}' (conf: {knn_confidence:.2f})"
+                    if kmeans_cluster is not None:
+                        log_msg += f" KMeans=cluster{kmeans_cluster}"
+                        if kmeans_distance is not None:
+                            log_msg += f" (dist: {kmeans_distance:.2f})"
+                    if matches_expected:
+                        log_msg += " ✅ matches expected"
+                    else:
+                        log_msg += " ❌ FOREIGN PILL!"
+                    print(log_msg)
+                    
+                    knn_verification_results.append({
+                        'detection_index': i,
+                        'yolo_class': det['class_name'],
+                        'yolo_confidence': det['confidence'],
+                        'knn_class': knn_class,
+                        'knn_confidence': knn_confidence,
+                        'kmeans_cluster': kmeans_cluster,
+                        'kmeans_distance': kmeans_distance,
+                        'matches_yolo': matches_yolo,
+                        'matches_expected': matches_expected
+                    })
+                    knn_successful += 1
+                    
+                    # Track foreign pills (KNN says it's different from expected)
+                    if expected_label and not matches_expected:
+                        knn_foreign_pills.append({
+                            'index': i,
+                            'expected': expected_label,
+                            'detected_knn': knn_class or 'unknown',
+                            'detected_yolo': det['class_name'],
+                            'kmeans_cluster': kmeans_cluster,
+                            'confidence': knn_confidence
+                        })
+                            
+                    # If both KNN and KMeans failed, record error
+                    if knn_class is None and kmeans_cluster is None:
                         knn_verification_results.append({
                             'detection_index': i,
                             'yolo_class': det.get('class_name'),
                             'yolo_confidence': det.get('confidence'),
                             'knn_class': None,
                             'knn_confidence': 0.0,
+                            'kmeans_cluster': None,
+                            'kmeans_distance': None,
                             'matches_yolo': False,
                             'matches_expected': False if expected_label else True,
-                            'status': f'knn_predict_failed: {str(e)}',
+                            'status': 'both_models_failed',
                         })
                         continue
                 
@@ -666,11 +764,14 @@ async def verify(image: UploadFile = File(...), expected: str = Form("{}")):
                     yolo_match_rate = yolo_knn_matches / total if total > 0 else 0
                     expected_match_rate = expected_matches / total if total > 0 else 0
                     
-                    print(f"[KNN DEBUG] ========== KNN Summary ==========")
+                    print(f"[KNN DEBUG] ========== KNN + KMeans Summary ==========")
                     print(f"   ROIs attempted: {knn_attempted}")
                     print(f"   ROIs classified: {knn_successful}")
                     print(f"   Results recorded: {total}")
                     print(f"   YOLO-KNN agreement: {yolo_knn_matches}/{total} ({yolo_match_rate*100:.1f}%)")
+                    if kmeans_model is not None:
+                        kmeans_used = sum(1 for r in knn_verification_results if r.get('kmeans_cluster') is not None)
+                        print(f"   KMeans cluster assignments: {kmeans_used}/{total}")
                     if expected_label:
                         print(f"   Pills matching expected '{expected_label}': {expected_matches}/{total} ({expected_match_rate*100:.1f}%)")
                         print(f"   Foreign pills detected by KNN: {len(knn_foreign_pills)}")
@@ -693,11 +794,11 @@ async def verify(image: UploadFile = File(...), expected: str = Form("{}")):
                 print(f"[KNN DEBUG] Error during KNN verification: {e}")
                 import traceback
                 print(traceback.format_exc())
-        # else:
-        #     if knn_model is None:
-        #         print(f"[KNN DEBUG] KNN model not available - using YOLO only")
-        #     else:
-        #         print(f"[KNN DEBUG] No detections to verify with KNN")
+        else:
+            if knn_model is None:
+                print(f"[KNN DEBUG] KNN model not available - using YOLO only")
+            else:
+                print(f"[KNN DEBUG] No detections to verify with KNN")
         
     except Exception as e:
         import traceback
@@ -721,6 +822,8 @@ async def verify(image: UploadFile = File(...), expected: str = Form("{}")):
         
         knn_verification_data = {
             'enabled': True,
+            'knn_enabled': knn_model is not None,
+            'kmeans_enabled': kmeans_model is not None,
             # attempted/successful count is more meaningful than total results
             'attempted': int(knn_attempted) if 'knn_attempted' in locals() else total,
             'successful': int(knn_successful) if 'knn_successful' in locals() else 0,
@@ -736,7 +839,9 @@ async def verify(image: UploadFile = File(...), expected: str = Form("{}")):
         }
     else:
         knn_verification_data = {
-            'enabled': knn_model is not None,
+            'enabled': knn_model is not None or kmeans_model is not None,
+            'knn_enabled': knn_model is not None,
+            'kmeans_enabled': kmeans_model is not None,
             'attempted': 0,
             'successful': 0,
             'total_verified': 0,

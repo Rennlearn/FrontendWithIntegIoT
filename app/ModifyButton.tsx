@@ -212,13 +212,29 @@ const ModifyButton = () => {
       });
       
       // Sort by schedule ID (highest first) and take top 3, then arrange by container number
+      // CRITICAL: Normalize container IDs to prevent data mixing
+      const normalizeContainer = (raw: any): 1 | 2 | 3 => {
+        if (raw === null || raw === undefined) return 1;
+        const s = String(raw).trim().toLowerCase();
+        const m = s.match(/(\d+)/);
+        if (m) {
+          const n = parseInt(m[1], 10);
+          if (n === 1 || n === 2 || n === 3) return n as 1 | 2 | 3;
+        }
+        if (s === 'morning') return 1;
+        if (s === 'noon') return 2;
+        if (s === 'evening' || s === 'night') return 3;
+        return 1;
+      };
+
       const sortedSchedules = ownerSchedules
         .sort((a: any, b: any) => b.scheduleId - a.scheduleId) // Sort by highest schedule ID first
         .slice(0, 3) // Take top 3 highest schedule IDs
         .sort((a: any, b: any) => {
           // Then arrange by container number (1, 2, 3)
-          const containerA = parseInt(a.container);
-          const containerB = parseInt(b.container);
+          // CRITICAL: Use normalizeContainer to prevent data mixing
+          const containerA = normalizeContainer(a.container);
+          const containerB = normalizeContainer(b.container);
           return containerA - containerB;
         });
       
