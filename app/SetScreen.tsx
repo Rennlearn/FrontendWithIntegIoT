@@ -847,8 +847,9 @@ const SetScreen = () => {
         console.warn('[SetScreen] Could not import expo-notifications, skipping local notification scheduling:', e);
       }
 
-      // Save pill counts, labels, AND schedules to backend for each container
-      // This is critical for proper verification AND alarm triggering
+      // CRITICAL: Save pill counts, labels, AND schedules to backend for each container
+      // Execute sequentially to prevent race conditions and container data mixing
+      // Each container must complete before the next one starts
       for (let containerNum = 1; containerNum <= 3; containerNum++) {
         const pillName = selectedPills[containerNum as PillSlot];
         const pillCount = pillCounts[containerNum] || 0;
@@ -857,7 +858,9 @@ const SetScreen = () => {
         // Save config if there's either a pill name or a locked count
         if (pillName || (pillCountsLocked[containerNum] && pillCount > 0)) {
           try {
+            // CRITICAL: Use explicit containerId to prevent mixing
             const containerId = `container${containerNum}`;
+            console.log(`[SetScreen] 🔒 Saving Container ${containerNum} (${containerId}) - ensuring no data mixing`);
             
             // Build pill_config with both count AND label
             const pillConfig: { count: number; label?: string } = { 
@@ -901,7 +904,7 @@ const SetScreen = () => {
                   'Content-Type': 'application/json',
                 },
                 body: JSON.stringify({
-                  container_id: containerId,
+                  container_id: containerId, // CRITICAL: Explicit container ID prevents mixing
                   pill_config: pillConfig,
                   times: timesArray, // Legacy format
                   schedules: schedulesArray, // Date-aware format (preferred by scheduler)

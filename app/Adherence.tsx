@@ -25,6 +25,7 @@ interface MedicationRow {
   scheduledTime: string;
   date: string;
   status: 'Taken' | 'Pending' | 'Missed';
+  createdAt?: number; // Timestamp for sorting (internal use)
 }
 
 const Adherence = () => {
@@ -356,9 +357,35 @@ const Adherence = () => {
           scheduledTime: s.time,
           date: s.date,
           status,
+          // Store creation timestamp for sorting (use _id timestamp or createdAt if available)
+          createdAt: s.createdAt ? new Date(s.createdAt).getTime() : (s._id ? parseInt(s._id.substring(0, 8), 16) || Date.now() : Date.now()),
         };
       });
-      setMedications(rows);
+      
+      // CRITICAL: Sort by date added (primary) and time added (secondary), newest first
+      // Sort descending: newest items first
+      const sortedRows = rows.sort((a, b) => {
+        // Primary: Sort by date (newest first)
+        const dateA = new Date(a.date).getTime();
+        const dateB = new Date(b.date).getTime();
+        if (dateB !== dateA) {
+          return dateB - dateA; // Descending: newer dates first
+        }
+        
+        // Secondary: Sort by scheduled time (newest first)
+        const timeA = a.scheduledTime ? a.scheduledTime.split(':').map(Number).reduce((h, m) => h * 60 + m, 0) : 0;
+        const timeB = b.scheduledTime ? b.scheduledTime.split(':').map(Number).reduce((h, m) => h * 60 + m, 0) : 0;
+        if (timeB !== timeA) {
+          return timeB - timeA; // Descending: later times first
+        }
+        
+        // Tertiary: Sort by creation timestamp (newest first)
+        const createdA = a.createdAt || 0;
+        const createdB = b.createdAt || 0;
+        return createdB - createdA; // Descending: newer items first
+      });
+      
+      setMedications(sortedRows);
       
       // Store elder info for display
       if (elderInfo) {
@@ -553,9 +580,15 @@ const Adherence = () => {
 
       <View style={styles.contentContainer}>
         {loading ? (
-          <View style={{ padding: 20 }}>
+          <View style={{ padding: 20, alignItems: 'center', justifyContent: 'center', flex: 1 }}>
             <ActivityIndicator size="large" color={theme.primary} />
             <Text style={{ color: theme.text, marginTop: 8 }}>Loading adherence...</Text>
+          </View>
+        ) : medications.length === 0 ? (
+          <View style={{ padding: 20, alignItems: 'center', justifyContent: 'center', flex: 1 }}>
+            <Ionicons name="document-text-outline" size={48} color={theme.textSecondary} />
+            <Text style={{ color: theme.textSecondary, marginTop: 12, fontSize: 16 }}>No adherence data available</Text>
+            <Text style={{ color: theme.textSecondary, marginTop: 4, fontSize: 14 }}>Schedules will appear here once created</Text>
           </View>
         ) : (
           <FlatList
@@ -564,6 +597,11 @@ const Adherence = () => {
             keyExtractor={(item) => item._id}
             contentContainerStyle={styles.listContainer}
             showsVerticalScrollIndicator={false}
+            ListEmptyComponent={
+              <View style={{ padding: 20, alignItems: 'center' }}>
+                <Text style={{ color: theme.textSecondary }}>No data to display</Text>
+              </View>
+            }
           />
         )}
       </View>
@@ -710,45 +748,45 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'flex-start',
-    padding: 12,
+    padding: 8, // Reduced from 12
     borderRadius: 12,
     elevation: 4,
     zIndex: 1,
   },
   backButton: {
-    padding: 8,
+    padding: 6, // Reduced from 8
   },
   headerContent: {
     flex: 1,
   },
   title: {
-    fontSize: 18,
+    fontSize: 14, // Reduced from 18
     fontWeight: 'bold',
-    marginLeft: 8,
+    marginLeft: 6, // Reduced from 8
   },
   highlight: {
     color: '#4A90E2',
   },
   elderNameHighlight: {
-    fontSize: 18,
+    fontSize: 14, // Reduced from 18
     fontWeight: 'bold',
   },
   monitoringBanner: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginTop: 8,
-    padding: 8,
-    borderRadius: 8,
+    marginTop: 4, // Reduced from 8
+    padding: 4, // Reduced from 8
+    borderRadius: 6, // Reduced from 8
     borderWidth: 1,
-    gap: 6,
+    gap: 4, // Reduced from 6
   },
   monitoringText: {
-    fontSize: 12,
+    fontSize: 10, // Reduced from 12
     fontWeight: '600',
   },
   contentContainer: {
     flex: 1,
-    marginTop: 100,
+    marginTop: 80, // Reduced from 100
   },
   listContainer: {
     padding: 15,
