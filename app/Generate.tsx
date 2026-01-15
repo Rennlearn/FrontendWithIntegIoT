@@ -42,11 +42,36 @@ const Generate = () => {
     generatePDF();
   };
 
+  // CRITICAL: Normalize container ID to ensure correct image mapping
+  // Ensures consistent parsing of container identifiers (numeric, "container1", "morning", etc.)
+  const normalizeContainer = (raw: any): 1 | 2 | 3 => {
+    if (raw === null || raw === undefined) return 1;
+    const s = String(raw).trim().toLowerCase();
+
+    // Extract first digit sequence (handles "1", "01", "container2", etc.)
+    const m = s.match(/(\d+)/);
+    if (m) {
+      const n = parseInt(m[1], 10);
+      if (n === 1 || n === 2 || n === 3) return n as 1 | 2 | 3;
+    }
+
+    // Legacy string labels
+    if (s === 'morning') return 1;
+    if (s === 'noon') return 2;
+    if (s === 'evening' || s === 'night') return 3;
+
+    // Fallback to container 1 for any unknown format
+    return 1;
+  };
+
   // Fetch latest capture image for a container and convert to base64
+  // CRITICAL: Ensures each container shows only its own capture image
   const fetchContainerImage = async (containerId: number): Promise<string | null> => {
     try {
+      // Normalize container ID to ensure correct mapping
+      const normalizedId = normalizeContainer(containerId);
       const base = await verificationService.getBackendUrl();
-      const containerIdStr = `container${containerId}`;
+      const containerIdStr = `container${normalizedId}`;
       const response = await fetch(`${base}/captures/latest/${containerIdStr}?t=${Date.now()}`, {
         method: 'GET',
         headers: {
@@ -103,19 +128,25 @@ const Generate = () => {
     try {
       const data: MedicationRow[] = JSON.parse(adherenceDataParam || '[]');
       
-      // Fetch images for each unique container
-      const uniqueContainers = [...new Set(data.map(d => d.containerId))];
+      // CRITICAL: Normalize container IDs and fetch images for each unique container
+      // This ensures container1 schedules show container1 images, container2 shows container2, etc.
+      const normalizedData = data.map(med => ({
+        ...med,
+        containerId: normalizeContainer(med.containerId),
+      }));
+      
+      const uniqueContainers = [...new Set(normalizedData.map(d => d.containerId))];
       const containerImages: Record<number, string | null> = {};
       
-      console.log(`[Generate] Fetching images for ${uniqueContainers.length} containers...`);
+      console.log(`[Generate] Fetching images for ${uniqueContainers.length} unique containers: ${uniqueContainers.join(', ')}`);
       for (const containerId of uniqueContainers) {
         const imageBase64 = await fetchContainerImage(containerId);
         containerImages[containerId] = imageBase64;
         console.log(`[Generate] ${imageBase64 ? '✅' : '❌'} Container ${containerId} image ${imageBase64 ? 'loaded' : 'not available'}`);
       }
       
-      // Add images to data rows
-      const dataWithImages = data.map(med => ({
+      // Add images to data rows - CRITICAL: Use normalized containerId for correct image mapping
+      const dataWithImages = normalizedData.map(med => ({
         ...med,
         imageBase64: containerImages[med.containerId] || null,
       }));

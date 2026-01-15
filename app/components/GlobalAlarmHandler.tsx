@@ -1,7 +1,9 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Alert, DeviceEventEmitter } from 'react-native';
 import BluetoothService from '@/services/BluetoothService';
-import AlarmModal from '@/components/AlarmModal';
+// CRITICAL: Use explicit relative import to avoid ambiguity with duplicate AlarmModal files
+// This ensures the correct AlarmModal from app/components is used
+import AlarmModal from './AlarmModal';
 import PillMismatchModal from './PillMismatchModal';
 import verificationService from '@/services/verificationService';
 import AsyncStorage from '@react-native-async-storage/async-storage';

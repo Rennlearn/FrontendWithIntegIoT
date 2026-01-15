@@ -74,18 +74,18 @@ const CaregiverDashboard: React.FC = () => {
    */
   useFocusEffect(
     useCallback(() => {
-      const backAction = () => {
+    const backAction = () => {
         // Show blocking confirmation dialog
         // This prevents accidental app exit and ensures proper logout
         Alert.alert(
           'Logout Required',
           'You must log out before exiting the app or going back. This ensures your session is properly closed.',
           [
-            {
-              text: 'Cancel',
+        {
+          text: 'Cancel',
               onPress: () => null, // Stay on dashboard
-              style: 'cancel',
-            },
+          style: 'cancel',
+        },
             {
               text: 'Log Out',
               style: 'destructive',
@@ -96,18 +96,18 @@ const CaregiverDashboard: React.FC = () => {
         );
         // Return true to prevent default back behavior
         // This blocks the back button until user makes a choice
-        return true;
-      };
+      return true;
+    };
 
       // Register back button handler
-      const backHandler = BackHandler.addEventListener(
-        'hardwareBackPress',
-        backAction,
-      );
+    const backHandler = BackHandler.addEventListener(
+      'hardwareBackPress',
+      backAction,
+    );
 
       // Cleanup: Remove handler when screen loses focus
       // This prevents memory leaks and ensures normal back navigation on other screens
-      return () => backHandler.remove();
+    return () => backHandler.remove();
     }, [performLogout])
   );
 

@@ -341,6 +341,28 @@ const Adherence = () => {
       const medsJson = await medsResp.json();
       const medsArray: any[] = Array.isArray(medsJson) ? medsJson : (medsJson?.data || []);
 
+      // CRITICAL: Normalize container IDs to ensure correct image mapping in reports
+      // Ensures consistent parsing of container identifiers (numeric, "container1", "morning", etc.)
+      const normalizeContainer = (raw: any): 1 | 2 | 3 => {
+        if (raw === null || raw === undefined) return 1;
+        const s = String(raw).trim().toLowerCase();
+
+        // Extract first digit sequence (handles "1", "01", "container2", etc.)
+        const m = s.match(/(\d+)/);
+        if (m) {
+          const n = parseInt(m[1], 10);
+          if (n === 1 || n === 2 || n === 3) return n as 1 | 2 | 3;
+        }
+
+        // Legacy string labels
+        if (s === 'morning') return 1;
+        if (s === 'noon') return 2;
+        if (s === 'evening' || s === 'night') return 3;
+
+        // Fallback to container 1 for any unknown format
+        return 1;
+      };
+
       const now = new Date();
       const rows: MedicationRow[] = userSchedules.map((s) => {
         const med = medsArray.find(m => m.medId === s.medication);
@@ -352,7 +374,9 @@ const Adherence = () => {
         if (status === 'Pending' && now.getTime() > when.getTime()) status = 'Missed';
         return {
           _id: s._id,
-          containerId: Number(s.container) || 1,
+          // CRITICAL: Normalize container ID to ensure correct image mapping
+          // When schedule is set for container1, it will show container1 image in report
+          containerId: normalizeContainer(s.container),
           medicineName: med ? med.name : `ID: ${s.medication}`,
           scheduledTime: s.time,
           date: s.date,

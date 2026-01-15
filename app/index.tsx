@@ -1,41 +1,56 @@
-import React, { useState, useEffect } from 'react';
-import { Text, View } from "react-native";
-import { createDrawerNavigator } from '@react-navigation/drawer';
-import { NavigationContainer } from '@react-navigation/native';
+import React, { useEffect } from 'react';
+import { useRouter } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import LoginScreen from './LoginScreen';
 import FlashScreen from './FlashScreen';
-import BluetoothConnectionScreen from './BluetoothConnectionScreen';
 
-const Drawer = createDrawerNavigator();
-
+/**
+ * Root index route for Expo Router.
+ * Redirects to FlashScreen which handles initial navigation flow.
+ * 
+ * CRITICAL: This file was previously using React Navigation (NavigationContainer, Drawer)
+ * which conflicts with Expo Router. Fixed to use Expo Router navigation instead.
+ */
 export default function Index() {
-  const [token, setToken] = useState<string | null>(null);
-  const [showFlash, setShowFlash] = useState(true);
+  const router = useRouter();
 
   useEffect(() => {
-    const checkToken = async () => {
-      const storedToken = await AsyncStorage.getItem('token');
-      setToken(storedToken);
+    // Check if user is already logged in
+    const checkAuth = async () => {
+      try {
+        const token = await AsyncStorage.getItem('token');
+        if (token) {
+          // Token exists, decode to check role and redirect
+          try {
+            const decodedToken = JSON.parse(atob(token.split('.')[1]));
+            const roleId = parseInt(decodedToken.role || decodedToken.user?.role || "0");
+            
+            // Check token expiration
+            const exp = decodedToken.exp;
+            if (exp && exp * 1000 < Date.now()) {
+              // Token expired, go to flash screen which will redirect to login
+              return;
+            }
+            
+            // Valid token, redirect to appropriate dashboard
+            if (roleId === 3) {
+              router.replace('/CaregiverDashboard');
+            } else if (roleId === 2) {
+              router.replace('/ElderDashboard');
+            }
+            // If roleId is 0 or unknown, continue to flash screen
+          } catch (error) {
+            // Invalid token format, continue to flash screen
+            console.warn('[Index] Invalid token format:', error);
+          }
+        }
+      } catch (error) {
+        console.error('[Index] Error checking auth:', error);
+      }
     };
-    checkToken();
+    
+    checkAuth();
+  }, [router]);
 
-    // Hide flash screen after 3 seconds
-    const timer = setTimeout(() => {
-      setShowFlash(false);
-    }, 3000);
-
-    return () => clearTimeout(timer);
-  }, []);
-
-  if (showFlash) {
-    return <FlashScreen />;
-  }
-
-  return (
-    <Drawer.Navigator>
-      <Drawer.Screen name="BluetoothConnection" component={BluetoothConnectionScreen} />
-      <Drawer.Screen name="Login" component={LoginScreen} />
-    </Drawer.Navigator>
-  );
+  // Show flash screen which handles the initial navigation flow
+  return <FlashScreen />;
 }
