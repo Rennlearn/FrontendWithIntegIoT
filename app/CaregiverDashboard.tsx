@@ -818,12 +818,44 @@ const CaregiverDashboard: React.FC = () => {
             </>
           )}
         </TouchableOpacity>
+
+        {/* Pill Detection Camera Button - Available for all caregivers */}
+        <TouchableOpacity 
+          style={[
+            styles.dashboardButton, 
+            styles.firstButton,
+            { 
+              backgroundColor: theme.primary,
+              opacity: navigatingTo !== null ? 0.6 : 1
+            }
+          ]}
+          onPress={async () => {
+            if (navigatingTo) return;
+            try {
+              setNavigatingTo('pillDetection');
+              await router.push('/PillDetectionCamera');
+            } finally {
+              setTimeout(() => setNavigatingTo(null), 400);
+            }
+          }}
+          disabled={navigatingTo !== null}
+        >
+          {navigatingTo === 'pillDetection' ? (
+            <ActivityIndicator size="small" color={theme.card} />
+          ) : (
+            <>
+              <Ionicons name="camera" size={22} color={theme.card} />
+              <Text style={[styles.buttonText, { color: theme.card }]}>PILL DETECTION</Text>
+            </>
+          )}
+        </TouchableOpacity>
         
         {/* Only show Monitor & Manage button if elder is selected AND has active connection */}
         {selectedElderId && selectedElderName && hasActiveConnection ? (
           <TouchableOpacity 
             style={[
-              styles.dashboardButton, 
+              styles.dashboardButton,
+              styles.secondButton,
               { 
                 backgroundColor: theme.secondary,
                 opacity: navigatingTo !== null ? 0.6 : 1
@@ -855,7 +887,7 @@ const CaregiverDashboard: React.FC = () => {
             )}
           </TouchableOpacity>
         ) : (
-          <View style={[styles.disabledButton, { backgroundColor: theme.background, borderColor: theme.border }]}>
+          <View style={[styles.disabledButton, styles.secondButton, { backgroundColor: theme.background, borderColor: theme.border }]}>
             <Ionicons name="desktop-outline" size={22} color={theme.textSecondary} />
             <Text style={[styles.disabledButtonText, { color: theme.textSecondary }]}>
               {selectedElderId && selectedElderName 
@@ -985,6 +1017,12 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.1,
     shadowRadius: 4,
+  },
+  firstButton: {
+    marginBottom: 8,
+  },
+  secondButton: {
+    marginTop: 16,
   },
   buttonText: {
     fontSize: 14,

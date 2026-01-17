@@ -260,15 +260,52 @@ class BluetoothService {
               const connectMethod = BluetoothAdapter.connectToDevice || BluetoothAdapter.connecttodevice || BluetoothAdapter.connect;
               if (BluetoothAdapter && connectMethod) {
                 console.log('Calling native connect method...');
-                const connected = await connectMethod(device.address);
-                if (connected) {
-                  this.currentDevice = device;
-                  this.isConnected = true;
-                  console.log(`✅ Successfully connected to ${device.name} via real Bluetooth`);
-                  console.log('✅ HC-05 LED should now be slower (connected state)');
-                  return true;
-                } else {
-                  console.error('❌ Real Bluetooth connection failed');
+                try {
+                  const connected = await connectMethod(device.address);
+                  if (connected) {
+                    this.currentDevice = device;
+                    this.isConnected = true;
+                    console.log(`✅ Successfully connected to ${device.name} via real Bluetooth`);
+                    console.log('✅ HC-05 LED should now be slower (connected state)');
+                    return true;
+                  } else {
+                    console.error('❌ Real Bluetooth connection failed (returned false)');
+                    console.warn('   💡 This usually means the device rejected the connection');
+                    console.warn('      • Make sure HC-05 is in pairing mode');
+                    console.warn('      • Try unpairing and re-pairing in phone Bluetooth settings');
+                    return false;
+                  }
+                } catch (nativeError: any) {
+                  // IOT COMMUNICATION STABILITY: Catch and log native module errors with details
+                  const nativeErrorMsg = nativeError?.message || String(nativeError) || 'Unknown native error';
+                  const nativeErrorCode = nativeError?.code || 'NATIVE_ERROR';
+                  
+                  console.error('❌ Native Bluetooth connection error:', nativeError);
+                  console.error(`   Error code: ${nativeErrorCode}`);
+                  console.error(`   Error message: ${nativeErrorMsg}`);
+                  
+                  // CRITICAL: Reset connection state on any connection error
+                  // This prevents the app from thinking it's still connected
+                  this.isConnected = false;
+                  this.currentDevice = null;
+                  
+                  // Provide specific troubleshooting based on error
+                  if (nativeErrorMsg.includes('read failed') || nativeErrorMsg.includes('socket might closed') || nativeErrorMsg.includes('timeout')) {
+                    console.warn('   💡 Socket timeout/closed error detected');
+                    console.warn('      • HC-05 may be disconnected or unreachable');
+                    console.warn('      • Connection state has been reset');
+                    console.warn('      • Try: 1) Unpair device in phone settings, 2) Power cycle HC-05, 3) Re-pair and try again');
+                  } else if (nativeErrorCode === 'CONNECTION_FAILED') {
+                    console.warn('   💡 All connection methods failed');
+                    console.warn('      • Device may not be in pairing mode');
+                    console.warn('      • Check HC-05 LED: fast blink = not paired, slow blink = connected');
+                    console.warn('      • Try unpairing and re-pairing in phone Bluetooth settings');
+                  } else if (nativeErrorCode === 'SECURITY_ERROR') {
+                    console.warn('   💡 Bluetooth permissions issue');
+                    console.warn('      • Grant Bluetooth permissions in phone settings');
+                    console.warn('      • Restart app after granting permissions');
+                  }
+                  
                   return false;
                 }
               } else {
@@ -281,8 +318,33 @@ class BluetoothService {
             // No fallback - force real connection
             console.error('❌ No real Bluetooth connection available');
             return false;
-          } catch (error) {
+          } catch (error: any) {
+            // IOT COMMUNICATION STABILITY: Provide detailed error information for troubleshooting
+            const errorMessage = error?.message || String(error) || 'Unknown error';
+            const errorCode = error?.code || 'UNKNOWN';
+            
             console.error('❌ Connection failed:', error);
+            console.error(`   Error code: ${errorCode}`);
+            console.error(`   Error message: ${errorMessage}`);
+            
+            // Provide specific troubleshooting hints based on error type
+            if (errorMessage.includes('read failed') || errorMessage.includes('socket might closed') || errorMessage.includes('timeout')) {
+              console.warn('   💡 Troubleshooting: Socket timeout/closed - device may be disconnected or unreachable');
+              console.warn('      • Check if HC-05 is powered on and in pairing mode');
+              console.warn('      • Try unpairing and re-pairing the device in phone Bluetooth settings');
+              console.warn('      • Make sure device is not connected to another phone/computer');
+              console.warn('      • Restart the HC-05 module if possible');
+            } else if (errorCode === 'SECURITY_ERROR' || errorMessage.includes('permission')) {
+              console.warn('   💡 Troubleshooting: Bluetooth permissions issue');
+              console.warn('      • Grant Bluetooth permissions in phone settings');
+              console.warn('      • Restart the app after granting permissions');
+            } else if (errorCode === 'CONNECTION_FAILED') {
+              console.warn('   💡 Troubleshooting: All connection methods failed');
+              console.warn('      • Device may not be in pairing mode');
+              console.warn('      • Try unpairing and re-pairing in phone Bluetooth settings');
+              console.warn('      • Check if HC-05 LED is blinking (should blink when ready to pair)');
+            }
+            
             return false;
           }
         }
@@ -345,53 +407,144 @@ class BluetoothService {
     return this.currentDevice;
   }
 
-  // Send command to connected device
-  async sendCommand(command: string): Promise<boolean> {
-    // Check if we have an active connection
+  // Send command to connected device with timeout protection
+  async sendCommand(command: string, timeoutMs: number = 5000): Promise<boolean> {
+    // DATA INTEGRITY: Validate command input
+    if (!command || typeof command !== 'string' || command.trim().length === 0) {
+      console.error('[BluetoothService] Invalid command: empty or non-string');
+      return false;
+    }
+    
+    // IOT COMMUNICATION STABILITY: Check connection status first to avoid timeout spam
     const isActive = await this.isConnectionActive();
     if (!isActive) {
-      console.error('No device connected');
+      // Don't log error if not connected - this is expected when Bluetooth is off/disconnected
+      // Only log at debug level to reduce console spam
+      if (isDevEnv) {
+        console.log('[BluetoothService] No device connected, skipping command send');
+      }
       return false;
     }
 
     try {
-      console.log(`Sending command "${command}" to connected device`);
-      
-      if (Platform.OS === 'android') {
-        // Use real Bluetooth data transmission
-        const BluetoothAdapter = NativeModules.BluetoothAdapter;
-        console.log('Available methods for sendData:', BluetoothAdapter ? Object.keys(BluetoothAdapter) : 'Module not found');
-        
-        if (BluetoothAdapter) {
-          // Try different method name variations
-          const sendMethod = BluetoothAdapter.sendData || BluetoothAdapter.senddata || BluetoothAdapter.send;
-          if (sendMethod) {
-            console.log('Using send method:', sendMethod);
-            console.log('Sending command to HC-05:', command);
-            console.log('Command type:', typeof command);
-            console.log('Command length:', command.length);
-            
-            const sent = await sendMethod(command);
-            if (sent) {
-              console.log(`✅ Command "${command}" sent successfully via real Bluetooth to HC-05`);
-              console.log('✅ Data transmission completed - check Arduino Serial Monitor');
-              return true;
-            } else {
-              console.error('❌ Real Bluetooth data transmission failed');
-              return false;
-            }
-          } else {
-            console.log('❌ No send method found, available methods:', Object.keys(BluetoothAdapter));
-            return false;
-          }
-        }
+      if (isDevEnv) {
+        console.log(`[BluetoothService] Sending command "${command}" to connected device`);
       }
       
-      // No fallback - force real data transmission
-      console.error('❌ No real Bluetooth data transmission available');
-      return false;
+      // IOT COMMUNICATION STABILITY: Wrap native call in cancellable promise
+      // Note: In React Native, setTimeout returns a number, not NodeJS.Timeout
+      let timeoutId: number | null = null;
+      let isResolved = false;
+      
+      const timeoutPromise = new Promise<boolean>((resolve) => {
+        timeoutId = setTimeout(() => {
+          if (!isResolved) {
+            isResolved = true;
+            // Only log timeout if we actually tried to send (connection was active)
+            console.warn(`[BluetoothService] ⚠️ Command send timeout after ${timeoutMs}ms (Bluetooth may be slow or disconnected)`);
+            resolve(false);
+          }
+        }, timeoutMs);
+      });
+      
+      const sendPromise = (async () => {
+        try {
+          if (Platform.OS === 'android') {
+            // Use real Bluetooth data transmission
+            const BluetoothAdapter = NativeModules.BluetoothAdapter;
+            
+            if (!BluetoothAdapter) {
+              if (isDevEnv) {
+                console.warn('[BluetoothService] BluetoothAdapter module not found');
+              }
+              return false;
+            }
+            
+            // Try different method name variations
+            const sendMethod = BluetoothAdapter.sendData || BluetoothAdapter.senddata || BluetoothAdapter.send;
+            if (!sendMethod) {
+              if (isDevEnv) {
+                console.warn('[BluetoothService] No send method found in BluetoothAdapter');
+              }
+              return false;
+            }
+            
+            if (isDevEnv) {
+              console.log('[BluetoothService] Sending command to HC-05:', command.substring(0, 50));
+            }
+            
+            // Wrap native call in promise - handle both sync and async returns
+            let nativeResult: any;
+            if (typeof sendMethod === 'function') {
+              try {
+                nativeResult = sendMethod(command);
+                // If it returns a promise, await it; otherwise use the value directly
+                if (nativeResult && typeof nativeResult.then === 'function') {
+                  nativeResult = await nativeResult;
+                }
+              } catch (nativeError) {
+                console.error('[BluetoothService] Native method error:', nativeError);
+                return false;
+              }
+            } else {
+              console.error('[BluetoothService] sendMethod is not a function');
+              return false;
+            }
+            
+            // Clear timeout if we got a result
+            if (timeoutId) {
+              clearTimeout(timeoutId);
+              timeoutId = null;
+            }
+            
+            if (isResolved) {
+              // Timeout already fired, ignore result
+              return false;
+            }
+            
+            isResolved = true;
+            
+            if (nativeResult) {
+              if (isDevEnv) {
+                console.log(`[BluetoothService] ✅ Command sent successfully via Bluetooth`);
+              }
+              return true;
+            } else {
+              if (isDevEnv) {
+                console.warn('[BluetoothService] ⚠️ Native method returned false');
+              }
+              return false;
+            }
+          }
+          
+          // iOS or other platforms - not implemented
+          if (isDevEnv) {
+            console.warn('[BluetoothService] Bluetooth send not implemented for this platform');
+          }
+          return false;
+        } catch (error) {
+          // Clear timeout on error
+          if (timeoutId) {
+            clearTimeout(timeoutId);
+            timeoutId = null;
+          }
+          isResolved = true;
+          console.error('[BluetoothService] Send promise error:', error);
+          return false;
+        }
+      })();
+      
+      // Race between send and timeout
+      const result = await Promise.race([sendPromise, timeoutPromise]);
+      
+      // Clean up timeout if still active
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+      }
+      
+      return result;
     } catch (error) {
-      console.error('Command send failed:', error);
+      console.error('[BluetoothService] Command send failed:', error);
       return false;
     }
   }

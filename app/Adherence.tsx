@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { 
   View, Text, StyleSheet, ScrollView, TouchableOpacity, 
-  Modal, FlatList, ActivityIndicator, Alert
+  Modal, FlatList, ActivityIndicator, Alert, Image
 } from 'react-native';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import { Ionicons } from '@expo/vector-icons';
@@ -10,6 +10,7 @@ import { useTheme } from '@/context/ThemeContext';
 import { lightTheme, darkTheme } from '@/styles/theme';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { jwtDecode } from 'jwt-decode';
+import { getBackendUrl } from '@/config';
 
 // Interface for decoded JWT token
 interface DecodedToken {
@@ -22,10 +23,20 @@ interface MedicationRow {
   _id: string;
   containerId: number;
   medicineName: string;
+  manufacturer?: string; // Manufacturer name
   scheduledTime: string;
   date: string;
   status: 'Taken' | 'Pending' | 'Missed';
   createdAt?: number; // Timestamp for sorting (internal use)
+  imageUrl?: string | null; // Annotated image URL for this schedule
+  verificationResults?: {
+    pass: boolean;
+    count: number;
+    confidence: number;
+    detectedTypes: Array<{ label: string; n: number }>;
+    source: string;
+  } | null; // Verification results for phone camera entries
+  isPhoneCamera?: boolean; // Flag to identify phone camera entries
 }
 
 const Adherence = () => {
@@ -364,27 +375,110 @@ const Adherence = () => {
       };
 
       const now = new Date();
-      const rows: MedicationRow[] = userSchedules.map((s) => {
-        const med = medsArray.find(m => m.medId === s.medication);
-        const [y, m, d] = String(s.date).split('-').map(Number);
-        const [hh, mm] = String(s.time).split(':').map(Number);
-        const when = new Date(y, (m || 1) - 1, d, hh, mm);
-        // Map backend status 'Done' to display status 'Taken'
-        let status: 'Taken' | 'Pending' | 'Missed' = (s.status === 'Done' || s.status === 'Taken') ? 'Taken' : 'Pending';
-        if (status === 'Pending' && now.getTime() > when.getTime()) status = 'Missed';
-        return {
-          _id: s._id,
-          // CRITICAL: Normalize container ID to ensure correct image mapping
-          // When schedule is set for container1, it will show container1 image in report
-          containerId: normalizeContainer(s.container),
-          medicineName: med ? med.name : `ID: ${s.medication}`,
-          scheduledTime: s.time,
-          date: s.date,
-          status,
-          // Store creation timestamp for sorting (use _id timestamp or createdAt if available)
-          createdAt: s.createdAt ? new Date(s.createdAt).getTime() : (s._id ? parseInt(s._id.substring(0, 8), 16) || Date.now() : Date.now()),
-        };
-      });
+      
+      // Fetch images for all schedules
+      const base = await getBackendUrl();
+      const rowsWithImages: MedicationRow[] = await Promise.all(
+        userSchedules.map(async (s) => {
+          const med = medsArray.find(m => m.medId === s.medication);
+          const [y, m, d] = String(s.date).split('-').map(Number);
+          const [hh, mm] = String(s.time).split(':').map(Number);
+          const when = new Date(y, (m || 1) - 1, d, hh, mm);
+          // Map backend status 'Done' to display status 'Taken'
+          let status: 'Taken' | 'Pending' | 'Missed' = (s.status === 'Done' || s.status === 'Taken') ? 'Taken' : 'Pending';
+          if (status === 'Pending' && now.getTime() > when.getTime()) status = 'Missed';
+          
+          // Check if this is a phone camera entry (container = 0)
+          const isPhoneCamera = s.container === 0 || s.container === null || s.container === undefined;
+          
+          // Parse verification results from notes if available
+          let verificationResults = null;
+          if (isPhoneCamera && s.notes) {
+            try {
+              verificationResults = JSON.parse(s.notes);
+            } catch (e) {
+              console.warn('[Adherence] Failed to parse verification results:', e);
+            }
+          }
+          
+          // Normalize container ID (phone camera entries use 0)
+          const normalizedContainerId = isPhoneCamera ? 0 : normalizeContainer(s.container);
+          const containerIdStr = isPhoneCamera ? 'phone' : `container${normalizedContainerId}`;
+          
+          // CRITICAL: Fetch image for this specific schedule (date + time + container)
+          // This ensures each schedule shows its corresponding captured image from ESP32-CAM
+          let imageUrl: string | null = null;
+          if (!isPhoneCamera) {
+            try {
+              // First try to get image for this specific schedule (date + time + container)
+              const scheduleDate = String(s.date).substring(0, 10); // YYYY-MM-DD
+              const scheduleTime = String(s.time).substring(0, 5); // HH:MM
+              const scheduleImageResponse = await fetch(`${base}/captures/schedule/${containerIdStr}?date=${scheduleDate}&time=${scheduleTime}&t=${Date.now()}`, {
+                headers: { 'Cache-Control': 'no-cache' },
+              });
+              
+              if (scheduleImageResponse.ok) {
+                const scheduleImageData = await scheduleImageResponse.json();
+                const scheduleImagePath = scheduleImageData.image?.annotated || scheduleImageData.image?.raw;
+                if (scheduleImagePath) {
+                  imageUrl = scheduleImagePath.startsWith('http') ? scheduleImagePath : `${base}${scheduleImagePath}`;
+                  console.log(`[Adherence] ✅ Found schedule-specific image for ${containerIdStr} at ${scheduleDate} ${scheduleTime}`);
+                }
+              }
+              
+              // Fallback to latest image if no schedule-specific match found
+              if (!imageUrl) {
+                const imageResponse = await fetch(`${base}/captures/latest/${containerIdStr}?t=${Date.now()}`, {
+                  headers: { 'Cache-Control': 'no-cache' },
+                });
+                if (imageResponse.ok) {
+                  const imageData = await imageResponse.json();
+                  const imagePath = imageData.latest?.annotated || imageData.latest?.raw;
+                  if (imagePath) {
+                    imageUrl = imagePath.startsWith('http') ? imagePath : `${base}${imagePath}`;
+                    console.log(`[Adherence] ⚠️ Using latest image (no schedule match) for ${containerIdStr} at ${scheduleDate} ${scheduleTime}`);
+                  }
+                }
+              }
+            } catch (error) {
+              console.warn(`[Adherence] Failed to fetch image for ${containerIdStr}:`, error);
+            }
+          } else if (verificationResults) {
+            // For phone camera, try to get image from backend captures
+            try {
+              const imageResponse = await fetch(`${base}/captures/latest/phone?t=${Date.now()}`, {
+                headers: { 'Cache-Control': 'no-cache' },
+              });
+              if (imageResponse.ok) {
+                const imageData = await imageResponse.json();
+                const imagePath = imageData.latest?.annotated || imageData.latest?.raw;
+                if (imagePath) {
+                  imageUrl = imagePath.startsWith('http') ? imagePath : `${base}${imagePath}`;
+                }
+              }
+            } catch (error) {
+              console.warn('[Adherence] Failed to fetch phone camera image:', error);
+            }
+          }
+          
+          return {
+            _id: s._id,
+            containerId: normalizedContainerId,
+            medicineName: med ? med.name : `ID: ${s.medication}`,
+            manufacturer: med?.manufacturer || undefined,
+            scheduledTime: s.time,
+            date: s.date,
+            status: isPhoneCamera ? 'Taken' : status, // Phone camera entries are always "Taken" (verified)
+            imageUrl,
+            verificationResults,
+            isPhoneCamera,
+            // Store creation timestamp for sorting (use _id timestamp or createdAt if available)
+            createdAt: s.createdAt ? new Date(s.createdAt).getTime() : (s._id ? parseInt(s._id.substring(0, 8), 16) || Date.now() : Date.now()),
+          };
+        })
+      );
+      
+      const rows = rowsWithImages;
       
       // CRITICAL: Sort by date added (primary) and time added (secondary), newest first
       // Sort descending: newest items first
@@ -409,6 +503,11 @@ const Adherence = () => {
         return createdB - createdA; // Descending: newer items first
       });
       
+      console.log(`[Adherence] ✅ Loaded ${sortedRows.length} medication schedule(s)`);
+      if (sortedRows.length === 0) {
+        console.warn('[Adherence] ⚠️ No schedules found. User may need to create schedules first.');
+      }
+      
       setMedications(sortedRows);
       
       // Store elder info for display
@@ -422,8 +521,10 @@ const Adherence = () => {
       // Update caregiver status
       setIsCaregiver(isCaregiver);
     } catch (e) {
-      console.error('[Adherence] Error:', e);
-      Alert.alert('Error', 'Failed to load adherence data');
+      console.error('[Adherence] ❌ Error loading adherence data:', e);
+      const errorMessage = e instanceof Error ? e.message : String(e);
+      Alert.alert('Error', `Failed to load adherence data: ${errorMessage}`);
+      setMedications([]); // Ensure medications is set to empty array on error
     } finally {
       setLoading(false);
     }
@@ -475,17 +576,22 @@ const Adherence = () => {
   };
 
   const getFilteredMedications = () => {
-    if (filterMode === 'all') return medications;
+    if (filterMode === 'all') {
+      console.log(`[Adherence] Filter: ALL - returning ${medications.length} medication(s)`);
+      return medications;
+    }
     const now = new Date();
     const start = filterMode === '7d' ? new Date(now.getFullYear(), now.getMonth(), now.getDate() - 6) : customStart;
     const end = filterMode === '7d' ? now : customEnd;
     const startMs = new Date(start.getFullYear(), start.getMonth(), start.getDate(), 0, 0, 0, 0).getTime();
     const endMs = new Date(end.getFullYear(), end.getMonth(), end.getDate(), 23, 59, 59, 999).getTime();
-    return medications.filter((m) => {
+    const filtered = medications.filter((m) => {
       const [y, mo, d] = String(m.date).split('-').map(Number);
       const when = new Date(y, (mo || 1) - 1, d).getTime();
       return when >= startMs && when <= endMs;
     });
+    console.log(`[Adherence] Filter: ${filterMode} (${start.toLocaleDateString()} to ${end.toLocaleDateString()}) - ${filtered.length} of ${medications.length} medication(s) match`);
+    return filtered;
   };
 
   const handleMarkAsTaken = async (medication: MedicationRow) => {
@@ -535,45 +641,127 @@ const Adherence = () => {
 
   const handleGenerateReport = () => {
     const filtered = getFilteredMedications();
-    router.push({
-      pathname: '/Generate',
-      params: { adherenceData: JSON.stringify(filtered) }
-    });
+    console.log(`[Adherence] Generating report with ${filtered.length} medication(s)`);
+    
+    if (filtered.length === 0) {
+      Alert.alert(
+        'No Data',
+        'There are no medication schedules to include in the report. Please create schedules first or adjust the date filter.',
+        [{ text: 'OK' }]
+      );
+      return;
+    }
+    
+    try {
+      router.push({
+        pathname: '/Generate',
+        params: { adherenceData: JSON.stringify(filtered) }
+      });
+    } catch (error) {
+      console.error('[Adherence] Error navigating to Generate:', error);
+      Alert.alert('Error', 'Failed to open report generator');
+    }
   };
 
-  const renderMedicationCard = ({ item }: { item: MedicationRow }) => (
-    <TouchableOpacity 
-      style={[styles.card, { backgroundColor: theme.card }]}
-      onPress={() => {
-        setSelectedMedication(item);
-        setModalVisible(true);
-      }}
-    >
-      <View style={styles.cardHeader}>
-        <Text style={[styles.containerText, { color: theme.primary }]}>Container {item.containerId}</Text>
-        <Ionicons 
-          name={item.status === 'Taken' ? 'checkmark-circle' : item.status === 'Missed' ? 'close-circle' : 'time'} 
-          size={24} 
-          color={item.status === 'Taken' ? theme.success : item.status === 'Missed' ? theme.error : theme.warning} 
-        />
-      </View>
-      <Text style={[styles.medicineName, { color: theme.text }]}>{item.medicineName}</Text>
-      <View style={styles.detailsContainer}>
-        <View style={styles.detailRow}>
-          <Ionicons name="time-outline" size={16} color={theme.textSecondary} />
-          <Text style={[styles.detailText, { color: theme.textSecondary }]}>{item.scheduledTime}</Text>
+  const renderMedicationCard = ({ item }: { item: MedicationRow }) => {
+    const isPhoneCamera = item.isPhoneCamera || item.containerId === 0;
+    const verificationResults = item.verificationResults;
+    
+    return (
+      <TouchableOpacity 
+        style={[styles.card, { backgroundColor: theme.card }]}
+        onPress={() => {
+          setSelectedMedication(item);
+          setModalVisible(true);
+        }}
+      >
+        <View style={styles.cardHeader}>
+          {!isPhoneCamera && (
+            <Text style={[styles.containerText, { color: theme.primary }]}>Container {item.containerId}</Text>
+          )}
+          {isPhoneCamera && <View style={{ flex: 1 }} />}
+          {isPhoneCamera && verificationResults ? (
+            <Ionicons 
+              name={verificationResults.pass ? 'checkmark-circle' : 'close-circle'} 
+              size={24} 
+              color={verificationResults.pass ? theme.success : theme.error} 
+            />
+          ) : (
+            <Ionicons 
+              name={item.status === 'Taken' ? 'checkmark-circle' : item.status === 'Missed' ? 'close-circle' : 'time'} 
+              size={24} 
+              color={item.status === 'Taken' ? theme.success : item.status === 'Missed' ? theme.error : theme.warning} 
+            />
+          )}
         </View>
-        <View style={styles.detailRow}>
-          <Ionicons name="calendar-outline" size={16} color={theme.textSecondary} />
-          <Text style={[styles.detailText, { color: theme.textSecondary }]}>{item.date}</Text>
+        <Text style={[styles.medicineName, { color: theme.text }]}>{item.medicineName}</Text>
+        {item.manufacturer && (
+          <Text style={[styles.manufacturerText, { color: theme.textSecondary }]}>
+            Manufacturer: {item.manufacturer}
+          </Text>
+        )}
+        
+        {/* Display annotated image if available */}
+        {item.imageUrl && (
+          <View style={styles.cardImageContainer}>
+            <Image
+              source={{ uri: item.imageUrl }}
+              style={styles.cardImage}
+              resizeMode="contain"
+            />
+          </View>
+        )}
+        
+        <View style={styles.detailsContainer}>
+          <View style={styles.detailRow}>
+            <Ionicons name="time-outline" size={16} color={theme.textSecondary} />
+            <Text style={[styles.detailText, { color: theme.textSecondary }]}>{item.scheduledTime}</Text>
+          </View>
+          <View style={styles.detailRow}>
+            <Ionicons name="calendar-outline" size={16} color={theme.textSecondary} />
+            <Text style={[styles.detailText, { color: theme.textSecondary }]}>{item.date}</Text>
+          </View>
+          
+          {/* Show verification results for phone camera, status for regular schedules */}
+          {isPhoneCamera && verificationResults ? (
+            <>
+              <View style={styles.detailRow}>
+                <Ionicons name="checkmark-circle-outline" size={16} color={theme.textSecondary} />
+                <Text style={[styles.detailText, { color: theme.textSecondary }]}>
+                  Result: {verificationResults.pass ? 'PASSED' : 'FAILED'}
+                </Text>
+              </View>
+              <View style={styles.detailRow}>
+                <Ionicons name="pills-outline" size={16} color={theme.textSecondary} />
+                <Text style={[styles.detailText, { color: theme.textSecondary }]}>
+                  Detected: {verificationResults.count} pill(s)
+                </Text>
+              </View>
+              {verificationResults.detectedTypes && verificationResults.detectedTypes.length > 0 && (
+                <View style={styles.detailRow}>
+                  <Ionicons name="information-circle-outline" size={16} color={theme.textSecondary} />
+                  <Text style={[styles.detailText, { color: theme.textSecondary }]}>
+                    Types: {verificationResults.detectedTypes.map(t => `${t.label} (${t.n})`).join(', ')}
+                  </Text>
+                </View>
+              )}
+              <View style={styles.detailRow}>
+                <Ionicons name="stats-chart-outline" size={16} color={theme.textSecondary} />
+                <Text style={[styles.detailText, { color: theme.textSecondary }]}>
+                  Confidence: {(verificationResults.confidence * 100).toFixed(1)}%
+                </Text>
+              </View>
+            </>
+          ) : (
+            <View style={styles.detailRow}>
+              <Ionicons name="information-circle-outline" size={16} color={theme.textSecondary} />
+              <Text style={[styles.detailText, { color: theme.textSecondary }]}>Status: {item.status}</Text>
+            </View>
+          )}
         </View>
-        <View style={styles.detailRow}>
-          <Ionicons name="information-circle-outline" size={16} color={theme.textSecondary} />
-          <Text style={[styles.detailText, { color: theme.textSecondary }]}>Status: {item.status}</Text>
-        </View>
-      </View>
-    </TouchableOpacity>
-  );
+      </TouchableOpacity>
+    );
+  };
 
   return (
     <View style={[styles.container, { backgroundColor: theme.background }]}>
@@ -611,8 +799,11 @@ const Adherence = () => {
         ) : medications.length === 0 ? (
           <View style={{ padding: 20, alignItems: 'center', justifyContent: 'center', flex: 1 }}>
             <Ionicons name="document-text-outline" size={48} color={theme.textSecondary} />
-            <Text style={{ color: theme.textSecondary, marginTop: 12, fontSize: 16 }}>No adherence data available</Text>
-            <Text style={{ color: theme.textSecondary, marginTop: 4, fontSize: 14 }}>Schedules will appear here once created</Text>
+            <Text style={{ color: theme.textSecondary, marginTop: 12, fontSize: 16, textAlign: 'center' }}>No adherence data available</Text>
+            <Text style={{ color: theme.textSecondary, marginTop: 4, fontSize: 14, textAlign: 'center' }}>Schedules will appear here once created</Text>
+            <Text style={{ color: theme.textSecondary, marginTop: 8, fontSize: 12, textAlign: 'center', fontStyle: 'italic' }}>
+              To create schedules, go to the Set Schedule screen
+            </Text>
           </View>
         ) : (
           <FlatList
@@ -736,13 +927,63 @@ const Adherence = () => {
                     <Ionicons name="close" size={24} color={theme.textSecondary} />
                   </TouchableOpacity>
                 </View>
-                <View style={styles.modalBody}>
-                  <Text style={[styles.modalText, { color: theme.text }]}>Container: {selectedMedication.containerId}</Text>
-                  <Text style={[styles.modalText, { color: theme.text }]}>Medicine: {selectedMedication.medicineName}</Text>
-                  <Text style={[styles.modalText, { color: theme.text }]}>Scheduled Time: {selectedMedication.scheduledTime}</Text>
-                  <Text style={[styles.modalText, { color: theme.text }]}>Date: {selectedMedication.date}</Text>
-                  <Text style={[styles.modalText, { color: theme.text }]}>Status: {selectedMedication.status}</Text>
-                </View>
+                <ScrollView style={styles.modalBody} showsVerticalScrollIndicator={true}>
+                  {selectedMedication.isPhoneCamera || selectedMedication.containerId === 0 ? (
+                    <>
+                      <Text style={[styles.modalText, { color: theme.text }]}>Medicine: {selectedMedication.medicineName}</Text>
+                      <Text style={[styles.modalText, { color: theme.text }]}>Time: {selectedMedication.scheduledTime}</Text>
+                      <Text style={[styles.modalText, { color: theme.text }]}>Date: {selectedMedication.date}</Text>
+                      
+                      {/* Display verification results instead of status */}
+                      {selectedMedication.verificationResults && (
+                        <>
+                          <View style={[styles.modalResultSection, { backgroundColor: theme.background, padding: 12, borderRadius: 8, marginTop: 12 }]}>
+                            <Text style={[styles.modalText, { color: theme.text, fontWeight: 'bold', marginBottom: 8 }]}>Verification Results</Text>
+                            <Text style={[styles.modalText, { color: selectedMedication.verificationResults.pass ? theme.success : theme.error }]}>
+                              Result: {selectedMedication.verificationResults.pass ? 'PASSED ✓' : 'FAILED ✗'}
+                            </Text>
+                            <Text style={[styles.modalText, { color: theme.text }]}>
+                              Pills Detected: {selectedMedication.verificationResults.count}
+                            </Text>
+                            <Text style={[styles.modalText, { color: theme.text }]}>
+                              Confidence: {(selectedMedication.verificationResults.confidence * 100).toFixed(1)}%
+                            </Text>
+                            {selectedMedication.verificationResults.detectedTypes && selectedMedication.verificationResults.detectedTypes.length > 0 && (
+                              <View style={{ marginTop: 8 }}>
+                                <Text style={[styles.modalText, { color: theme.text, fontWeight: '600', marginBottom: 4 }]}>Detected Types:</Text>
+                                {selectedMedication.verificationResults.detectedTypes.map((type, idx) => (
+                                  <Text key={idx} style={[styles.modalText, { color: theme.textSecondary, marginLeft: 12 }]}>
+                                    • {type.label}: {type.n} pill(s)
+                                  </Text>
+                                ))}
+                              </View>
+                            )}
+                          </View>
+                        </>
+                      )}
+                    </>
+                  ) : (
+                    <>
+                      <Text style={[styles.modalText, { color: theme.text }]}>Container: {selectedMedication.containerId}</Text>
+                      <Text style={[styles.modalText, { color: theme.text }]}>Medicine: {selectedMedication.medicineName}</Text>
+                      <Text style={[styles.modalText, { color: theme.text }]}>Scheduled Time: {selectedMedication.scheduledTime}</Text>
+                      <Text style={[styles.modalText, { color: theme.text }]}>Date: {selectedMedication.date}</Text>
+                      <Text style={[styles.modalText, { color: theme.text }]}>Status: {selectedMedication.status}</Text>
+                    </>
+                  )}
+                  
+                  {/* Display annotated image if available */}
+                  {selectedMedication.imageUrl && (
+                    <View style={styles.modalImageContainer}>
+                      <Text style={[styles.modalImageLabel, { color: theme.text }]}>Detection Image</Text>
+                      <Image
+                        source={{ uri: selectedMedication.imageUrl }}
+                        style={styles.modalImage}
+                        resizeMode="contain"
+                      />
+                    </View>
+                  )}
+                </ScrollView>
                 {selectedMedication.status !== 'Taken' && (
                   <TouchableOpacity 
                     style={[styles.markButton, { backgroundColor: theme.success }]}
@@ -836,6 +1077,12 @@ const styles = StyleSheet.create({
     fontSize: 16,
     marginBottom: 10,
   },
+  manufacturerText: {
+    fontSize: 13,
+    marginBottom: 8,
+    fontStyle: 'italic',
+    opacity: 0.8,
+  },
   detailsContainer: {
     gap: 8,
   },
@@ -871,9 +1118,37 @@ const styles = StyleSheet.create({
   },
   modalBody: {
     gap: 10,
+    maxHeight: 400,
   },
   modalText: {
     fontSize: 16,
+  },
+  cardImageContainer: {
+    marginVertical: 10,
+    alignItems: 'center',
+    backgroundColor: '#f5f5f5',
+    borderRadius: 8,
+    padding: 8,
+  },
+  cardImage: {
+    width: '100%',
+    height: 150,
+    borderRadius: 8,
+  },
+  modalImageContainer: {
+    marginTop: 15,
+    alignItems: 'center',
+  },
+  modalImageLabel: {
+    fontSize: 14,
+    fontWeight: '600',
+    marginBottom: 8,
+  },
+  modalImage: {
+    width: '100%',
+    height: 250,
+    borderRadius: 8,
+    backgroundColor: '#f5f5f5',
   },
   markButton: {
     padding: 15,

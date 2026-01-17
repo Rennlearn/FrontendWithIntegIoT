@@ -54,10 +54,12 @@ const MonitorManageScreen = () => {
   const [backendModalVisible, setBackendModalVisible] = useState(false);
   const [backendInput, setBackendInput] = useState('');
   
-  // Alarm modal state
-  const [alarmVisible, setAlarmVisible] = useState(false);
-  const [alarmContainer, setAlarmContainer] = useState(1);
-  const [alarmTime, setAlarmTime] = useState('');
+  // Alarm modal state - REMOVED: Alarm modals are now handled globally by GlobalAlarmHandler
+  // These state variables are no longer used (ENABLE_LOCAL_ALARM_HANDLING = false)
+  // Keeping commented out for reference, but they should not be used
+  // const [alarmVisible, setAlarmVisible] = useState(false);
+  // const [alarmContainer, setAlarmContainer] = useState(1);
+  // const [alarmTime, setAlarmTime] = useState('');
   
   // Monitoring status for caregivers
   const [isCaregiver, setIsCaregiver] = useState(false);
@@ -1029,7 +1031,12 @@ const MonitorManageScreen = () => {
             clearTimeout(timeoutId);
           }
         } catch (syncErr) {
-          console.warn('[MonitorManageScreen] ⚠️ Error syncing schedules to backend (alarms may not fire):', syncErr);
+          // Handle AbortError (timeout) gracefully - it's expected when backend is slow/unreachable
+          if (syncErr instanceof Error && syncErr.name === 'AbortError') {
+            console.log('[MonitorManageScreen] ⏳ Sync request timed out (non-critical, alarms may still work if backend is reachable)');
+          } else {
+            console.warn('[MonitorManageScreen] ⚠️ Error syncing schedules to backend (alarms may not fire):', syncErr);
+          }
         }
       })();
 
@@ -1438,12 +1445,10 @@ const MonitorManageScreen = () => {
   }, [loadScheduleData]);
 
   // Central handler for alarm stop events (from Bluetooth or modal)
+  // NOTE: Alarm modals are now handled globally by GlobalAlarmHandler
+  // This handler is kept for backward compatibility but should not manage modal state
   const handleAlarmStopped = useCallback(async (containerFromMessage: number, source: 'bluetooth' | 'modal' = 'bluetooth') => {
-    let container = containerFromMessage;
-    if (!container) {
-      container = alarmContainer;
-      console.log(`[MonitorManageScreen] No container in ${source} stop message, using last alarm container: ${container}`);
-    }
+    const container = containerFromMessage;
 
     if (!container) {
       console.warn(`[MonitorManageScreen] ${source} stop received without container, skipping capture`);
@@ -1458,10 +1463,7 @@ const MonitorManageScreen = () => {
     lastAlarmStoppedRef.current = { container, timestamp: now };
 
     console.log(`[Auto Capture] Alarm stop handled (${source}) for Container ${container}, capturing AFTER pill taken...`);
-
-    // Dismiss alarm modal immediately
-    setAlarmVisible(false);
-    console.log('[MonitorManageScreen] Dismissed alarm modal on alarm stop');
+    // NOTE: Alarm modal dismissal is now handled by GlobalAlarmHandler
 
     // Send notification that pill was taken
     try {
@@ -1617,6 +1619,10 @@ const MonitorManageScreen = () => {
           } catch (err) {
             console.warn('[MonitorManageScreen] Error reloading schedules after post-pill capture:', err);
           }
+        } catch (verificationError) {
+          console.error('[Auto Capture] Error checking post-pill verification:', verificationError);
+          // Don't show alert for verification check errors - just log
+        }
         }, 3000); // Reduced from 5000ms to 3000ms for faster feedback
       } else {
         console.error(`[Auto Capture] ❌ Failed to trigger capture: ${captureResult.message}`);
@@ -1626,7 +1632,7 @@ const MonitorManageScreen = () => {
       if (error instanceof Error) {
         console.error(`[Auto Capture] Error details: ${error.message}\n${error.stack}`);
       }
-    }  }, [alarmContainer, loadVerifications, loadScheduleData]);
+    }  }, [loadVerifications, loadScheduleData]);
 
   // Listen for Bluetooth alarm notifications
   useEffect(() => {
@@ -1687,6 +1693,10 @@ const MonitorManageScreen = () => {
           
           console.log(`[MonitorManageScreen] 📊 Parsed alarm: Container ${container} at ${timeStr}`);
           
+          // NOTE: This code is disabled (ENABLE_LOCAL_ALARM_HANDLING = false)
+          // Alarm modals are handled globally by GlobalAlarmHandler
+          // Keeping this code commented for reference only
+          /*
           // If an alarm modal is already showing, wait for it to close before showing another
           if (alarmVisible) {
             console.log(`[MonitorManageScreen] ⏳ Alarm modal already visible; ignoring new trigger until dismissed`);
@@ -1713,6 +1723,7 @@ const MonitorManageScreen = () => {
           setAlarmContainer(container);
           setAlarmTime(timeStr);
           setAlarmVisible(true);
+          */
           
           console.log(`[MonitorManageScreen] ✅ Alarm modal state updated - visible: true, container: ${container}, time: ${timeStr}`);
           
@@ -1907,9 +1918,10 @@ const MonitorManageScreen = () => {
         if (match) {
           container = normalizeContainer(match[1]);
         } else {
-          // If no container in message, use the last known alarm container
-          container = alarmContainer;
-          console.log(`[MonitorManageScreen] No container in ALARM_STOPPED message, using last known: ${container}`);
+          // If no container in message, use container from message or default to 1
+          // NOTE: alarmContainer state is no longer used (alarms handled globally)
+          container = container || 1;
+          console.log(`[MonitorManageScreen] No container in ALARM_STOPPED message, using default: ${container}`);
         }
         
         await handleAlarmStopped(container, 'bluetooth');
@@ -2164,10 +2176,7 @@ const MonitorManageScreen = () => {
   const handleBack = useCallback(async () => {
     try {
       setNavigating('back');
-      // Close alarm modal if open (non-blocking)
-      if (alarmVisible) {
-        setAlarmVisible(false);
-      }
+      // NOTE: Alarm modal is handled globally by GlobalAlarmHandler, no need to close here
       
       // Get user role to determine which dashboard to navigate to
       const token = await AsyncStorage.getItem('token');
@@ -2216,7 +2225,7 @@ const MonitorManageScreen = () => {
     } finally {
       setTimeout(() => setNavigating(null), 500);
     }
-  }, [alarmVisible, navigation, router]);
+  }, [navigation, router]);
 
   // Helper to derive status locally without mutating backend
   // Mark as "Missed" if it's been more than 1 minute past the scheduled time
@@ -2554,7 +2563,7 @@ const MonitorManageScreen = () => {
       </View>
 
       <Modal 
-        visible={backendModalVisible && !alarmVisible} 
+        visible={backendModalVisible} 
         transparent 
         animationType="slide"
         statusBarTranslucent
@@ -2664,6 +2673,11 @@ const MonitorManageScreen = () => {
                     <Text style={[styles.detailText, { color: theme.text }]}>
                       <Text style={styles.label}>Medication:</Text> {medicationName || 'Unknown Medication'}
                     </Text>
+                    {medication?.manufacturer && (
+                      <Text style={[styles.detailText, { color: theme.textSecondary }]}>
+                        <Text style={styles.label}>Manufacturer:</Text> {medication.manufacturer}
+                      </Text>
+                    )}
                     <Text style={[styles.detailText, { color: theme.text }]}>
                       <Text style={styles.label}>Date:</Text> {schedule.date}
                     </Text>

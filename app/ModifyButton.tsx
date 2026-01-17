@@ -875,6 +875,11 @@ const ModifyButton = () => {
                           <Text style={[styles.detailText, { color: theme.text }]}>
                             <Text style={styles.label}>Medication:</Text> {medicationName}
                           </Text>
+                          {medication?.manufacturer && (
+                            <Text style={[styles.detailText, { color: theme.textSecondary }]}>
+                              <Text style={styles.label}>Manufacturer:</Text> {medication.manufacturer}
+                            </Text>
+                          )}
                           <Text style={[styles.detailText, { color: theme.text }]}>
                             <Text style={styles.label}>Date:</Text> {schedule.date}
                           </Text>

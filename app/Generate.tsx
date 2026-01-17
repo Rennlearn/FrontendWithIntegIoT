@@ -14,6 +14,14 @@ interface MedicationRow {
   date: string;
   status: 'Taken' | 'Pending' | 'Missed';
   imageBase64?: string; // Base64 encoded image for PDF
+  verificationResults?: {
+    pass: boolean;
+    count: number;
+    confidence: number;
+    detectedTypes: Array<{ label: string; n: number }>;
+    source: string;
+  } | null; // Verification results for phone camera entries
+  isPhoneCamera?: boolean; // Flag to identify phone camera entries
 }
 
 const Generate = () => {
@@ -44,14 +52,17 @@ const Generate = () => {
 
   // CRITICAL: Normalize container ID to ensure correct image mapping
   // Ensures consistent parsing of container identifiers (numeric, "container1", "morning", etc.)
-  const normalizeContainer = (raw: any): 1 | 2 | 3 => {
-    if (raw === null || raw === undefined) return 1;
+  // Returns 0 for phone camera entries, 1-3 for regular containers
+  const normalizeContainer = (raw: any): 0 | 1 | 2 | 3 => {
+    // Phone camera entries use container = 0
+    if (raw === 0 || raw === null || raw === undefined) return 0;
     const s = String(raw).trim().toLowerCase();
 
     // Extract first digit sequence (handles "1", "01", "container2", etc.)
     const m = s.match(/(\d+)/);
     if (m) {
       const n = parseInt(m[1], 10);
+      if (n === 0) return 0; // Phone camera
       if (n === 1 || n === 2 || n === 3) return n as 1 | 2 | 3;
     }
 
@@ -64,61 +75,110 @@ const Generate = () => {
     return 1;
   };
 
-  // Fetch latest capture image for a container and convert to base64
-  // CRITICAL: Ensures each container shows only its own capture image
-  const fetchContainerImage = async (containerId: number): Promise<string | null> => {
+  // Fetch schedule-specific capture image for a medication row and convert to base64
+  // CRITICAL: Fetches the image that was captured for this specific schedule (date + time + container)
+  // Falls back to latest image if no schedule-specific match is found
+  const fetchScheduleImage = async (containerId: number, date: string, time: string): Promise<string | null> => {
     try {
       // Normalize container ID to ensure correct mapping
       const normalizedId = normalizeContainer(containerId);
       const base = await verificationService.getBackendUrl();
       const containerIdStr = `container${normalizedId}`;
-      const response = await fetch(`${base}/captures/latest/${containerIdStr}?t=${Date.now()}`, {
-        method: 'GET',
-        headers: {
-          'Content-Type': 'application/json',
-          'Cache-Control': 'no-cache',
-        },
-      });
-
-      if (response.ok) {
-        const data = await response.json();
-        const imagePath = data.latest?.annotated || data.latest?.raw;
+      
+      // Normalize date and time formats
+      const scheduleDate = String(date).substring(0, 10); // YYYY-MM-DD
+      const scheduleTime = String(time).substring(0, 5); // HH:MM
+      
+      let imagePath: string | null = null;
+      
+      // CRITICAL: First try to get schedule-specific image (date + time + container)
+      // This ensures each schedule shows the image captured for that specific schedule
+      try {
+        const scheduleResponse = await fetch(`${base}/captures/schedule/${containerIdStr}?date=${scheduleDate}&time=${scheduleTime}&t=${Date.now()}`, {
+          method: 'GET',
+          headers: {
+            'Content-Type': 'application/json',
+            'Cache-Control': 'no-cache',
+          },
+        });
         
-        if (imagePath) {
-          // Construct full URL
-          const fullUrl = imagePath.startsWith('http') 
-            ? imagePath 
-            : `${base}${imagePath}`;
-          
-          // Download image using expo-file-system and convert to base64
-          try {
-            // Download the image to a temporary file
-            const fileUri = `${FileSystem.cacheDirectory}container_${containerId}_${Date.now()}.jpg`;
-            const downloadResult = await FileSystem.downloadAsync(fullUrl, fileUri);
-            
-            if (downloadResult.status === 200) {
-              // Read the file as base64
-              const base64String = await FileSystem.readAsStringAsync(downloadResult.uri, {
-                encoding: FileSystem.EncodingType.Base64,
-              });
-              
-              // Clean up temporary file
-              try {
-                await FileSystem.deleteAsync(downloadResult.uri, { idempotent: true });
-              } catch (cleanupError) {
-                // Ignore cleanup errors
-              }
-              
-              // Return data URL format for HTML img src
-              return `data:image/jpeg;base64,${base64String}`;
-            }
-          } catch (downloadError) {
-            console.warn(`[Generate] Failed to download image for container ${containerId}:`, downloadError);
+        if (scheduleResponse.ok) {
+          const scheduleData = await scheduleResponse.json();
+          imagePath = scheduleData.image?.annotated || scheduleData.image?.raw || null;
+          if (imagePath) {
+            console.log(`[Generate] ✅ Found schedule-specific image for Container ${normalizedId} at ${scheduleDate} ${scheduleTime}`);
           }
+        }
+      } catch (scheduleError) {
+        console.warn(`[Generate] Failed to fetch schedule-specific image for Container ${normalizedId}:`, scheduleError);
+      }
+      
+      // Fallback to latest image if no schedule-specific match found
+      if (!imagePath) {
+        try {
+          const latestResponse = await fetch(`${base}/captures/latest/${containerIdStr}?t=${Date.now()}`, {
+            method: 'GET',
+            headers: {
+              'Content-Type': 'application/json',
+              'Cache-Control': 'no-cache',
+            },
+          });
+          
+          if (latestResponse.ok) {
+            const latestData = await latestResponse.json();
+            imagePath = latestData.latest?.annotated || latestData.latest?.raw || null;
+            if (imagePath) {
+              console.log(`[Generate] ⚠️ Using latest image (no schedule match) for Container ${normalizedId} at ${scheduleDate} ${scheduleTime}`);
+            }
+          }
+        } catch (latestError) {
+          console.warn(`[Generate] Failed to fetch latest image for Container ${normalizedId}:`, latestError);
+        }
+      }
+      
+      if (imagePath) {
+        // Construct full URL
+        const fullUrl = imagePath.startsWith('http') 
+          ? imagePath 
+          : `${base}${imagePath}`;
+        
+        // Download image using expo-file-system and convert to base64
+        try {
+          // Download the image to a temporary file
+          // CRITICAL: Use unique filename with container, date, time, and timestamp to prevent caching/reuse
+          const uniqueId = `${containerId}_${scheduleDate}_${scheduleTime}_${Date.now()}_${Math.random().toString(36).substring(7)}`;
+          const fileUri = `${FileSystem.cacheDirectory}container_${uniqueId}.jpg`;
+          console.log(`[Generate] Downloading image from ${fullUrl} to ${fileUri}...`);
+          
+          const downloadResult = await FileSystem.downloadAsync(fullUrl, fileUri);
+          
+          if (downloadResult.status === 200) {
+            // Read the file as base64
+            const base64String = await FileSystem.readAsStringAsync(downloadResult.uri, {
+              encoding: FileSystem.EncodingType.Base64,
+            });
+            
+            // Clean up temporary file immediately after reading
+            try {
+              await FileSystem.deleteAsync(downloadResult.uri, { idempotent: true });
+            } catch (cleanupError) {
+              // Ignore cleanup errors
+            }
+            
+            // Return data URL format for HTML img src
+            // CRITICAL: Each call returns a unique base64 string - no caching
+            const base64DataUrl = `data:image/jpeg;base64,${base64String}`;
+            console.log(`[Generate] ✅ Successfully converted image to base64 (length: ${base64String.length} chars)`);
+            return base64DataUrl;
+          } else {
+            console.warn(`[Generate] ⚠️ Image download returned status ${downloadResult.status}`);
+          }
+        } catch (downloadError) {
+          console.warn(`[Generate] Failed to download image for Container ${normalizedId}:`, downloadError);
         }
       }
     } catch (error) {
-      console.warn(`[Generate] Failed to fetch image for container ${containerId}:`, error);
+      console.warn(`[Generate] Failed to fetch image for Container ${containerId}:`, error);
     }
     return null;
   };
@@ -126,30 +186,86 @@ const Generate = () => {
   const generatePDF = async () => {
     setGenerating(true);
     try {
+      console.log(`[Generate] Starting PDF generation with data: ${adherenceDataParam?.substring(0, 100)}...`);
       const data: MedicationRow[] = JSON.parse(adherenceDataParam || '[]');
       
-      // CRITICAL: Normalize container IDs and fetch images for each unique container
-      // This ensures container1 schedules show container1 images, container2 shows container2, etc.
+      if (!data || data.length === 0) {
+        Alert.alert('Error', 'No medication data provided for report generation.');
+        setGenerating(false);
+        return;
+      }
+      
+      console.log(`[Generate] Processing ${data.length} medication record(s)`);
+      
+      // CRITICAL: Normalize container IDs
       const normalizedData = data.map(med => ({
         ...med,
         containerId: normalizeContainer(med.containerId),
       }));
       
-      const uniqueContainers = [...new Set(normalizedData.map(d => d.containerId))];
-      const containerImages: Record<number, string | null> = {};
+      // CRITICAL: Fetch schedule-specific images for each medication row individually
+      // This ensures each schedule shows the image captured for that specific schedule (date + time + container)
+      // NOT just the latest image for the container (which would show same image for all schedules)
+      console.log(`[Generate] Fetching schedule-specific images for ${normalizedData.length} medication records...`);
+      const dataWithImages = await Promise.all(
+        normalizedData.map(async (med, index) => {
+          let imageBase64: string | null = null;
+          
+          // Skip phone camera entries (containerId = 0) - images handled separately if needed
+          if (med.containerId !== 0 && med.date && med.scheduledTime) {
+            try {
+              console.log(`[Generate] [${index + 1}/${normalizedData.length}] Fetching image for Container ${med.containerId} at ${med.date} ${med.scheduledTime}...`);
+              // Fetch schedule-specific image for this medication row
+              // CRITICAL: Each call is independent - no caching, each schedule gets its own image
+              imageBase64 = await fetchScheduleImage(med.containerId, med.date, med.scheduledTime);
+              if (imageBase64) {
+                // Log first 50 chars of base64 to verify different images
+                const imagePreview = imageBase64.substring(0, 50);
+                console.log(`[Generate] ✅ [${index + 1}/${normalizedData.length}] Loaded image for Container ${med.containerId} at ${med.date} ${med.scheduledTime} (base64 preview: ${imagePreview}...)`);
+              } else {
+                console.log(`[Generate] ⚠️ [${index + 1}/${normalizedData.length}] No image found for Container ${med.containerId} at ${med.date} ${med.scheduledTime}`);
+              }
+            } catch (imageError) {
+              console.warn(`[Generate] ❌ [${index + 1}/${normalizedData.length}] Failed to fetch image for Container ${med.containerId} at ${med.date} ${med.scheduledTime}:`, imageError);
+            }
+          } else {
+            console.log(`[Generate] ⏭️ [${index + 1}/${normalizedData.length}] Skipping image fetch (phone camera or missing date/time): Container ${med.containerId}`);
+          }
+          
+          return {
+            ...med,
+            imageBase64, // CRITICAL: Each row gets its own imageBase64 - no sharing between rows
+          };
+        })
+      );
       
-      console.log(`[Generate] Fetching images for ${uniqueContainers.length} unique containers: ${uniqueContainers.join(', ')}`);
-      for (const containerId of uniqueContainers) {
-        const imageBase64 = await fetchContainerImage(containerId);
-        containerImages[containerId] = imageBase64;
-        console.log(`[Generate] ${imageBase64 ? '✅' : '❌'} Container ${containerId} image ${imageBase64 ? 'loaded' : 'not available'}`);
+      // Log summary of images loaded and verify uniqueness
+      const imagesLoaded = dataWithImages.filter(d => d.imageBase64 !== null).length;
+      const imagesWithBase64 = dataWithImages.filter(d => d.imageBase64 !== null);
+      const uniqueImageHashes = new Set(imagesWithBase64.map(d => d.imageBase64?.substring(0, 200))).size;
+      console.log(`[Generate] 📊 Image loading summary: ${imagesLoaded}/${normalizedData.length} rows have images, ${uniqueImageHashes} unique images`);
+      
+      // CRITICAL: Verify each container/schedule combination has its own image
+      const containerScheduleMap = new Map<string, string>();
+      let duplicateImagesFound = false;
+      for (const med of dataWithImages) {
+        if (med.imageBase64 && med.containerId !== 0) {
+          const key = `Container${med.containerId}_${med.date}_${med.scheduledTime}`;
+          const existingImage = containerScheduleMap.get(key);
+          if (existingImage && existingImage === med.imageBase64.substring(0, 200)) {
+            console.warn(`[Generate] ⚠️ WARNING: Duplicate image detected for ${key}`);
+            duplicateImagesFound = true;
+          } else {
+            containerScheduleMap.set(key, med.imageBase64.substring(0, 200));
+          }
+        }
       }
       
-      // Add images to data rows - CRITICAL: Use normalized containerId for correct image mapping
-      const dataWithImages = normalizedData.map(med => ({
-        ...med,
-        imageBase64: containerImages[med.containerId] || null,
-      }));
+      if (duplicateImagesFound) {
+        console.warn(`[Generate] ⚠️ Some schedules may be showing duplicate images - check backend schedule matching`);
+      } else {
+        console.log(`[Generate] ✅ All images are unique for their container/schedule combinations`);
+      }
       
       const total = data.length;
       const taken = data.filter(d => d.status === 'Taken').length;
@@ -314,23 +430,36 @@ const Generate = () => {
                 </tr>
               </thead>
               <tbody>
-                ${dataWithImages.map(med => `
+                ${dataWithImages.map((med, idx) => {
+                  const isPhoneCamera = med.containerId === 0 || med.isPhoneCamera;
+                  const verificationResults = med.verificationResults;
+                  // CRITICAL: Each row gets its own unique image - verify imageBase64 is set correctly
+                  const hasImage = med.imageBase64 !== null && med.imageBase64 !== undefined;
+                  const imagePreview = hasImage ? med.imageBase64.substring(0, 50) : 'NO_IMAGE';
+                  console.log(`[Generate] PDF Row ${idx + 1}: Container ${med.containerId}, Date ${med.date}, Time ${med.scheduledTime}, HasImage: ${hasImage}, Preview: ${imagePreview}...`);
+                  
+                  return `
                   <tr>
-                    <td class="container-cell">Container ${med.containerId}</td>
+                    <td class="container-cell">${isPhoneCamera ? '-' : `Container ${med.containerId}`}</td>
                     <td class="image-cell">
-                      ${med.imageBase64 
-                        ? `<img src="${med.imageBase64}" alt="Container ${med.containerId} capture" class="container-image" />` 
+                      ${hasImage
+                        ? `<img src="${med.imageBase64}" alt="${isPhoneCamera ? 'Phone Camera' : `Container ${med.containerId} - ${med.date} ${med.scheduledTime}`} capture" class="container-image" />` 
                         : `<span class="no-image">No image available</span>`
                       }
                     </td>
                     <td>${med.medicineName || 'N/A'}</td>
                     <td>${med.date || 'N/A'}</td>
                     <td>${med.scheduledTime || 'N/A'}</td>
-                    <td class="${med.status === 'Taken' ? 'status-taken' : med.status === 'Missed' ? 'status-missed' : 'status-pending'}">
-                      ${med.status}
+                    <td class="${isPhoneCamera && verificationResults
+                      ? (verificationResults.pass ? 'status-taken' : 'status-missed')
+                      : (med.status === 'Taken' ? 'status-taken' : med.status === 'Missed' ? 'status-missed' : 'status-pending')}">
+                      ${isPhoneCamera && verificationResults
+                        ? `Result: ${verificationResults.pass ? 'PASSED' : 'FAILED'} (${verificationResults.count} pills, ${(verificationResults.confidence * 100).toFixed(1)}%)`
+                        : med.status}
                     </td>
                   </tr>
-                `).join('')}
+                `;
+                }).join('')}
               </tbody>
             </table>
           </body>

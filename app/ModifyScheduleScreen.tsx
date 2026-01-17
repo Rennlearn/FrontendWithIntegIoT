@@ -38,6 +38,7 @@ interface Medication {
   name: string;
   dosage: string;
   form: string;
+  manufacturer?: string;
   medId: number;
 }
 
@@ -987,6 +988,8 @@ const ModifyScheduleScreen = () => {
           
           // Get unique medication for this container
           const uniqueMedication = containerSchedules[0]?.medicationName || 'Unknown';
+          const medicationId = containerSchedules[0]?.medication;
+          const medication = medications.find(med => med.medId === medicationId);
           
           return (
             <View key={containerNum} style={[styles.containerCard, { backgroundColor: theme.card }]}>
@@ -996,9 +999,16 @@ const ModifyScheduleScreen = () => {
                     Container {containerNum}
                   </Text>
                 </View>
-                <Text style={[styles.medicationName, { color: theme.text }]}>
-                  {uniqueMedication}
-                </Text>
+                <View style={{ flex: 1 }}>
+                  <Text style={[styles.medicationName, { color: theme.text }]}>
+                    {uniqueMedication}
+                  </Text>
+                  {medication?.manufacturer && (
+                    <Text style={[styles.manufacturerText, { color: theme.textSecondary }]}>
+                      Manufacturer: {medication.manufacturer}
+                    </Text>
+                  )}
+                </View>
               </View>
               
               {/* Pill Count Display */}
@@ -1115,15 +1125,22 @@ const ModifyScheduleScreen = () => {
             
             <Text style={[styles.modalTitle, { color: theme.secondary }]}>Edit Schedule</Text>
             
-            {editingSchedule && (
-              <>
-                <Text style={[styles.editLabel, { color: theme.text }]}>
-                  Container: {editingSchedule.container}
-                </Text>
-                <Text style={[styles.editLabel, { color: theme.text }]}>
-                  Medication: {editingSchedule.medicationName || 'Unknown'}
-                </Text>
-                <Text style={[styles.editLabel, { color: theme.text }]}>Date:</Text>
+            {editingSchedule && (() => {
+              const editMedication = medications.find(med => med.medId === editingSchedule.medication);
+              return (
+                <>
+                  <Text style={[styles.editLabel, { color: theme.text }]}>
+                    Container: {editingSchedule.container}
+                  </Text>
+                  <Text style={[styles.editLabel, { color: theme.text }]}>
+                    Medication: {editingSchedule.medicationName || 'Unknown'}
+                  </Text>
+                  {editMedication?.manufacturer && (
+                    <Text style={[styles.editLabel, { color: theme.textSecondary, fontStyle: 'italic' }]}>
+                      Manufacturer: {editMedication.manufacturer}
+                    </Text>
+                  )}
+                  <Text style={[styles.editLabel, { color: theme.text }]}>Date:</Text>
                 {Platform.OS === 'android' ? (
                   <>
                     <TouchableOpacity 
@@ -1208,8 +1225,9 @@ const ModifyScheduleScreen = () => {
                     )}
                   </TouchableOpacity>
                 </View>
-              </>
-            )}
+                </>
+              );
+            })()}
           </View>
         </View>
       </Modal>
@@ -1326,6 +1344,12 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '600',
     flex: 1,
+  },
+  manufacturerText: {
+    fontSize: 12,
+    marginTop: 2,
+    fontStyle: 'italic',
+    opacity: 0.7,
   },
   pillCountContainer: {
     flexDirection: 'row',

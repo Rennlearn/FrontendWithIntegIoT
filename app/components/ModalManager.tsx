@@ -160,3 +160,6 @@ const styles = StyleSheet.create({
   },
 });
 
+
+// Default export for Expo Router compatibility
+export default ModalManagerProvider;

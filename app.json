@@ -39,6 +39,13 @@
           "resizeMode": "contain",
           "backgroundColor": "#ffffff"
         }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "The app needs access to your photos to select pill images for verification.",
+          "cameraPermission": "The app needs access to your camera to take photos of pills for verification."
+        }
       ]
     ],
     "experiments": {

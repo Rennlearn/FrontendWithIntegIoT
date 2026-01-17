@@ -50,14 +50,27 @@ class VerificationService {
   }
 
   async triggerCapture(containerId: string, pillConfig: { count?: number; label?: string }, retryCount: number = 0): Promise<{ ok: boolean; message: string }> {
+    // DATA INTEGRITY: Validate containerId before processing
+    if (!containerId || typeof containerId !== 'string') {
+      console.error(`[VerificationService] ❌ Invalid containerId: ${containerId}`);
+      return { ok: false, message: 'Invalid container ID' };
+    }
+    
+    // Normalize and validate container ID format
+    const normalized = containerId.trim().toLowerCase();
+    if (!normalized.startsWith('container') || !['container1', 'container2', 'container3'].includes(normalized)) {
+      console.error(`[VerificationService] ❌ Invalid container ID format: ${containerId}. Must be container1, container2, or container3`);
+      return { ok: false, message: `Invalid container ID format: ${containerId}` };
+    }
+    
     const maxRetries = 2;
     const retryDelay = 2000; // 2 seconds
     
     try {
       const base = await this.getBackendUrl();
-      console.log(`[VerificationService] Triggering capture for ${containerId}${retryCount > 0 ? ` (retry ${retryCount}/${maxRetries})` : ''}`);
+      console.log(`[VerificationService] Triggering capture for ${normalized}${retryCount > 0 ? ` (retry ${retryCount}/${maxRetries})` : ''}`);
       console.log(`[VerificationService] Expected config: count=${pillConfig.count || 0}, label=${pillConfig.label || 'none'}`);
-      console.log(`[VerificationService] Using endpoint: ${base}/trigger-capture/${containerId}`);
+      console.log(`[VerificationService] Using endpoint: ${base}/trigger-capture/${normalized}`);
       
       // Add timeout to prevent hanging
       const controller = new AbortController();
@@ -67,7 +80,8 @@ class VerificationService {
         // Use the dedicated trigger-capture endpoint
         // Send pill config in request body so backend can use it if not in memory
         // IMPORTANT: Include both count AND label for proper verification
-        const response = await fetch(`${base}/trigger-capture/${containerId}`, {
+        // DATA INTEGRITY: Use normalized containerId
+        const response = await fetch(`${base}/trigger-capture/${normalized}`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -132,6 +146,14 @@ class VerificationService {
           message: error instanceof Error ? error.message : 'Unknown error' 
         };
       }
+    } catch (error) {
+      // Handle errors from getBackendUrl() or other outer scope errors
+      console.error('[VerificationService] Error in triggerCapture:', error);
+      return {
+        ok: false,
+        message: error instanceof Error ? error.message : 'Unknown error occurred'
+      };
+    }
   }
 
   /**
@@ -140,15 +162,29 @@ class VerificationService {
    * @returns Promise with verification result
    */
   async getVerificationResult(containerId: string): Promise<VerificationResult> {
+    // DATA INTEGRITY: Validate containerId before processing
+    if (!containerId || typeof containerId !== 'string') {
+      console.error(`[VerificationService] ❌ Invalid containerId: ${containerId}`);
+      return { success: false, message: 'Invalid container ID' };
+    }
+    
+    // Normalize and validate container ID format
+    const normalized = containerId.trim().toLowerCase();
+    if (!normalized.startsWith('container') || !['container1', 'container2', 'container3'].includes(normalized)) {
+      console.error(`[VerificationService] ❌ Invalid container ID format: ${containerId}. Must be container1, container2, or container3`);
+      return { success: false, message: `Invalid container ID format: ${containerId}` };
+    }
+    
     try {
-      console.log(`[VerificationService] Getting verification result for ${containerId}`);
+      console.log(`[VerificationService] Getting verification result for ${normalized}`);
       
       // Add timeout to prevent hanging
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 8000); // 8 second timeout
       
       const base = await this.getBackendUrl();
-      const response = await fetch(`${base}/containers/${containerId}/verification`, {
+      // DATA INTEGRITY: Use normalized containerId
+      const response = await fetch(`${base}/containers/${normalized}/verification`, {
         method: 'GET',
         headers: {
           'Content-Type': 'application/json',
@@ -160,7 +196,7 @@ class VerificationService {
 
       if (!response.ok) {
         if (response.status === 404) {
-          console.log(`[VerificationService] No verification found for ${containerId}`);
+          console.log(`[VerificationService] No verification found for ${normalized}`);
           return { success: false, message: 'No verification result yet' };
         }
         const errorText = await response.text();

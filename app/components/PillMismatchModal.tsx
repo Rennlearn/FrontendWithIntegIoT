@@ -91,10 +91,12 @@ const PillMismatchModal: React.FC<PillMismatchModalProps> = ({
     // Send stop commands in background (non-blocking, fire and forget)
     (async () => {
       try {
+      // IOT COMMUNICATION STABILITY: Check connection before sending to avoid timeout spam
       const isConnected = await BluetoothService.isConnectionActive();
       if (!isConnected) {
-          console.warn('[PillMismatchModal] Bluetooth not connected, skipping stop commands');
-        return;
+          // Bluetooth not connected - silently skip (expected when Bluetooth is off)
+          // Don't log warning to reduce console spam
+          return;
       }
       
       console.log(`[PillMismatchModal] 📤 Sending ALARMSTOP command to Arduino...`);

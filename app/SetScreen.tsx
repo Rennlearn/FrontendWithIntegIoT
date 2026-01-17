@@ -969,7 +969,7 @@ const SetScreen = () => {
                 if (syncErr instanceof Error && syncErr.name === 'AbortError') {
                   console.warn('[SetScreen] ⚠️ Sync request timed out (non-critical)');
                 } else {
-                  console.warn('[SetScreen] ⚠️ Failed to sync schedules to backend alarm system:', syncErr);
+                console.warn('[SetScreen] ⚠️ Failed to sync schedules to backend alarm system:', syncErr);
                 }
               }
             } catch (err) {
@@ -981,7 +981,7 @@ const SetScreen = () => {
                 // Could implement retry logic here if needed
               } else {
                 // Re-throw non-timeout errors to be caught by outer catch
-                throw err;
+              throw err;
               }
             }
           } catch (err) {
@@ -1641,6 +1641,11 @@ const SetScreen = () => {
                     <Text style={[styles.medicationStrength, { color: theme.text }]}>
                       {item.dosage} {item.form}
                     </Text>
+                    {item.manufacturer && (
+                      <Text style={[styles.medicationManufacturer, { color: theme.textSecondary }]}>
+                        Manufacturer: {item.manufacturer}
+                      </Text>
+                    )}
                     <Text style={[styles.medicationDescription, { color: theme.text }]} numberOfLines={2}>
                       {item.description}
                     </Text>
@@ -2105,6 +2110,12 @@ const styles = StyleSheet.create({
     fontSize: 13,
     marginBottom: 3,
     opacity: 0.8,
+  },
+  medicationManufacturer: {
+    fontSize: 12,
+    marginBottom: 3,
+    opacity: 0.7,
+    fontStyle: 'italic',
   },
   medicationDescription: {
     fontSize: 11,

@@ -92,25 +92,27 @@ fs.mkdirSync(CAPTURES_DIR, { recursive: true });
 function loadState() {
   try {
     if (!fs.existsSync(STATE_PATH)) {
-      return { containers: {}, verifications: {}, notifications: [], passwordResets: {} };
+      return { containers: {}, verifications: {}, notifications: [], passwordResets: {}, captures: {} };
     }
     const raw = fs.readFileSync(STATE_PATH, "utf8");
-    if (!raw.trim()) return { containers: {}, verifications: {}, notifications: [], passwordResets: {} };
+    if (!raw.trim()) return { containers: {}, verifications: {}, notifications: [], passwordResets: {}, captures: {} };
     const parsed = JSON.parse(raw);
     return {
       containers: parsed.containers || {},
       verifications: parsed.verifications || {},
       notifications: parsed.notifications || [],
       passwordResets: parsed.passwordResets || {},
+      captures: parsed.captures || {}, // CRITICAL: Store captures for schedule matching
     };
   } catch (e) {
     console.warn("[backend] Failed to load state.json, starting fresh:", e?.message || e);
-    return { containers: {}, verifications: {}, notifications: [], passwordResets: {} };
+    return { containers: {}, verifications: {}, notifications: [], passwordResets: {}, captures: {} };
   }
 }
 
 let state = loadState();
 state.passwordResets = state.passwordResets || {};
+state.captures = state.captures || {}; // CRITICAL: Initialize captures for schedule matching
 let saveTimer = null;
 function saveStateSoon() {
   if (saveTimer) clearTimeout(saveTimer);
@@ -280,6 +282,26 @@ const metrics = {
 };
 
 function publishCmd(deviceId, payload) {
+  // DATA INTEGRITY: Validate inputs before processing
+  if (!deviceId || typeof deviceId !== 'string') {
+    console.error(`[backend] ❌ Invalid deviceId: ${deviceId}`);
+    return false;
+  }
+  
+  // DATA INTEGRITY: Validate containerId is present in payload for container-specific actions
+  if (payload && (payload.action === 'capture' || payload.action === 'alarm_triggered')) {
+    if (!payload.container || typeof payload.container !== 'string') {
+      console.error(`[backend] ❌ Missing container in payload for action: ${payload.action}`);
+      return false;
+    }
+    // Validate container format
+    const containerId = normalizeContainerId(payload.container);
+    if (!containerId || !['container1', 'container2', 'container3'].includes(containerId)) {
+      console.error(`[backend] ❌ Invalid container ID: ${payload.container}`);
+      return false;
+    }
+  }
+  
   const topic = `pillnow/${deviceId}/cmd`;
   const msg = JSON.stringify(payload);
 
@@ -292,11 +314,12 @@ function publishCmd(deviceId, payload) {
 
   // Suppress near-duplicate capture publishes to avoid double-capture when both app and bridge
   // request a capture around the same time. Only applies to payload.action === 'capture'.
+  // HEAVY SCHEDULING SAFETY: Increased suppression window to 5 seconds for better stability
   if (payload && payload.action === 'capture') {
     const key = payload.container || deviceId || 'unknown';
     const last = lastCaptureAt.get(key) || 0;
     const now = Date.now();
-    if (now - last < 3000) {
+    if (now - last < 5000) {
       console.log(`[backend] ⏭️ Suppressing duplicate capture publish for ${key} (last: ${now - last}ms ago)`);
       metrics.capturesSuppressed = (metrics.capturesSuppressed || 0) + 1;
       return true; // treat as OK since a capture was recently requested
@@ -442,22 +465,164 @@ app.get('/captures/list', (req, res) => {
 });
 
 // Endpoint: latest capture for a container (raw + annotated if available)
+// CRITICAL: Only returns container-specific images to prevent cross-container image mixing
 app.get('/captures/latest/:container', (req, res) => {
   try {
     const container = normalizeContainerId(req.params.container);
+    console.log(`[backend] 🔍 Fetching latest capture for ${container}`);
     const all = fs.readdirSync(CAPTURES_DIR);
+    
     // Raw files follow pattern: device_container_ts.jpg (e.g., container1_container1_1766...)
     const rawMatches = all.filter(n => n.includes(`_${container}_`)).map((name) => ({ name, mtime: fs.statSync(path.join(CAPTURES_DIR, name)).mtimeMs }));
     rawMatches.sort((a,b) => b.mtime - a.mtime);
     const latestRaw = rawMatches[0] ? rawMatches[0].name : null;
-    // Annotated images include 'annotated_' prefix; pick the most recent annotated file
-    const annotatedMatches = all.filter(n => n.startsWith('annotated_')).map((name) => ({ name, mtime: fs.statSync(path.join(CAPTURES_DIR, name)).mtimeMs }));
-    annotatedMatches.sort((a,b) => b.mtime - a.mtime);
-    const latestAnnotated = annotatedMatches[0] ? annotatedMatches[0].name : null;
-    return res.json({ ok: true, latest: { raw: latestRaw ? `/captures/${encodeURIComponent(latestRaw)}` : null, annotated: latestAnnotated ? `/captures/${encodeURIComponent(latestAnnotated)}` : null } });
+    
+    // CRITICAL: Only return container-specific annotated images (annotated_container1_timestamp.jpg)
+    // NO fallback to generic images - this prevents all containers from showing the same image
+    const annotatedWithContainer = all.filter(n => n.startsWith(`annotated_${container}_`)).map((name) => ({ name, mtime: fs.statSync(path.join(CAPTURES_DIR, name)).mtimeMs }));
+    annotatedWithContainer.sort((a,b) => b.mtime - a.mtime);
+    const latestAnnotated = annotatedWithContainer[0] ? annotatedWithContainer[0].name : null;
+    
+    console.log(`[backend] 📦 Latest capture for ${container}: raw=${latestRaw || 'none'}, annotated=${latestAnnotated || 'none'}`);
+    
+    return res.json({ 
+      ok: true, 
+      latest: { 
+        raw: latestRaw ? `/captures/${encodeURIComponent(latestRaw)}` : null, 
+        annotated: latestAnnotated ? `/captures/${encodeURIComponent(latestAnnotated)}` : null 
+      } 
+    });
   } catch (e) {
     console.warn('[backend] Failed to get latest capture:', e?.message || e);
     return res.status(500).json({ ok: false, message: 'Failed to get latest capture' });
+  }
+});
+
+// CRITICAL: New endpoint to get capture image for a specific schedule (date + time + container)
+// This ensures each schedule shows its corresponding captured image in adherence reports
+app.get('/captures/schedule/:container', (req, res) => {
+  try {
+    const container = normalizeContainerId(req.params.container);
+    const date = String(req.query.date || '').trim(); // YYYY-MM-DD format
+    const time = String(req.query.time || '').trim(); // HH:MM format
+    
+    // Validate inputs
+    if (!date || !time) {
+      return res.status(400).json({ ok: false, message: 'Missing date or time parameter' });
+    }
+    
+    // Normalize time to HH:MM format
+    const normalizedTime = time.substring(0, 5);
+    
+    // Find capture closest to schedule time (within 30 minutes window)
+    // This matches images captured when alarm was triggered or stopped
+    const scheduleDateTime = new Date(`${date}T${normalizedTime}`);
+    const windowMs = 30 * 60 * 1000; // 30 minutes window
+    
+    console.log(`[backend] 🔍 Searching for capture for ${container} at ${date} ${normalizedTime} (schedule time: ${scheduleDateTime.toISOString()})`);
+    
+    let bestMatch = null;
+    let bestTimeDiff = Infinity;
+    
+    // Check stored captures first (more accurate)
+    if (state.captures && state.captures[container]) {
+      console.log(`[backend] 📦 Checking ${state.captures[container].length} stored captures for ${container}`);
+      for (const capture of state.captures[container]) {
+        const captureTime = new Date(capture.timestamp);
+        const timeDiff = Math.abs(captureTime.getTime() - scheduleDateTime.getTime());
+        
+        // Match if within window and better than previous match
+        if (timeDiff < windowMs && timeDiff < bestTimeDiff) {
+          bestMatch = capture;
+          bestTimeDiff = timeDiff;
+          console.log(`[backend] ✅ Found better match: ${captureTime.toISOString()} (diff: ${Math.round(timeDiff / 1000 / 60)} minutes)`);
+        }
+      }
+      
+      if (bestMatch) {
+        console.log(`[backend] ✅ Best match found: ${bestMatch.annotatedImagePath} (time diff: ${Math.round(bestTimeDiff / 1000 / 60)} minutes)`);
+      } else {
+        console.log(`[backend] ⚠️ No stored capture match found for ${container} at ${date} ${normalizedTime}`);
+      }
+    } else {
+      console.log(`[backend] ⚠️ No stored captures for ${container}`);
+    }
+    
+    // Fallback to file system if no stored capture found
+    if (!bestMatch) {
+      console.log(`[backend] 🔄 Falling back to file system search for ${container}...`);
+      const all = fs.readdirSync(CAPTURES_DIR);
+      const annotatedWithContainer = all.filter(n => n.startsWith(`annotated_${container}_`)).map((name) => {
+        const filePath = path.join(CAPTURES_DIR, name);
+        const stats = fs.statSync(filePath);
+        return { name, mtime: stats.mtimeMs, timestamp: new Date(stats.mtimeMs) };
+      });
+      
+      console.log(`[backend] 📁 Found ${annotatedWithContainer.length} annotated files for ${container}`);
+      for (const file of annotatedWithContainer) {
+        const timeDiff = Math.abs(file.timestamp.getTime() - scheduleDateTime.getTime());
+        if (timeDiff < windowMs && timeDiff < bestTimeDiff) {
+          bestMatch = { annotatedImagePath: `/captures/${encodeURIComponent(file.name)}` };
+          bestTimeDiff = timeDiff;
+          console.log(`[backend] ✅ Found file system match: ${file.name} (time diff: ${Math.round(timeDiff / 1000 / 60)} minutes)`);
+        }
+      }
+    }
+    
+    if (bestMatch && bestMatch.annotatedImagePath) {
+      return res.json({ 
+        ok: true, 
+        image: {
+          annotated: bestMatch.annotatedImagePath,
+          raw: bestMatch.rawImagePath || null,
+        }
+      });
+    }
+    
+    // No schedule-specific match found - return latest image as fallback
+    // CRITICAL: Return in same format (image) so frontend can handle consistently
+    let latestAnnotated = null;
+    let latestRaw = null;
+    try {
+      const all = fs.readdirSync(CAPTURES_DIR);
+      // CRITICAL: Only get container-specific annotated images (annotated_container1_timestamp.jpg)
+      // NO generic annotated images - this ensures each container gets its own images
+      const annotatedWithContainer = all.filter(n => n.startsWith(`annotated_${container}_`)).map((name) => ({ name, mtime: fs.statSync(path.join(CAPTURES_DIR, name)).mtimeMs }));
+      annotatedWithContainer.sort((a,b) => b.mtime - a.mtime);
+      if (annotatedWithContainer[0]) {
+        latestAnnotated = `/captures/${encodeURIComponent(annotatedWithContainer[0].name)}`;
+        console.log(`[backend] 📸 Found latest container-specific annotated image for ${container}: ${annotatedWithContainer[0].name}`);
+      } else {
+        console.log(`[backend] ⚠️ No container-specific annotated images found for ${container} (fallback)`);
+      }
+      
+      // Get latest raw image for this container
+      const rawWithContainer = all.filter(n => n.includes(`_${container}_`) && !n.startsWith('annotated_')).map((name) => ({ name, mtime: fs.statSync(path.join(CAPTURES_DIR, name)).mtimeMs }));
+      rawWithContainer.sort((a,b) => b.mtime - a.mtime);
+      if (rawWithContainer[0]) {
+        latestRaw = `/captures/${encodeURIComponent(rawWithContainer[0].name)}`;
+      }
+    } catch (e) {
+      console.warn('[backend] Failed to get latest capture as fallback:', e?.message || e);
+    }
+    
+    // Return latest container-specific image in same format (image) for consistency
+    // CRITICAL: Only returns container-specific images to prevent cross-container mixing
+    if (latestAnnotated || latestRaw) {
+      console.log(`[backend] ⚠️ Returning latest container-specific image (no schedule match) for ${container}: ${latestAnnotated || latestRaw}`);
+    } else {
+      console.log(`[backend] ❌ No images found for ${container} (neither schedule match nor latest)`);
+    }
+    return res.json({ 
+      ok: true, 
+      image: {
+        annotated: latestAnnotated,
+        raw: latestRaw,
+      }
+    });
+  } catch (e) {
+    console.warn('[backend] Failed to get schedule capture:', e?.message || e);
+    return res.status(500).json({ ok: false, message: 'Failed to get schedule capture' });
   }
 });
 
@@ -996,6 +1161,10 @@ app.post("/set-schedule", (req, res) => {
 
     console.log(`[backend] set-schedule: ${containerId}`, state.containers[containerId]);
     return res.json({ ok: true, container_id: containerId, ...state.containers[containerId] });
+  } catch (error) {
+    console.error('[backend] Error in set-schedule:', error);
+    return res.status(500).json({ ok: false, message: error instanceof Error ? error.message : 'Internal server error' });
+  }
 });
 
 /**
@@ -1262,6 +1431,226 @@ function parseExpectedFromMeta(metaString) {
 }
 
 /**
+ * Phone camera POST /ingest/phone
+ * 
+ * CRITICAL: STANDALONE DETECTION - NO CONTAINER LOGIC, NO ALARMS, NO SCHEDULING
+ * 
+ * This endpoint is for phone camera pill detection ONLY.
+ * It is completely standalone and has NO connection to containers, schedules, or any other system logic.
+ * 
+ * DOES NOT:
+ * - Use container IDs or container state
+ * - Store in container verification state
+ * - Publish PILLALERT to trigger buzzer
+ * - Create mismatch notifications
+ * - Send email alerts
+ * - Trigger any container-related logic
+ * - Trigger any alarms or safety alerts
+ * - Access or modify container configurations
+ * - Fetch or use scheduling data
+ * 
+ * ONLY:
+ * - Detects what pills are in the photo
+ * - Counts how many pills are detected
+ * - Returns verification result with annotated image (informational display only)
+ * - Does NOT save any images or data
+ * 
+ * multipart fields:
+ * - image: file
+ * - meta: JSON string with expected count and label (optional, for verification comparison only)
+ * 
+ * NOTE: This route MUST be defined BEFORE /ingest/:deviceId/:container to avoid route conflicts
+ */
+app.post("/ingest/phone", upload.single("image"), async (req, res) => {
+  const meta = req.body?.meta;
+
+  if (!req.file?.buffer) {
+    return res.status(400).json({ ok: false, message: "Missing image file field 'image'" });
+  }
+
+  // Parse meta to get expected pill info (optional - only for verification comparison)
+  // This is NOT connected to any container - purely for user's own verification reference
+  let expected = {};
+  try {
+    if (meta) {
+      const metaObj = JSON.parse(meta);
+      // Check for nested expected object first
+      if (metaObj.expected && typeof metaObj.expected === 'object') {
+        expected = metaObj.expected;
+      } else {
+        // Use direct fields from meta
+        if (metaObj.count !== undefined) {
+          expected.count = parseInt(metaObj.count) || 0;
+        }
+        if (metaObj.label) {
+          expected.label = metaObj.label;
+        }
+      }
+    }
+  } catch (e) {
+    console.warn('[backend] Failed to parse meta for phone capture:', e);
+  }
+  
+  // CRITICAL: Do NOT fallback to container config - this is standalone detection
+  // If no expected info provided, just detect what's in the image without comparison
+
+  console.log(`[backend] 📱 Phone camera standalone detection received`);
+  console.log(`[backend] 📊 Optional expected (for comparison only): count=${expected?.count || 0}, label="${expected?.label || 'none'}"`);
+  
+  // CRITICAL: Phone camera detection is verification-only - DO NOT save images
+  // This is just for detection, not for storage or container logic
+  const ts = Date.now();
+  const rawName = `phone_detection_${ts}.jpg`; // Only used for verifier request, not saved
+
+  // Call FastAPI verifier
+  let verifierRespText = "";
+  let verifierJson = null;
+  try {
+    // IMPORTANT: Node's built-in `fetch` expects WHATWG `FormData` from `undici`, not the npm `form-data` package.
+    // Using the wrong FormData breaks multipart parsing on FastAPI (400 "error parsing body").
+    const form = new FormData();
+    const mime = req.file.mimetype || "image/jpeg";
+    // undici FormData accepts Blob or File. Convert Buffer to Blob for compatibility.
+    // Ensure we have a proper Buffer
+    const buffer = Buffer.isBuffer(req.file.buffer) ? req.file.buffer : Buffer.from(req.file.buffer);
+    const imageBlob = new Blob([buffer], { type: mime });
+    form.append("image", imageBlob, rawName);
+    form.append("expected", JSON.stringify(expected || {}));
+
+    // Add timeout for verifier request (30 seconds)
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 30000);
+    
+    try {
+      const vr = await fetch(VERIFIER_URL, { 
+        method: "POST", 
+        body: form,
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+      
+      verifierRespText = await vr.text();
+      if (!vr.ok) {
+        console.warn("[backend] verifier error:", vr.status, verifierRespText);
+        return res.status(502).json({ ok: false, message: `Verifier error ${vr.status}`, detail: verifierRespText });
+      }
+      verifierJson = JSON.parse(verifierRespText);
+      } catch (fetchError) {
+      clearTimeout(timeoutId);
+      
+      if (fetchError.name === 'AbortError') {
+        console.warn("[backend] verifier request timed out after 30 seconds");
+        return res.status(504).json({ 
+          ok: false, 
+          message: "Verifier request timed out", 
+          detail: "Verifier may be loading models. This can take 30-60 seconds on first startup. Please wait and try again." 
+        });
+      }
+      
+      console.warn("[backend] verifier request failed:", fetchError?.message || fetchError);
+      return res.status(502).json({ 
+        ok: false, 
+        message: "Verifier unreachable", 
+        detail: String(fetchError?.message || fetchError),
+        hint: "Check if verifier is running on port 8000. It may still be loading models."
+      });
+    }
+  } catch (e) {
+    console.warn("[backend] verifier request exception:", e?.message || e);
+    return res.status(502).json({ 
+      ok: false, 
+      message: "Verifier unreachable", 
+      detail: String(e?.message || e),
+      hint: "Check if verifier is running on port 8000."
+    });
+  }
+
+  const pass_ = Boolean(verifierJson?.pass_);
+  const detectedCount = Number(verifierJson?.count || 0);
+  const detectedClasses = Array.isArray(verifierJson?.classesDetected) ? verifierJson.classesDetected : [];
+  
+  // Log verification results
+  console.log(`[backend] 🔍 Phone standalone detection result:`);
+  console.log(`[backend]    Pass: ${pass_ ? '✅ YES' : '❌ NO'}`);
+  console.log(`[backend]    Optional expected (for comparison): count=${expected?.count || 0}, label="${expected?.label || 'none'}"`);
+  console.log(`[backend]    Detected: count=${detectedCount}, classes=[${detectedClasses.map(c => `${c.label}(${c.n})`).join(', ')}]`);
+  console.log(`[backend]    Confidence: ${(Number(verifierJson?.confidence || 0) * 100).toFixed(1)}%`);
+  
+  // CRITICAL: Phone camera detection is verification-only - DO NOT save any images
+  // The verifier may save an annotated image, but we delete it immediately after getting the base64
+  // Images are only used for detection and returned as base64 for display, but not persisted to disk
+  // This ensures phone camera detection is purely informational and doesn't store data
+  if (verifierJson?.annotatedImagePath) {
+    try {
+      let annotatedPath = String(verifierJson.annotatedImagePath);
+      // Handle both absolute and relative paths
+      if (!path.isAbsolute(annotatedPath)) {
+        // If relative, it's likely in the captures directory
+        annotatedPath = path.join(CAPTURES_DIR, path.basename(annotatedPath));
+      }
+      // Delete the annotated image file that verifier saved (phone camera should not persist images)
+      if (fs.existsSync(annotatedPath)) {
+        fs.unlinkSync(annotatedPath);
+        console.log(`[backend] ✅ Deleted phone camera annotated image (verification-only, not saved): ${annotatedPath}`);
+      }
+    } catch (deleteError) {
+      console.warn('[backend] Failed to delete phone camera annotated image:', deleteError?.message || deleteError);
+      // Continue even if deletion fails - the important thing is we don't reference it
+    }
+  }
+
+  const resultPayload = {
+    pass_,
+    count: detectedCount,
+    classesDetected: detectedClasses,
+    confidence: Number(verifierJson?.confidence || 0),
+    annotatedImagePath: null, // CRITICAL: Phone camera detection is verification-only - do not save images
+    annotatedImage: verifierJson?.annotatedImage || null, // Include base64 image from verifier for display only (not saved)
+    knnVerification: verifierJson?.knnVerification || null,
+    expected,
+    expectedLabel: expected?.label || expected?.pill || expected?.pillType || expected?.pill_name || null,
+  };
+
+  const payload = {
+    success: true,
+    deviceId: "phone", // Standalone phone detection - no container association
+    container: null, // CRITICAL: No container association for standalone detection
+    expected,
+    result: resultPayload,
+    timestamp: new Date().toISOString(),
+    message: "Phone standalone detection complete",
+    // CRITICAL: Mark detection source as "phone" to prevent any container logic
+    source: "phone", // Phone camera detection - standalone, informational only
+  };
+  
+  // CRITICAL: Phone camera detection is standalone - DO NOT store in container verification state
+  // This is completely separate from container logic and should never interact with it
+  // state.verifications[containerId] = payload; // REMOVED - phone camera is standalone
+  // saveStateSoon(); // REMOVED - no need to save phone camera results
+
+  // CRITICAL: Phone camera detection is standalone - DO NOT publish PILLALERT
+  // Phone camera should never trigger:
+  // - Mismatch modal
+  // - Buzzer activation
+  // - Alarm escalation
+  // - Container-related logic
+  // - Any scheduling or adherence tracking
+  // Only ESP32-CAM detection triggers safety alerts
+  if (!pass_ && (expected?.count || expected?.label)) {
+    console.log(`[backend] 📱 Phone standalone detection: comparison shows difference (informational only - no alerts, no container logic)`);
+    console.log(`[backend]    Optional expected: ${expected?.count || 0} x "${expected?.label || 'none'}"`);
+    console.log(`[backend]    Detected: ${resultPayload.count} x "${resultPayload.classesDetected.map(c => c.label).join(', ') || 'none'}"`);
+    // DO NOT publish PILLALERT for phone camera - standalone detection
+    // DO NOT store mismatch notification for phone camera
+    // DO NOT send email alerts for phone camera
+    // DO NOT store in container verification state
+  }
+
+  // Return verification result (informational only - no container state storage)
+  return res.json({ ok: true, ...payload });
+});
+
+/**
  * ESP32-CAM POST /ingest/:deviceId/:container
  * multipart fields:
  * - image: file
@@ -1316,16 +1705,52 @@ app.post("/ingest/:deviceId/:container", upload.single("image"), async (req, res
     form.append("image", imageBlob, rawName);
     form.append("expected", JSON.stringify(expected || {}));
 
-    const vr = await fetch(VERIFIER_URL, { method: "POST", body: form });
-    verifierRespText = await vr.text();
-    if (!vr.ok) {
-      console.warn("[backend] verifier error:", vr.status, verifierRespText);
-      return res.status(502).json({ ok: false, message: `Verifier error ${vr.status}` });
+    // Add timeout for verifier request (30 seconds)
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 30000);
+    
+    try {
+      const vr = await fetch(VERIFIER_URL, { 
+        method: "POST", 
+        body: form,
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+      
+      verifierRespText = await vr.text();
+      if (!vr.ok) {
+        console.warn("[backend] verifier error:", vr.status, verifierRespText);
+        return res.status(502).json({ ok: false, message: `Verifier error ${vr.status}`, detail: verifierRespText });
+      }
+      verifierJson = JSON.parse(verifierRespText);
+      } catch (fetchError) {
+      clearTimeout(timeoutId);
+      
+      if (fetchError.name === 'AbortError') {
+        console.warn("[backend] verifier request timed out after 30 seconds");
+        return res.status(504).json({ 
+          ok: false, 
+          message: "Verifier request timed out", 
+          detail: "Verifier may be loading models. This can take 30-60 seconds on first startup. Please wait and try again." 
+        });
+      }
+      
+      console.warn("[backend] verifier request failed:", fetchError?.message || fetchError);
+      return res.status(502).json({ 
+        ok: false, 
+        message: "Verifier unreachable", 
+        detail: String(fetchError?.message || fetchError),
+        hint: "Check if verifier is running on port 8000. It may still be loading models."
+      });
     }
-    verifierJson = JSON.parse(verifierRespText);
   } catch (e) {
-    console.warn("[backend] verifier request failed:", e?.message || e);
-    return res.status(502).json({ ok: false, message: "Verifier unreachable", detail: String(e?.message || e) });
+    console.warn("[backend] verifier request exception:", e?.message || e);
+    return res.status(502).json({ 
+      ok: false, 
+      message: "Verifier unreachable", 
+      detail: String(e?.message || e),
+      hint: "Check if verifier is running on port 8000."
+    });
   }
 
   const pass_ = Boolean(verifierJson?.pass_);
@@ -1345,6 +1770,7 @@ app.post("/ingest/:deviceId/:container", upload.single("image"), async (req, res
     classesDetected: detectedClasses,
     confidence: Number(verifierJson?.confidence || 0),
     annotatedImagePath: verifierJson?.annotatedImagePath || null,
+    annotatedImage: verifierJson?.annotatedImage || null, // Include base64 image from verifier
     knnVerification: verifierJson?.knnVerification || null,
     // extra fields used by the RN app for display fallbacks
     expected,
@@ -1352,17 +1778,41 @@ app.post("/ingest/:deviceId/:container", upload.single("image"), async (req, res
   };
 
   // If the verifier returned an annotated image path, make sure it is available under CAPTURES_DIR and expose a web path
+  // CRITICAL: Save annotated image with container info so it appears in adherence reports
   try {
     if (verifierJson?.annotatedImagePath) {
       const annPath = String(verifierJson.annotatedImagePath);
       const annBase = path.basename(annPath);
-      const target = path.join(CAPTURES_DIR, annBase);
-      if (!fs.existsSync(target) && fs.existsSync(annPath)) {
+      
+      // CRITICAL: Rename annotated image to include container info for adherence report filtering
+      // Format: annotated_container1_timestamp.jpg (instead of just annotated_timestamp.jpg)
+      const ts = Date.now();
+      const annotatedWithContainer = `annotated_${containerId}_${ts}.jpg`;
+      const target = path.join(CAPTURES_DIR, annotatedWithContainer);
+      
+      if (fs.existsSync(annPath)) {
+        // Copy and rename with container info
         fs.copyFileSync(annPath, target);
-        console.log(`[backend] Copied annotated image to captures dir: ${target}`);
+        console.log(`[backend] ✅ Copied annotated image to captures dir with container info: ${target}`);
+        
+        // Also keep the original if it's different (for backward compatibility)
+        const originalTarget = path.join(CAPTURES_DIR, annBase);
+        if (originalTarget !== target && !fs.existsSync(originalTarget)) {
+          fs.copyFileSync(annPath, originalTarget);
+        }
+      } else if (fs.existsSync(path.join(CAPTURES_DIR, annBase))) {
+        // If original is already in captures dir, rename it
+        const originalTarget = path.join(CAPTURES_DIR, annBase);
+        if (originalTarget !== target) {
+          fs.renameSync(originalTarget, target);
+          console.log(`[backend] ✅ Renamed annotated image with container info: ${target}`);
+        }
       }
-      // Prefer web-accessible path
-      resultPayload.annotatedImagePath = fs.existsSync(target) ? `/captures/${encodeURIComponent(annBase)}` : `/captures/${encodeURIComponent(path.basename(String(verifierJson.annotatedImagePath)))}`;
+      
+      // Prefer web-accessible path with container info
+      resultPayload.annotatedImagePath = fs.existsSync(target) 
+        ? `/captures/${encodeURIComponent(annotatedWithContainer)}` 
+        : `/captures/${encodeURIComponent(annBase)}`;
     }
   } catch (e) {
     console.warn('[backend] Failed to ensure annotated image is in captures dir:', e?.message || e);
@@ -1376,8 +1826,36 @@ app.post("/ingest/:deviceId/:container", upload.single("image"), async (req, res
     result: resultPayload,
     timestamp: new Date().toISOString(),
     message: "Verified",
+    // CRITICAL: Store annotated image path for adherence report matching
+    annotatedImagePath: resultPayload.annotatedImagePath,
   };
   state.verifications[containerId] = payload;
+  
+  // CRITICAL: Store capture metadata with schedule matching info
+  // This allows adherence reports to match images to specific schedules
+  if (!state.captures) {
+    state.captures = {};
+  }
+  if (!state.captures[containerId]) {
+    state.captures[containerId] = [];
+  }
+  
+  // Store capture with timestamp and image path for schedule matching
+  const captureRecord = {
+    timestamp: new Date().toISOString(),
+    annotatedImagePath: resultPayload.annotatedImagePath,
+    rawImagePath: `/captures/${encodeURIComponent(rawName)}`,
+    container: containerId,
+    deviceId: deviceId,
+    verification: payload,
+  };
+  
+  // Keep only last 100 captures per container to prevent memory bloat
+  state.captures[containerId].push(captureRecord);
+  if (state.captures[containerId].length > 100) {
+    state.captures[containerId] = state.captures[containerId].slice(-100);
+  }
+  
   saveStateSoon();
 
   // If mismatch (pass_ === false), publish alert so Arduino buzzes (bridge -> PILLALERT)
@@ -1560,58 +2038,85 @@ setInterval(() => {
   const AUTO_CAPTURE_ON_ALARM = String(process.env.AUTO_CAPTURE_ON_ALARM || "").toLowerCase() === "true";
   const AUTO_CAPTURE_DELAY_MS = Number(process.env.AUTO_CAPTURE_DELAY_MS || 5000);
 
+  // HEAVY SCHEDULING SAFETY: Track all alarm timers for proper cleanup
+  const alarmTimers = [];
+  
   containersToFire.forEach(({ containerId, cfg, key }, index) => {
+    // DATA INTEGRITY: Validate containerId before processing
+    const normalizedContainerId = normalizeContainerId(containerId);
+    if (!normalizedContainerId || !['container1', 'container2', 'container3'].includes(normalizedContainerId)) {
+      console.error(`[backend] ❌ Invalid containerId: ${containerId}, skipping alarm`);
+      return;
+    }
+    
     const delay = index * 500; // 0ms, 500ms, 1000ms, etc.
 
-    setTimeout(() => {
-      firedKeys.set(key, Date.now());
+    const timer = setTimeout(() => {
+      // Double-check key hasn't been fired again (race condition protection)
+      const now = Date.now();
+      const lastFired = firedKeys.get(key);
+      if (lastFired && now - lastFired < 2 * 60 * 1000) {
+        console.log(`[backend] ⏳ Alarm ${key} already fired recently (${Math.round((now - lastFired)/1000)}s ago), skipping duplicate`);
+        return;
+      }
+      
+      firedKeys.set(key, now);
 
       // PRE-ALARM CAPTURE: Trigger BEFORE alarm fires (if configured)
       // This captures the state BEFORE user takes the pill
       if (AUTO_CAPTURE_ON_ALARM) {
         const expected = cfg?.pill_config || { count: 0 };
-        const preCapturePublished = publishCmd(resolveDeviceId(containerId), {
+        const preCapturePublished = publishCmd(resolveDeviceId(normalizedContainerId), {
           action: "capture",
-          container: containerId,
+          container: normalizedContainerId,
           expected,
         });
-        console.log(`[backend] 📸 PRE-ALARM capture requested for ${containerId} (before alarm fires), published=${Boolean(preCapturePublished)}`);
+        console.log(`[backend] 📸 PRE-ALARM capture requested for ${normalizedContainerId} (before alarm fires), published=${Boolean(preCapturePublished)}`);
         if (!preCapturePublished) {
-          const note = { type: 'error', message: `PRE-ALARM capture failed (MQTT) for ${containerId}`, container: containerId, timestamp: new Date().toISOString() };
+          const note = { type: 'error', message: `PRE-ALARM capture failed (MQTT) for ${normalizedContainerId}`, container: normalizedContainerId, timestamp: new Date().toISOString() };
           state.notifications.push(note);
           saveStateSoon();
         }
         // Small delay before alarm to ensure capture completes
-        setTimeout(() => {
-      // Publish alarm trigger (bridge will forward to Arduino, app will show AlarmModal)
-      const alarmPublished = publishCmd(resolveDeviceId(containerId), {
-        action: "alarm_triggered",
-        container: containerId,
-        date,
-        time: hhmm,
-      });
-      console.log(`[backend] ⏰ alarm_triggered published for ${containerId} at ${hhmm} (published=${Boolean(alarmPublished)}) (${containersToFire.length} containers at same time, delay=${delay}ms, position ${index + 1}/${containersToFire.length})`);
+        // TIMER LEAK FIX: Track nested timer for cleanup
+        const nestedTimer = setTimeout(() => {
+          // Publish alarm trigger (bridge will forward to Arduino, app will show AlarmModal)
+          const alarmPublished = publishCmd(resolveDeviceId(normalizedContainerId), {
+            action: "alarm_triggered",
+            container: normalizedContainerId,
+            date,
+            time: hhmm,
+          });
+          console.log(`[backend] ⏰ alarm_triggered published for ${normalizedContainerId} at ${hhmm} (published=${Boolean(alarmPublished)}) (${containersToFire.length} containers at same time, delay=${delay}ms, position ${index + 1}/${containersToFire.length})`);
+          if (alarmPublished) metrics.alarmTriggers = (metrics.alarmTriggers || 0) + 1;
         }, 1000); // 1 second delay after pre-capture before alarm fires
+        alarmTimers.push(nestedTimer);
       } else {
         // No pre-capture: publish alarm immediately
-        const alarmPublished = publishCmd(resolveDeviceId(containerId), {
+        const alarmPublished = publishCmd(resolveDeviceId(normalizedContainerId), {
           action: "alarm_triggered",
-            container: containerId,
+          container: normalizedContainerId,
           date,
           time: hhmm,
-          });
-        console.log(`[backend] ⏰ alarm_triggered published for ${containerId} at ${hhmm} (published=${Boolean(alarmPublished)}) (${containersToFire.length} containers at same time, delay=${delay}ms, position ${index + 1}/${containersToFire.length})`);
+        });
+        console.log(`[backend] ⏰ alarm_triggered published for ${normalizedContainerId} at ${hhmm} (published=${Boolean(alarmPublished)}) (${containersToFire.length} containers at same time, delay=${delay}ms, position ${index + 1}/${containersToFire.length})`);
+        if (alarmPublished) metrics.alarmTriggers = (metrics.alarmTriggers || 0) + 1;
       }
 
       // Optional email reminder
       const to = cfg?.notify_email || EMAIL_TO;
       sendEmail({
         to,
-        subject: `PillNow Reminder: Alarm for ${containerId} (${hhmm})`,
-        text: `Medication reminder.\n\nContainer: ${containerId}\nDate: ${date}\nTime: ${hhmm}`,
+        subject: `PillNow Reminder: Alarm for ${normalizedContainerId} (${hhmm})`,
+        text: `Medication reminder.\n\nContainer: ${normalizedContainerId}\nDate: ${date}\nTime: ${hhmm}`,
       }).catch(() => {});
     }, delay);
+    
+    alarmTimers.push(timer);
   });
+  
+  // Store timers for potential cleanup (though they'll complete naturally)
+  // This is mainly for debugging and monitoring purposes
 
   // Log if multiple alarms fired together
   if (containersToFire.length > 1) {

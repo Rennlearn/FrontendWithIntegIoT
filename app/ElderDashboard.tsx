@@ -305,8 +305,19 @@ const ElderDashboard = () => {
         </TouchableOpacity>
       </View>
 
+      {/* Pill Detection Camera Button */}
+      <View style={[styles.buttonContainer, styles.firstButtonContainer]}>
+        <TouchableOpacity 
+          style={[styles.dashboardButton, { backgroundColor: theme.primary }]}
+          onPress={() => router.push('/PillDetectionCamera')}
+        >
+          <Ionicons name="camera" size={22} color={theme.card} />
+          <Text style={[styles.buttonText, { color: theme.card }]}>PILL DETECTION</Text>
+        </TouchableOpacity>
+      </View>
+
       {/* Monitor & Manage Button */}
-      <View style={styles.buttonContainer}>
+      <View style={[styles.buttonContainer, styles.secondButtonContainer]}>
         <TouchableOpacity 
           style={[styles.dashboardButton, { backgroundColor: theme.secondary }]}
           onPress={() => router.push('/MonitorManageScreen')}
@@ -408,6 +419,12 @@ const styles = StyleSheet.create({
   buttonContainer: {
     paddingHorizontal: 16,
     gap: 10,
+  },
+  firstButtonContainer: {
+    marginBottom: 8,
+  },
+  secondButtonContainer: {
+    marginTop: 16,
   },
   dashboardButton: {
     flexDirection: 'row',
