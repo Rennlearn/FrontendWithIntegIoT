@@ -17,15 +17,15 @@ static const char* WIFI_SSID = "YOUR_WIFI_SSID";      // <-- set this to your Wi
 static const char* WIFI_PASS = "YOUR_WIFI_PASSWORD";  // <-- set this to your WiFi password
 
 // IMPORTANT: Use your Mac's current LAN IP so ESP32-CAM can reach it.
-// Mac LAN IP (en0): 10.165.11.91 (Auto-config service will update this via MQTT if IP changes)
-static const char* MQTT_HOST = "10.165.11.91";    // Mosquitto/Broker host
+// Mac LAN IP (en0): 10.129.153.91 (Auto-config service will update this via MQTT if IP changes)
+static const char* MQTT_HOST = "10.129.153.91";    // Mosquitto/Broker host
 static const uint16_t MQTT_PORT = 1883;
 
 // Node backend (uploads to /ingest/:deviceId/:container)
-static const char* BACKEND_HOST = "10.165.11.91"; // Node backend host
+static const char* BACKEND_HOST = "10.129.153.91"; // Node backend host
 static const uint16_t BACKEND_PORT = 5001;         // Node backend port (avoid AirTunes conflict)
 
-static const char* DEVICE_ID = "container2";         // Unique per ESP32-CAM: container1|container2|container3
+static const char* DEVICE_ID = "container1";         // Unique per ESP32-CAM: container1|container2|container3
 
 // =================================================
 
@@ -247,6 +247,20 @@ static void ensureMqtt() {
   // Quick TCP reachability test to help diagnose network issues
   if (!testBrokerReachability()) {
     Serial.println("MQTT broker not reachable via TCP. Check broker IP/port and LAN/firewall.");
+    // If stored IP is unreachable and differs from compile-time, fall back to compile-time IP
+    String compileTimeMqttHost = String(MQTT_HOST);
+    if (cfgMqttHost != compileTimeMqttHost) {
+      Serial.println("⚠️ Stored IP unreachable - falling back to compile-time IP");
+      Serial.print("   Stored: "); Serial.println(cfgMqttHost);
+      Serial.print("   Compile-time: "); Serial.println(compileTimeMqttHost);
+      // Clear stored IP and use compile-time
+      prefs.remove("mqtt_host");
+      prefs.remove("backend_host");
+      cfgMqttHost = compileTimeMqttHost;
+      cfgBackendHost = String(BACKEND_HOST);
+      mqttClient.setServer(cfgMqttHost.c_str(), cfgMqttPort);
+      Serial.println("🔄 Switched to compile-time IP, retrying connection...");
+    }
   }
   String clientId = String("esp32cam-") + DEVICE_ID + String("-") + String((uint32_t)ESP.getEfuseMac(), HEX);
   Serial.print("MQTT Client ID: "); Serial.println(clientId);
@@ -283,6 +297,28 @@ static void ensureMqtt() {
   }
   Serial.println();
   Serial.println("❌ MQTT connection FAILED after 10 retries");
+  // If still failed and using stored IP different from compile-time, try compile-time IP one more time
+  String compileTimeMqttHost = String(MQTT_HOST);
+  if (cfgMqttHost != compileTimeMqttHost && retries >= 10) {
+    Serial.println("🔄 Last resort: Trying compile-time IP after stored IP failed");
+    prefs.remove("mqtt_host");
+    prefs.remove("backend_host");
+    cfgMqttHost = compileTimeMqttHost;
+    cfgBackendHost = String(BACKEND_HOST);
+    mqttClient.setServer(cfgMqttHost.c_str(), cfgMqttPort);
+    Serial.print("   Now trying: "); Serial.print(cfgMqttHost); Serial.print(":"); Serial.println(cfgMqttPort);
+    // Try one more connection attempt
+    if (mqttClient.connect(clientId.c_str())) {
+      Serial.println("✅ MQTT connected with compile-time IP!");
+      mqttClient.subscribe(topicCmd.c_str());
+      mqttClient.subscribe(topicConfig.c_str());
+      char statusBuf[256];
+      snprintf(statusBuf, sizeof(statusBuf), "{\"state\":\"online\",\"mqtt_host\":\"%s\",\"mqtt_port\":%u,\"backend_host\":\"%s\",\"backend_port\":%u}",
+               cfgMqttHost.c_str(), cfgMqttPort, cfgBackendHost.c_str(), cfgBackendPort);
+      mqttClient.publish(topicStatus.c_str(), statusBuf);
+      return;
+    }
+  }
 }
 
 static bool testBrokerReachability() {
@@ -348,6 +384,29 @@ static void handleMqttMessage(char* topic, byte* payload, unsigned int length) {
     long newMqttPortL = parseNumber("mqtt_port");
     String newBackendHost = parseQuoted("backend_host");
     long newBackendPortL = parseNumber("backend_port");
+
+    // CRITICAL: Validate that new IP is reachable before accepting config
+    if (newMqttHost.length() > 0 && newMqttHost != cfgMqttHost) {
+      Serial.print("🔍 Validating new IP before accepting: ");
+      Serial.println(newMqttHost);
+      WiFiClient testClient;
+      uint16_t testPort = (newMqttPortL > 0) ? (uint16_t)newMqttPortL : 1883;
+      bool reachable = testClient.connect(newMqttHost.c_str(), testPort);
+      testClient.stop();
+      
+      if (!reachable) {
+        Serial.print("❌ New IP ");
+        Serial.print(newMqttHost);
+        Serial.println(" is NOT reachable - REJECTING config update");
+        Serial.println("   Keeping current working IP configuration");
+        // Don't accept this config - return early
+        return;
+      } else {
+        Serial.print("✅ New IP ");
+        Serial.print(newMqttHost);
+        Serial.println(" is reachable - accepting config update");
+      }
+    }
 
     bool changed = false;
     if (newMqttHost.length() > 0 && newMqttHost != cfgMqttHost) {

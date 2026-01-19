@@ -6,7 +6,7 @@
 // Backend URL is centralized in src/config.ts to provide a safe fallback when
 // EXPO_PUBLIC_BACKEND_URL is not set on the device. This prevents capture
 // triggers from silently failing when the env var is missing.
-import { BACKEND_URL } from '@/config';
+import { BACKEND_URL, getBackendUrl } from '@/config';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 // Basic validation and a helpful log to aid debugging on devices/emulators
@@ -40,13 +40,9 @@ class VerificationService {
    * @returns Promise with success status
    */
   async getBackendUrl(): Promise<string> {
-    try {
-      const override = await AsyncStorage.getItem('backend_url_override');
-      if (override && String(override).trim()) return String(override).trim();
-    } catch (e) {
-      // ignore and fallback
-    }
-    return BACKEND_URL;
+    // CRITICAL: Use getBackendUrl() from config.ts which rejects invalid IPs
+    // This ensures we never use old/invalid IPs like 10.128.151.91
+    return await getBackendUrl();
   }
 
   async triggerCapture(containerId: string, pillConfig: { count?: number; label?: string }, retryCount: number = 0): Promise<{ ok: boolean; message: string }> {

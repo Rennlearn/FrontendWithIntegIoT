@@ -659,45 +659,74 @@ app.get("/test", (_req, res) => res.json({ ok: true, mqtt: mqttClient.connected,
  */
 app.get("/current-ip", (req, res) => {
   try {
-    const os = require('os');
-    const interfaces = os.networkInterfaces();
+    const { execSync } = require('child_process');
     let ip = null;
     
-    // Find the primary network interface (usually en0 on Mac)
-    // Try en0 first (primary WiFi on Mac), then en1, then any en* interface
-    const interfaceNames = Object.keys(interfaces || {});
-    const primaryInterface = interfaceNames.find(name => 
-      name.startsWith('en') && !name.includes('bridge') && !name.includes('loopback')
-    ) || interfaceNames.find(name => name.startsWith('en')) || interfaceNames[0];
+    // Method 1: Try using ifconfig (more reliable on macOS)
+    try {
+      const ifconfigOutput = execSync('ifconfig en0 2>/dev/null || ifconfig en1 2>/dev/null || ifconfig | grep "inet "', { encoding: 'utf8', timeout: 2000 });
+      const ipMatch = ifconfigOutput.match(/inet ([\d.]+)/);
+      if (ipMatch && ipMatch[1] && ipMatch[1] !== '127.0.0.1') {
+        ip = ipMatch[1];
+      }
+    } catch (e) {
+      // ifconfig failed, try next method
+    }
     
-    if (primaryInterface && interfaces[primaryInterface]) {
-      const ifaceList = Array.isArray(interfaces[primaryInterface]) 
-        ? interfaces[primaryInterface] 
-        : [interfaces[primaryInterface]];
-      
-      for (const iface of ifaceList) {
-        // Handle both 'IPv4' and 4 (numeric family code)
-        const isIPv4 = iface.family === 'IPv4' || iface.family === 4;
-        if (isIPv4 && !iface.internal) {
-          ip = iface.address;
-          break;
+    // Method 2: Try using os.networkInterfaces() with better error handling
+    if (!ip) {
+      try {
+        const os = require('os');
+        const interfaces = os.networkInterfaces();
+        if (interfaces) {
+          const interfaceNames = Object.keys(interfaces);
+          
+          // Try en0 first (primary WiFi on Mac), then en1, then any en* interface
+          const primaryInterface = interfaceNames.find(name => 
+            name.startsWith('en') && !name.includes('bridge') && !name.includes('loopback')
+          ) || interfaceNames.find(name => name.startsWith('en')) || interfaceNames[0];
+          
+          if (primaryInterface && interfaces[primaryInterface]) {
+            const ifaceList = Array.isArray(interfaces[primaryInterface]) 
+              ? interfaces[primaryInterface] 
+              : [interfaces[primaryInterface]];
+            
+            for (const iface of ifaceList) {
+              const isIPv4 = iface.family === 'IPv4' || iface.family === 4;
+              if (isIPv4 && !iface.internal) {
+                ip = iface.address;
+                break;
+              }
+            }
+          }
+          
+          // Fallback: try all interfaces if primary didn't work
+          if (!ip) {
+            for (const name of interfaceNames) {
+              if (name.includes('loopback') || name.includes('bridge')) continue;
+              const ifaceList = Array.isArray(interfaces[name]) ? interfaces[name] : [interfaces[name]];
+              for (const iface of ifaceList) {
+                const isIPv4 = iface.family === 'IPv4' || iface.family === 4;
+                if (isIPv4 && !iface.internal) {
+                  ip = iface.address;
+                  break;
+                }
+              }
+              if (ip) break;
+            }
+          }
         }
+      } catch (e) {
+        // os.networkInterfaces() failed, continue to next method
       }
     }
     
-    // Fallback: try all interfaces if primary didn't work
+    // Method 3: Try to get from request connection (last resort)
     if (!ip) {
-      for (const name of interfaceNames) {
-        if (name.includes('loopback') || name.includes('bridge')) continue;
-        const ifaceList = Array.isArray(interfaces[name]) ? interfaces[name] : [interfaces[name]];
-        for (const iface of ifaceList) {
-          const isIPv4 = iface.family === 'IPv4' || iface.family === 4;
-          if (isIPv4 && !iface.internal) {
-            ip = iface.address;
-            break;
-          }
-        }
-        if (ip) break;
+      const reqIp = req.connection?.remoteAddress || req.socket?.remoteAddress || req.ip;
+      if (reqIp && reqIp !== '127.0.0.1' && reqIp !== '::1' && !reqIp.startsWith('::ffff:')) {
+        // Remove IPv6 prefix if present
+        ip = reqIp.replace('::ffff:', '');
       }
     }
     
@@ -709,18 +738,10 @@ app.get("/current-ip", (req, res) => {
         port: PORT 
       });
     } else {
-      // Last resort: try to get from req connection (might be localhost though)
-      const reqIp = req.connection?.remoteAddress || req.socket?.remoteAddress || req.ip;
-      if (reqIp && reqIp !== '127.0.0.1' && reqIp !== '::1') {
-        return res.json({ 
-          ok: true, 
-          ip: reqIp, 
-          backend_url: `http://${reqIp}:${PORT}`,
-          port: PORT,
-          note: 'Using request IP (may not be accurate)'
-        });
-      }
-      return res.status(500).json({ ok: false, message: 'Could not detect IP address', interfaces: interfaceNames });
+      return res.status(500).json({ 
+        ok: false, 
+        message: 'Could not detect IP address. Please set backend URL manually in app settings.' 
+      });
     }
   } catch (e) {
     return res.status(500).json({ ok: false, message: String(e?.message || e) });

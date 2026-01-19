@@ -11,7 +11,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { jwtDecode } from 'jwt-decode';
 import BluetoothService from '@/services/BluetoothService';
 import verificationService, { VerificationResult } from '@/services/verificationService';
-import { BACKEND_URL, testBackendReachable } from '@/config';
+import { BACKEND_URL, testBackendReachable, getBackendUrl } from '@/config';
 import { updateScheduleCache, initializeScheduleCache, syncOfflineUpdates } from '@/services/scheduleStatusService';
 import { alarmTriggerTracker } from '@/services/alarmTriggerTracker';
 
@@ -53,6 +53,9 @@ const MonitorManageScreen = () => {
   const [backendReachable, setBackendReachable] = useState<boolean | null>(null);
   const [backendModalVisible, setBackendModalVisible] = useState(false);
   const [backendInput, setBackendInput] = useState('');
+  // Track if user manually set the override (prevents auto-update from overwriting)
+  const [isManualOverride, setIsManualOverride] = useState<boolean>(false);
+  const manualOverrideRef = useRef<boolean>(false);
   
   // Alarm modal state - REMOVED: Alarm modals are now handled globally by GlobalAlarmHandler
   // These state variables are no longer used (ENABLE_LOCAL_ALARM_HANDLING = false)
@@ -1145,141 +1148,216 @@ const MonitorManageScreen = () => {
     let consecutiveUnreachable = 0;
 
     const autoUpdateBackendUrl = async () => {
+      // DISABLED: Auto-update is disabled to prevent using old IPs
+      // The app will ALWAYS use the default BACKEND_URL (10.129.153.91:5001)
+      // This ensures the app never connects to the old IP (10.128.151.91:5001)
       if (!mounted) return;
       
+      // Just test the default URL reachability - don't try to auto-update
       try {
-        // Try to get current IP from backend (if reachable)
-        // First try with current override or default
-        const currentUrl = backendOverride || BACKEND_URL;
-        
-        try {
-          const controller = new AbortController();
-          const timeoutId = setTimeout(() => controller.abort(), 3000);
-          const response = await fetch(`${currentUrl}/current-ip`, {
-            method: 'GET',
-            headers: { 'Content-Type': 'application/json' },
-            signal: controller.signal,
-          });
-          clearTimeout(timeoutId);
-          
-          if (response.ok) {
-            const data = await response.json();
-            if (data.ok && data.backend_url) {
-              const newBackendUrl = String(data.backend_url);
-              const newIp = data.ip;
-              
-              // Only update if IP actually changed
-              if (newIp !== lastKnownIp) {
-                console.log(`[MonitorManageScreen] 🔄 IP changed: ${lastKnownIp || 'unknown'} -> ${newIp}`);
-                console.log(`[MonitorManageScreen] 🔄 Auto-updating backend URL to: ${newBackendUrl}`);
-                
-                // Auto-update the override
-                await AsyncStorage.setItem('backend_url_override', newBackendUrl);
-                setBackendOverride(newBackendUrl);
-                lastKnownIp = newIp;
-                
-                // Test reachability with new URL
-                const reachable = await testBackendReachable(3000);
-                setBackendReachable(reachable);
-                
-                if (reachable) {
-                  console.log(`[MonitorManageScreen] ✅ Backend URL auto-updated and reachable`);
-                } else {
-                  console.warn(`[MonitorManageScreen] ⚠️ Backend URL updated but not reachable yet`);
-                }
-              }
-            }
-          }
-        } catch (fetchError: any) {
-          // Backend not reachable with current URL, try default
-          if (currentUrl !== BACKEND_URL) {
-            try {
-              const fallbackController = new AbortController();
-              const fallbackTimeoutId = setTimeout(() => fallbackController.abort(), 3000);
-              const fallbackResponse = await fetch(`${BACKEND_URL}/current-ip`, {
-                method: 'GET',
-                headers: { 'Content-Type': 'application/json' },
-                signal: fallbackController.signal,
-              });
-              clearTimeout(fallbackTimeoutId);
-              
-              if (fallbackResponse.ok) {
-                const data = await fallbackResponse.json();
-                if (data.ok && data.backend_url) {
-                  const newBackendUrl = String(data.backend_url);
-                  const newIp = data.ip;
-                  
-                  if (newIp !== lastKnownIp) {
-                    console.log(`[MonitorManageScreen] 🔄 IP detected via fallback: ${newIp}`);
-                    await AsyncStorage.setItem('backend_url_override', newBackendUrl);
-                    setBackendOverride(newBackendUrl);
-                    lastKnownIp = newIp;
-                    const reachable = await testBackendReachable(3000);
-                    setBackendReachable(reachable);
-                  }
-                }
-              }
-            } catch (fallbackError) {
-              // Both failed, backend might be down or network issue
-              console.warn('[MonitorManageScreen] Could not reach backend to get current IP:', fetchError?.message || fetchError);
-              // Don't update reachability here - let testBackendReachable handle it
-            }
-          } else {
-            // Current URL is already the default, backend might be down
-            console.warn('[MonitorManageScreen] Backend not reachable at default URL');
-          }
+        const reachable = await testBackendReachable(3000);
+        setBackendReachable(reachable);
+        if (reachable) {
+          console.log(`[MonitorManageScreen] ✅ Backend is reachable at default URL: ${BACKEND_URL}`);
+        } else {
+          console.warn(`[MonitorManageScreen] ⚠️ Backend not reachable at default URL: ${BACKEND_URL}`);
         }
       } catch (e) {
-        console.warn('[MonitorManageScreen] Auto-update error:', e);
+        console.warn('[MonitorManageScreen] Error testing backend reachability:', e);
       }
     };
 
     // Initial load
     const load = async () => {
       try {
-        const override = await AsyncStorage.getItem('backend_url_override');
-        if (!mounted) return;
-        setBackendOverride(override);
-        
-        // First, test reachability with current URL (override or default)
-        const initialReachable = await testBackendReachable(5000); // Longer timeout for initial check
-        if (!mounted) return;
-        setBackendReachable(initialReachable);
-        consecutiveUnreachable = initialReachable ? 0 : (consecutiveUnreachable + 1);
-
-        // If we have a saved override but it's unreachable, automatically clear it so we can fall back
-        // to the default BACKEND_URL (which is usually the current Mac IP in dev).
-        if (!initialReachable && override && String(override).trim()) {
-          console.warn(`[MonitorManageScreen] Backend override unreachable (${override}). Auto-clearing override to fall back to default.`);
-          try {
-            await AsyncStorage.removeItem('backend_url_override');
-            if (!mounted) return;
+        // FORCE CLEAR: Remove ALL overrides on startup, especially invalid IPs
+        // This ensures the app ALWAYS uses the current Mac IP (10.129.153.91)
+        try {
+          const override = await AsyncStorage.getItem('backend_url_override');
+          if (override) {
+            const trimmedOverride = String(override).trim();
+            
+            // CRITICAL: Check for invalid IPs first and clear immediately
+            const invalidIPs = ['10.128.151.91', '10.165.11.91']; // Known invalid/old IPs
+            const containsInvalidIP = invalidIPs.some(invalidIP => trimmedOverride.includes(invalidIP));
+            
+            if (containsInvalidIP) {
+              console.warn(`[MonitorManageScreen] 🚨 FORCE CLEAR INVALID IP: Removing override with invalid IP (${trimmedOverride})`);
+              console.log(`[MonitorManageScreen] ✅ Will use default URL: ${BACKEND_URL}`);
+            } else {
+              // Clear ALL overrides - force using default BACKEND_URL
+              console.log(`[MonitorManageScreen] 🧹 FORCE CLEAR ALL: Removing stored override (${trimmedOverride}) to use default URL (${BACKEND_URL})`);
+            }
+            
+            await AsyncStorage.multiRemove(['backend_url_override', 'backend_url_manual_override']);
+            // Reset state immediately
+            manualOverrideRef.current = false;
+            setIsManualOverride(false);
             setBackendOverride(null);
-          } catch (e) {
-            console.warn('[MonitorManageScreen] Failed to auto-clear backend override:', e);
+            
+            // Verify it's cleared - retry if needed
+            const verify = await AsyncStorage.getItem('backend_url_override');
+            if (verify) {
+              console.warn(`[MonitorManageScreen] ⚠️ Override still exists, forcing removal again...`);
+              await AsyncStorage.multiRemove(['backend_url_override', 'backend_url_manual_override']);
+              await new Promise(resolve => setTimeout(resolve, 100));
+              // Final verification
+              const verify2 = await AsyncStorage.getItem('backend_url_override');
+              if (verify2) {
+                console.error(`[MonitorManageScreen] ❌ Failed to clear override after multiple attempts!`);
+                // Last resort: try one more time
+                await new Promise(resolve => setTimeout(resolve, 200));
+                await AsyncStorage.multiRemove(['backend_url_override', 'backend_url_manual_override']);
+              }
+            }
           }
-          // Re-test after clearing override
-          const reachableAfterClear = await testBackendReachable(5000);
-          if (!mounted) return;
-          setBackendReachable(reachableAfterClear);
-          consecutiveUnreachable = reachableAfterClear ? 0 : (consecutiveUnreachable + 1);
+        } catch (e) {
+          console.warn('[MonitorManageScreen] Error during force clear:', e);
         }
         
-        // If reachable, try to get current IP and auto-update
-        if (initialReachable) {
-          await autoUpdateBackendUrl();
-          // Test again after update
-        const reachable = await testBackendReachable(3000);
+        // Now check what's left (should be nothing after force clear)
+        // CRITICAL: Double-check and clear invalid IPs one more time before using
+        let override = await AsyncStorage.getItem('backend_url_override');
+        if (override) {
+          const trimmedOverride = String(override).trim();
+          const invalidIPs = ['10.128.151.91', '10.165.11.91'];
+          const containsInvalidIP = invalidIPs.some(invalidIP => trimmedOverride.includes(invalidIP));
+          
+          if (containsInvalidIP) {
+            console.warn(`[MonitorManageScreen] 🚨 FINAL CLEAR: Invalid IP still found (${trimmedOverride}). Force clearing one more time.`);
+            await AsyncStorage.multiRemove(['backend_url_override', 'backend_url_manual_override']);
+            await new Promise(resolve => setTimeout(resolve, 50));
+            override = null; // Clear the local variable
+            manualOverrideRef.current = false;
+            setIsManualOverride(false);
+            setBackendOverride(null);
+          }
+        }
+        
+        const isManual = await AsyncStorage.getItem('backend_url_manual_override');
+        const isManualBool = isManual === 'true';
+        manualOverrideRef.current = isManualBool;
         if (!mounted) return;
-        setBackendReachable(reachable);
-        } else {
-          // If not reachable, try to auto-update anyway (might discover new IP)
-          console.log('[MonitorManageScreen] Backend not reachable, attempting auto-update to discover new IP...');
-          await autoUpdateBackendUrl();
-          // Test again after update attempt
-          const reachable = await testBackendReachable(5000);
+        
+        // If override exists and is valid, test it first
+        if (override && String(override).trim()) {
+          const trimmedOverride = String(override).trim();
+          console.log(`[MonitorManageScreen] Found stored override: ${trimmedOverride} (manual: ${isManualBool})`);
+          
+          // CRITICAL: Final check - reject invalid IPs one more time
+          const invalidIPs = ['10.128.151.91', '10.165.11.91']; // Known invalid/old IPs (10.129.153.91 is the current correct IP)
+          const containsInvalidIP = invalidIPs.some(invalidIP => trimmedOverride.includes(invalidIP));
+          
+          if (containsInvalidIP) {
+            console.warn(`[MonitorManageScreen] 🚨 REJECTING INVALID IP: Found invalid IP in override (${trimmedOverride}). Clearing and using default.`);
+            await AsyncStorage.multiRemove(['backend_url_override', 'backend_url_manual_override']);
+            manualOverrideRef.current = false;
+            setIsManualOverride(false);
+            setBackendOverride(null);
+            const defaultReachable = await testBackendReachable(5000);
+            if (!mounted) return;
+            setBackendReachable(defaultReachable);
+            consecutiveUnreachable = defaultReachable ? 0 : 1;
+            if (defaultReachable) {
+              await autoUpdateBackendUrl();
+            }
+            return;
+          }
+          
+          // Check if override matches the current default - if so, clear it to use default
+          if (trimmedOverride === BACKEND_URL) {
+            console.log(`[MonitorManageScreen] Override matches default URL, clearing to use default directly`);
+            await AsyncStorage.multiRemove(['backend_url_override', 'backend_url_manual_override']);
+            manualOverrideRef.current = false;
+            setIsManualOverride(false);
+            setBackendOverride(null);
+            const defaultReachable = await testBackendReachable(5000);
+            if (!mounted) return;
+            setBackendReachable(defaultReachable);
+            consecutiveUnreachable = defaultReachable ? 0 : 1;
+            if (defaultReachable) {
+              await autoUpdateBackendUrl();
+            }
+            return;
+          }
+          
+          setBackendOverride(trimmedOverride);
+          setIsManualOverride(isManualBool);
+          
+          // Test if override is reachable - if not, clear it immediately
+          const overrideReachable = await testBackendReachable(3000);
           if (!mounted) return;
-          setBackendReachable(reachable);
+          
+          if (!overrideReachable) {
+            console.warn(`[MonitorManageScreen] ⚠️ Stored override (${override}) is unreachable. Clearing immediately.`);
+            try {
+              // Force clear all override-related storage using multiRemove for atomicity
+              await AsyncStorage.multiRemove(['backend_url_override', 'backend_url_manual_override']);
+              manualOverrideRef.current = false;
+              setIsManualOverride(false);
+              setBackendOverride(null);
+              
+              // Small delay to ensure AsyncStorage is fully cleared
+              await new Promise(resolve => setTimeout(resolve, 200));
+              
+              // Verify override is actually cleared
+              const verifyOverride = await AsyncStorage.getItem('backend_url_override');
+              if (verifyOverride) {
+                console.warn(`[MonitorManageScreen] ⚠️ Override still exists after clear (${verifyOverride}), forcing removal...`);
+                await AsyncStorage.multiRemove(['backend_url_override', 'backend_url_manual_override']);
+                await new Promise(resolve => setTimeout(resolve, 100));
+              }
+              
+              // Test default URL after clearing - use BACKEND_URL directly
+              console.log(`[MonitorManageScreen] Testing default URL: ${BACKEND_URL}`);
+              const defaultReachable = await testBackendReachable(5000);
+              if (!mounted) return;
+              setBackendReachable(defaultReachable);
+              consecutiveUnreachable = defaultReachable ? 0 : 1;
+              console.log(`[MonitorManageScreen] ✅ Cleared unreachable override. Default URL (${BACKEND_URL}) reachable: ${defaultReachable}`);
+              
+              // If default is reachable, trigger auto-update to get current IP
+              if (defaultReachable) {
+                await autoUpdateBackendUrl();
+              }
+            } catch (e) {
+              console.warn('[MonitorManageScreen] Failed to clear unreachable override:', e);
+              setBackendReachable(false);
+              consecutiveUnreachable = 1;
+            }
+          } else {
+            // Override is reachable, use it
+            setBackendReachable(true);
+            consecutiveUnreachable = 0;
+            if (isManualBool) {
+              console.log(`[MonitorManageScreen] 📌 Manual override active and reachable - auto-update disabled`);
+            }
+          }
+        } else {
+          // No override, test default URL
+          setBackendOverride(null);
+          setIsManualOverride(false);
+          const defaultReachable = await testBackendReachable(5000);
+          if (!mounted) return;
+          setBackendReachable(defaultReachable);
+          consecutiveUnreachable = defaultReachable ? 0 : 1;
+          
+          // If reachable, try to get current IP and auto-update
+          if (defaultReachable) {
+            await autoUpdateBackendUrl();
+            // Test again after update
+            const reachableAfterUpdate = await testBackendReachable(3000);
+            if (!mounted) return;
+            setBackendReachable(reachableAfterUpdate);
+          } else {
+            // If not reachable, try to auto-update anyway (might discover new IP)
+            console.log('[MonitorManageScreen] Backend not reachable, attempting auto-update to discover new IP...');
+            await autoUpdateBackendUrl();
+            // Test again after update attempt
+            const reachableAfterUpdate = await testBackendReachable(5000);
+            if (!mounted) return;
+            setBackendReachable(reachableAfterUpdate);
+          }
         }
       } catch (e) {
         console.warn('[MonitorManageScreen] Error during initial load:', e);
@@ -1299,18 +1377,23 @@ const MonitorManageScreen = () => {
         setBackendReachable(reachable);
 
         // If override exists but we've been unreachable repeatedly, clear override once to recover automatically
+        // Even if it's a manual override, if it's unreachable for too long, clear it
         if (!reachable) {
           consecutiveUnreachable += 1;
         } else {
           consecutiveUnreachable = 0;
         }
-        if (!reachable && backendOverride && consecutiveUnreachable >= 2) {
-          console.warn(`[MonitorManageScreen] Backend override still unreachable after ${consecutiveUnreachable} checks. Auto-clearing override.`);
+        if (!reachable && backendOverride && consecutiveUnreachable >= 3) {
+          console.warn(`[MonitorManageScreen] Backend override still unreachable after ${consecutiveUnreachable} checks. Auto-clearing override (including manual override).`);
           try {
             await AsyncStorage.removeItem('backend_url_override');
+            await AsyncStorage.removeItem('backend_url_manual_override');
+            manualOverrideRef.current = false;
+            setIsManualOverride(false);
             if (!mounted) return;
             setBackendOverride(null);
             consecutiveUnreachable = 0;
+            console.log(`[MonitorManageScreen] ✅ Cleared unreachable override - will use default URL: ${BACKEND_URL}`);
           } catch (e) {
             console.warn('[MonitorManageScreen] Failed to auto-clear backend override (poll):', e);
           }
@@ -1328,26 +1411,97 @@ const MonitorManageScreen = () => {
 
   const saveBackendOverride = async (url: string | null) => {
     try {
-      if (url && url.trim()) {
-        await AsyncStorage.setItem('backend_url_override', url.trim());
-        setBackendOverride(url.trim());
-      } else {
+      if (!url || !url.trim()) {
+        // Clear override if empty
         await AsyncStorage.removeItem('backend_url_override');
         setBackendOverride(null);
+        setBackendReachable(await testBackendReachable(3000));
+        setBackendModalVisible(false);
+        return;
       }
+
+      let trimmedUrl = url.trim();
+      
+      // Remove trailing slashes
+      trimmedUrl = trimmedUrl.replace(/\/+$/, '');
+      
+      // Basic URL validation
+      if (!trimmedUrl.startsWith('http://') && !trimmedUrl.startsWith('https://')) {
+        Alert.alert('Invalid URL', 'Backend URL must start with http:// or https://');
+        return;
+      }
+      
+      // Convert HTTPS to HTTP (backend doesn't support HTTPS)
+      if (trimmedUrl.startsWith('https://')) {
+        trimmedUrl = trimmedUrl.replace('https://', 'http://');
+        Alert.alert(
+          'HTTPS Not Supported',
+          'The backend server only supports HTTP, not HTTPS. Converting to HTTP automatically.',
+          [{ text: 'OK' }]
+        );
+      }
+      
+      // If the URL matches the default (after normalization), clear override to use default
+      if (trimmedUrl === BACKEND_URL) {
+        console.log(`[MonitorManageScreen] Input URL matches default, clearing override to use default directly`);
+        await AsyncStorage.multiRemove(['backend_url_override', 'backend_url_manual_override']);
+        setBackendOverride(null);
+        setIsManualOverride(false);
+        manualOverrideRef.current = false;
+        const reachable = await testBackendReachable(3000);
+        setBackendReachable(reachable);
+        setBackendModalVisible(false);
+        Alert.alert('Using Default URL', `The URL you entered matches the default (${BACKEND_URL}). The override has been cleared and the app will use the default URL.`);
+        return;
+      }
+
+      // Save the override
+      await AsyncStorage.setItem('backend_url_override', trimmedUrl);
+      // Mark as manually set to prevent auto-update from overwriting
+      await AsyncStorage.setItem('backend_url_manual_override', 'true');
+      manualOverrideRef.current = true;
+      setIsManualOverride(true);
+      setBackendOverride(trimmedUrl);
+      
+      console.log(`[MonitorManageScreen] 💾 Manually saved backend URL: ${trimmedUrl}`);
+      
+      // Test if the new URL is reachable
       const reachable = await testBackendReachable(3000);
       setBackendReachable(reachable);
+      
+      if (!reachable) {
+        Alert.alert(
+          'Backend Unreachable',
+          `The backend at ${trimmedUrl} is not reachable. The URL has been saved.\n\nTroubleshooting:\n1. ✅ Backend is running (check Mac terminal)\n2. ⚠️ Device and Mac must be on SAME WiFi network\n3. ⚠️ Try accessing ${trimmedUrl}/test in phone browser\n4. ⚠️ Check Mac firewall settings\n5. ⚠️ If using phone hotspot: Mac must connect to phone's hotspot\n\nTip: The app will auto-retry and update when connection is restored.`,
+          [
+            { text: 'Retry', onPress: async () => {
+              const retryReachable = await testBackendReachable(5000);
+              setBackendReachable(retryReachable);
+              if (!retryReachable) {
+                Alert.alert('Still Unreachable', 'Please check network connectivity and try again.');
+              }
+            }},
+            { text: 'OK' }
+          ]
+        );
+      }
+      
       setBackendModalVisible(false);
     } catch (e) {
-      console.warn('[MonitorManageScreen] Failed to save backend override:', e);
+      console.error('[MonitorManageScreen] Failed to save backend override:', e);
+      Alert.alert('Error', `Failed to save backend URL: ${e instanceof Error ? e.message : String(e)}`);
     }
   };
 
   const clearBackendOverride = async () => {
     try {
       await AsyncStorage.removeItem('backend_url_override');
+      await AsyncStorage.removeItem('backend_url_manual_override');
+      manualOverrideRef.current = false;
+      setIsManualOverride(false);
       setBackendOverride(null);
       setBackendReachable(await testBackendReachable(3000));
+      console.log(`[MonitorManageScreen] 🗑️ Cleared backend override - auto-update will resume`);
     } catch (e) {
       console.warn('[MonitorManageScreen] Failed to clear backend override:', e);
     }
@@ -2548,8 +2702,22 @@ const MonitorManageScreen = () => {
       */}
       <View style={{ alignItems: 'flex-end', marginTop: 10, marginBottom: -10 }}>
         <TouchableOpacity 
-          onPress={() => { 
-            setBackendInput(backendOverride || BACKEND_URL); 
+          onPress={async () => { 
+            // Force clear ALL overrides before opening modal - always use default
+            try {
+              const override = await AsyncStorage.getItem('backend_url_override');
+              if (override) {
+                console.log(`[MonitorManageScreen] 🧹 Clearing ALL overrides before opening modal: ${override}`);
+                await AsyncStorage.multiRemove(['backend_url_override', 'backend_url_manual_override']);
+                setBackendOverride(null);
+                setIsManualOverride(false);
+                manualOverrideRef.current = false;
+              }
+            } catch (e) {
+              console.warn('[MonitorManageScreen] Error clearing override:', e);
+            }
+            // Always use default BACKEND_URL
+            setBackendInput(BACKEND_URL);
             setBackendModalVisible(true); 
           }} 
           style={[styles.backendSettingsButton, { backgroundColor: theme.card }]}
@@ -2570,12 +2738,17 @@ const MonitorManageScreen = () => {
         hardwareAccelerated
         onRequestClose={() => setBackendModalVisible(false)}
       >
-        <View style={[styles.modalOverlay, { zIndex: 5000, elevation: 500 }]}>
-          <View style={[styles.modalContent, { backgroundColor: theme.card, zIndex: 5001, elevation: 501 }]}>
+        <View style={[styles.modalOverlay, { zIndex: 10002, elevation: 1002 }]}>
+          <View style={[styles.modalContent, { backgroundColor: theme.card, zIndex: 10003, elevation: 1003 }]}>
             <Text style={[styles.modalTitle, { color: theme.text }]}>Backend URL Settings</Text>
             <Text style={[styles.modalSubtitle, { color: theme.textSecondary, marginBottom: 16, fontSize: 12 }]}>
-              Current: {backendOverride || BACKEND_URL}
+              Current: {BACKEND_URL}
             </Text>
+            {isManualOverride && (
+              <Text style={[styles.modalSubtitle, { color: theme.primary, marginBottom: 8, fontSize: 11, fontStyle: 'italic' }]}>
+                📌 Manual override active - Auto-update disabled
+              </Text>
+            )}
             <Text style={[styles.modalSubtitle, { color: theme.textSecondary, marginBottom: 12, fontSize: 12 }]}>
               Status: {backendReachable === null ? 'Checking...' : (backendReachable ? '✅ Reachable' : '⚠️ Unreachable')}
             </Text>
@@ -2585,6 +2758,8 @@ const MonitorManageScreen = () => {
               placeholder="http://10.0.0.1:5001"
               style={[styles.input, { color: theme.text, backgroundColor: theme.background }]}
               autoCapitalize="none"
+              editable={true}
+              keyboardType="url"
             />
             <View style={{ flexDirection: 'row', justifyContent: 'space-between', gap: 8, marginTop: 8 }}>
               <TouchableOpacity 
